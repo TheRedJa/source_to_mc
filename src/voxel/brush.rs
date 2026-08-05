@@ -125,7 +125,57 @@ fn depth(solid: &BlockSolid, point: Vec3) -> f64 {
 /// wrong: it turns the removed volume into apparent air, so the hollowing pass
 /// then preserves a spurious second shell around it, and it cannot see that a
 /// voxel on one brush's surface may be buried inside another brush.
+/// Which octants of a voxel the brush covers, as the bitmask
+/// [`crate::voxel::shapes`] fits shapes to.
+///
+/// Sampled at each octant's centre, which is the cheapest test that can tell
+/// a half-height ledge from a full block.
+///
+/// The same whole-cube shortcut [`occupancy`] uses applies here, and matters
+/// just as much: a level's interior is overwhelmingly voxels that are wholly
+/// inside one big brush, and paying eight plane-set tests for each of them
+/// tripled conversion time before this check existed.
+fn octant_mask(solid: &BlockSolid, pos: IVec3) -> u8 {
+    use crate::voxel::shapes::octant;
+    let corner = Vec3::new(pos[0] as f64, pos[1] as f64, pos[2] as f64);
+
+    let depth = depth(solid, corner + Vec3::splat(0.5));
+    if depth <= -VOXEL_HALF_DIAGONAL {
+        return u8::MAX;
+    }
+    if depth >= VOXEL_HALF_DIAGONAL {
+        return 0;
+    }
+
+    let mut mask = 0;
+    for y in [false, true] {
+        for z in [false, true] {
+            for x in [false, true] {
+                let centre = corner
+                    + Vec3::new(
+                        if x { 0.75 } else { 0.25 },
+                        if y { 0.75 } else { 0.25 },
+                        if z { 0.75 } else { 0.25 },
+                    );
+                if solid.contains(centre) {
+                    mask |= octant(x, z, y);
+                }
+            }
+        }
+    }
+    mask
+}
+
 pub fn voxelize(solid: &BlockSolid, config: &Voxelize, mut emit: impl FnMut(IVec3, Option<usize>)) {
+    voxelize_with_shape(solid, config, |pos, side, _| emit(pos, side))
+}
+
+/// As [`voxelize`], also reporting each voxel's octant occupancy mask.
+pub fn voxelize_with_shape(
+    solid: &BlockSolid,
+    config: &Voxelize,
+    mut emit: impl FnMut(IVec3, Option<usize>, u8),
+) {
     if solid.bounds.is_empty() || solid.planes.is_empty() {
         return;
     }
@@ -166,7 +216,7 @@ pub fn voxelize(solid: &BlockSolid, config: &Voxelize, mut emit: impl FnMut(IVec
 
                 if filled {
                     let centre = Vec3::new(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5);
-                    emit(pos, solid.nearest_side(centre));
+                    emit(pos, solid.nearest_side(centre), octant_mask(solid, pos));
                 }
             }
         }
@@ -358,6 +408,86 @@ mod tests {
         let solid = block_box(Vec3::ZERO, Vec3::new(3.0, 3.0, 3.0));
         let config = Voxelize { mode: SampleMode::Exact, ..Voxelize::default() };
         assert_eq!(voxels(&solid, &config).len(), 27);
+    }
+
+    /// The octant mask is what sub-block shape fitting reads, so it has to
+    /// describe the brush rather than the voxel.
+    #[test]
+    fn the_octant_mask_describes_partial_voxels() {
+        // A slab filling the lower half of the voxel at the origin.
+        let slab = block_box(Vec3::ZERO, Vec3::new(1.0, 0.5, 1.0));
+        assert_eq!(octant_mask(&slab, [0, 0, 0]), 0b0000_1111);
+
+        // The upper half.
+        let top = block_box(Vec3::new(0.0, 0.5, 0.0), Vec3::new(1.0, 1.0, 1.0));
+        assert_eq!(octant_mask(&top, [0, 0, 0]), 0b1111_0000);
+
+        // A whole block is every octant; a miss is none.
+        let full = block_box(Vec3::ZERO, Vec3::splat(1.0));
+        assert_eq!(octant_mask(&full, [0, 0, 0]), u8::MAX);
+        assert_eq!(octant_mask(&full, [5, 5, 5]), 0);
+    }
+
+    /// The whole-cube shortcut in `octant_mask` skips sampling entirely for
+    /// voxels clear of every boundary, so it has to agree with sampling on
+    /// every voxel of an awkwardly placed and angled brush.
+    #[test]
+    fn the_mask_shortcut_matches_sampling_everywhere() {
+        use crate::voxel::shapes::octant;
+        let mut solid = block_box(Vec3::new(-2.4, 0.3, 1.15), Vec3::new(5.8, 6.25, 4.4));
+        solid.planes.push(Plane::new(Vec3::new(1.0, 2.0, 3.0).normalized(), 7.0));
+        solid.side_of_plane.push(6);
+
+        for x in -5..9 {
+            for y in -2..9 {
+                for z in -2..7 {
+                    let corner = Vec3::new(x as f64, y as f64, z as f64);
+                    let mut brute = 0u8;
+                    for oy in [false, true] {
+                        for oz in [false, true] {
+                            for ox in [false, true] {
+                                let p = corner
+                                    + Vec3::new(
+                                        if ox { 0.75 } else { 0.25 },
+                                        if oy { 0.75 } else { 0.25 },
+                                        if oz { 0.75 } else { 0.25 },
+                                    );
+                                if solid.contains(p) {
+                                    brute |= octant(ox, oz, oy);
+                                }
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        octant_mask(&solid, [x, y, z]),
+                        brute,
+                        "mask disagrees at [{x},{y},{z}]"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A step in the geometry has to come back as a stair-shaped mask, or
+    /// there is nothing for the fitter to find.
+    #[test]
+    fn a_step_produces_a_stair_mask() {
+        use crate::voxel::shapes::{Facing, Shape, shape_for};
+        // Full at the bottom, plus the upper half of the north (z < 0.5) side.
+        let mut step = block_box(Vec3::ZERO, Vec3::new(1.0, 0.5, 1.0));
+        step.planes.push(Plane::new(Vec3::new(0.0, 0.0, 1.0), 0.5));
+        step.side_of_plane.push(6);
+        // That solid alone is the bottom slab clipped to z < 0.5; the mask of
+        // interest comes from the union with the upper north quarter, which is
+        // what two brushes in a real map produce.
+        let upper = {
+            let mut b = block_box(Vec3::new(0.0, 0.5, 0.0), Vec3::new(1.0, 1.0, 0.5));
+            b.side_of_plane = (0..b.planes.len()).collect();
+            b
+        };
+        let mask = octant_mask(&block_box(Vec3::ZERO, Vec3::new(1.0, 0.5, 1.0)), [0, 0, 0])
+            | octant_mask(&upper, [0, 0, 0]);
+        assert_eq!(shape_for(mask), Shape::Stairs { facing: Facing::North, top: false });
     }
 
     #[test]

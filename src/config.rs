@@ -16,6 +16,7 @@ pub struct Config {
     pub contents: Contents,
     pub materials: Materials,
     pub fill: Fill,
+    pub shapes: Shapes,
     pub displacement: Displacement,
     pub entities: Entities,
     pub output: Output,
@@ -97,6 +98,17 @@ impl Default for Transform {
     }
 }
 
+/// Where a surface's block comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialMode {
+    /// Vanilla blocks only, chosen by rules and average colour.
+    Vanilla,
+    /// Generate a block per material carrying its real Source texture, and
+    /// emit a KubeJS pack registering them. Needs KubeJS installed to paste.
+    Kubejs,
+}
+
 /// What to do with a brush carrying a given contents flag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,6 +158,8 @@ impl Default for Contents {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Materials {
+    /// Vanilla blocks, or generated blocks wearing the map's own textures.
+    pub mode: MaterialMode,
     /// Path to a rules TOML, relative to the config file. Its rules are tested
     /// before the built-in ones, so they win.
     pub rules: Option<String>,
@@ -159,19 +173,34 @@ pub struct Materials {
     pub palette_set: String,
     /// Block used when nothing matches and auto-palette is off.
     pub fallback_block: String,
+    /// Extra game directories searched for `.vmt`/`.vtf` content, alongside
+    /// the map's own game directory and whatever its `gameinfo.txt` mounts.
+    pub game_dirs: Vec<String>,
+    /// Edge length of generated block textures, in pixels. 16 matches vanilla.
+    pub texture_size: u32,
     /// The rules named by `rules`, filled in by [`Config::load`].
     #[serde(skip)]
     pub loaded_rules: crate::palette::rules::Rules,
 }
 
+impl Materials {
+    /// `game_dirs` as paths.
+    pub fn game_dir_paths(&self) -> Vec<std::path::PathBuf> {
+        self.game_dirs.iter().map(std::path::PathBuf::from).collect()
+    }
+}
+
 impl Default for Materials {
     fn default() -> Self {
         Materials {
+            mode: MaterialMode::Vanilla,
             rules: None,
             builtin_rules: true,
             auto_palette: true,
             palette_set: "full".into(),
             fallback_block: "minecraft:stone".into(),
+            game_dirs: Vec::new(),
+            texture_size: 16,
             loaded_rules: Default::default(),
         }
     }
@@ -241,6 +270,24 @@ impl Default for Voxelize {
             fill_threshold: 0.5,
             preserve_thin: true,
         }
+    }
+}
+
+/// Fitting geometry to Minecraft's half-height and stepped blocks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Shapes {
+    /// Emit slabs and stairs where the geometry is half-height or stepped.
+    pub enabled: bool,
+    /// Also register slab and stair variants of generated textured blocks.
+    /// Off by default: it triples the block count and the pack size, and
+    /// KubeJS has to register every one of them at startup.
+    pub kubejs_variants: bool,
+}
+
+impl Default for Shapes {
+    fn default() -> Self {
+        Shapes { enabled: true, kubejs_variants: false }
     }
 }
 

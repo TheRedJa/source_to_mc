@@ -20,6 +20,9 @@ pub struct Conversion {
     /// Brush entities pulled out into their own grids, for classnames
     /// configured as `separate`.
     pub separate: Vec<SeparateEntity>,
+    /// Generated blocks carrying the map's own textures, when
+    /// `[materials] mode = "kubejs"`.
+    pub pack: crate::output::kubejs::Pack,
 }
 
 /// One brush entity converted on its own.
@@ -62,6 +65,10 @@ pub struct Stats {
     pub solids_skipped: usize,
     pub displacements_voxelized: usize,
     pub displacements_skipped: usize,
+    /// Materials that resolved to a generated textured block.
+    pub textures_resolved: usize,
+    /// Voxels emitted as a slab or stair instead of a full cube.
+    pub shapes_fitted: usize,
     pub blocks_before_hollow: usize,
     pub blocks: usize,
     /// Voxel count per block type, for sourcing materials.
@@ -276,16 +283,18 @@ fn voxelize_solids(
     origins: &std::collections::HashMap<usize, Vec3>,
     palette: &Mutex<Palette>,
     skipped: &std::sync::atomic::AtomicUsize,
-) -> VoxelGrid {
+) -> (VoxelGrid, crate::voxel::shapes::MaskGrid) {
+    use crate::voxel::shapes::MaskGrid;
     let skip_sky = config.contents.skip_sky;
+    let want_masks = config.shapes.enabled;
 
     solids
         .par_iter()
-        .fold(VoxelGrid::new, |mut grid, solid| {
+        .fold(|| (VoxelGrid::new(), MaskGrid::new()), |(mut grid, mut masks), solid| {
             let decision = resolver.decide(solid.flags);
             if decision == Decision::Skip {
                 skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return grid;
+                return (grid, masks);
             }
 
             let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
@@ -305,29 +314,104 @@ fn voxelize_solids(
             // A brush whose every side was vetoed contributes nothing.
             if side_blocks.iter().all(Option::is_none) {
                 skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return grid;
+                return (grid, masks);
             }
             let default_block = side_blocks.iter().flatten().copied().next();
 
-            voxelize(&block_solid, &config.output.voxelize, |pos, side| {
-                let block = side
-                    .and_then(|s| side_blocks.get(s).copied().flatten())
-                    .or(default_block);
-                if let Some(block) = block {
-                    grid.set(pos, block);
-                }
-            });
-            grid
+            crate::voxel::brush::voxelize_with_shape(
+                &block_solid,
+                &config.output.voxelize,
+                |pos, side, mask| {
+                    let block = side
+                        .and_then(|s| side_blocks.get(s).copied().flatten())
+                        .or(default_block);
+                    if let Some(block) = block {
+                        grid.set(pos, block);
+                        if want_masks {
+                            masks.add(pos, mask);
+                        }
+                    }
+                },
+            );
+            (grid, masks)
         })
-        .reduce(VoxelGrid::new, |mut a, b| {
-            a.merge(b);
-            a
-        })
+        .reduce(
+            || (VoxelGrid::new(), MaskGrid::new()),
+            |(mut ga, mut ma), (gb, mb)| {
+                ga.merge(gb);
+                ma.merge(mb);
+                (ga, ma)
+            },
+        )
+}
+
+/// Replace full cubes with slabs and stairs wherever the octant mask says the
+/// geometry was really half-height or stepped.
+///
+/// Only blocks that have vanilla slab and stair variants can change; anything
+/// else keeps its full cube. A generated textured block has no variants unless
+/// the pack was told to register them, so this quietly does nothing there
+/// rather than naming a block that does not exist.
+fn fit_shapes(
+    grid: &VoxelGrid,
+    masks: &crate::voxel::shapes::MaskGrid,
+    palette: &mut Palette,
+    pack: &crate::output::kubejs::Pack,
+) -> (VoxelGrid, usize) {
+    use crate::voxel::shapes::{Shape, shape_for};
+
+    // Resolve every (block, shape) pair once. A palette holds a few hundred
+    // entries against millions of voxels, so doing this per voxel would spend
+    // the whole pass formatting strings.
+    let shapes: Vec<Shape> = (0..=u8::MAX).map(shape_for).collect();
+    let mut resolved: std::collections::HashMap<(BlockId, Shape), Option<BlockId>> =
+        std::collections::HashMap::new();
+
+    let mut out = VoxelGrid::new();
+    let mut fitted = 0;
+
+    for (pos, id) in grid.iter() {
+        let shape = shapes[masks.get(pos) as usize];
+        if shape == Shape::Full {
+            out.set(pos, id);
+            continue;
+        }
+
+        let block = match resolved.get(&(id, shape)) {
+            Some(cached) => *cached,
+            None => {
+                let name = palette.name(id).to_string();
+                let block = crate::palette::blocks::shaped(&name, shape.variant())
+                    .map(str::to_string)
+                    .or_else(|| pack.shaped(&name, shape.variant()))
+                    .zip(shape.state())
+                    .map(|(base, state)| palette.intern(&format!("{base}{state}")));
+                resolved.insert((id, shape), block);
+                block
+            }
+        };
+
+        match block {
+            Some(block) => {
+                out.set(pos, block);
+                fitted += 1;
+            }
+            None => out.set(pos, id),
+        }
+    }
+    (out, fitted)
 }
 
 pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let transform = Transform::new(config, map.bounds());
-    let resolver = Resolver::new(config, map.materials())?;
+
+    // Extracting the map's real textures is opt-in; without it the palette
+    // works exactly as before, from rules and average colour.
+    let (pack, extracted) = match config.materials.mode {
+        crate::config::MaterialMode::Kubejs => crate::source::extract::extract(map, config),
+        crate::config::MaterialMode::Vanilla => Default::default(),
+    };
+    let resolver = Resolver::with_textures(config, map.materials(), &pack.ids())?;
 
     let entity_models = entity_models(map, config);
 
@@ -342,7 +426,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let skipped = std::sync::atomic::AtomicUsize::new(0);
 
     let origins = model_origins(&entity_models);
-    let grid = voxelize_solids(
+    let (grid, masks) = voxelize_solids(
         &solids, map, config, &resolver, &transform, &origins, &palette, &skipped,
     );
 
@@ -357,7 +441,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             if solids.is_empty() {
                 return None;
             }
-            let grid = voxelize_solids(
+            let (grid, _) = voxelize_solids(
                 &solids, map, config, &resolver, &transform, &origins, &palette, &skipped,
             );
             (grid.count() > 0).then(|| SeparateEntity {
@@ -410,6 +494,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let displacements_skipped = displacements_skipped.into_inner();
 
     let blocks_before_hollow = grid.count();
+    let mut shapes_fitted = 0;
     let grid = match config.fill.mode {
         FillMode::Solid => grid,
         FillMode::Hollow => shell::hollow(
@@ -419,7 +504,18 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         ),
     };
 
-    let palette = palette.into_inner().unwrap();
+    // Shapes are fitted last, after hollowing: the mask grid outlives the
+    // brushes precisely so this can happen here, on the voxels that survived.
+    let mut palette = palette.into_inner().unwrap();
+    let grid = if config.shapes.enabled && !masks.is_empty() {
+        let (fitted, count) = fit_shapes(&grid, &masks, &mut palette, &pack);
+        shapes_fitted = count;
+        fitted
+    } else {
+        grid
+    };
+
+    let palette = palette;
     let mut block_counts: BTreeMap<String, usize> = BTreeMap::new();
     for (_, id) in grid.iter() {
         *block_counts.entry(palette.name(id).to_string()).or_default() += 1;
@@ -432,6 +528,8 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             solids_skipped: skipped,
             displacements_voxelized: surfaces.len() - displacements_skipped,
             displacements_skipped,
+            textures_resolved: extracted.resolved,
+            shapes_fitted,
             blocks_before_hollow,
             blocks: grid.count(),
             block_counts,
@@ -440,6 +538,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         palette,
         transform,
         separate,
+        pack,
     })
 }
 
@@ -697,6 +796,73 @@ mod tests {
             "untranslated geometry averages {without:.0} blocks from its entity \
              and translated {with:.0}; the translation is doing nothing"
         );
+    }
+
+    /// The failure this guards against is silent: a schematic naming a block
+    /// its pack does not register pastes as a hole in the world, with no
+    /// error anywhere. Every generated id in the palette must be registered.
+    #[test]
+    fn every_generated_block_in_the_palette_is_registered_by_the_pack() {
+        let Some(map) = sample_map() else { return };
+        let mut config = Config::default();
+        config.materials.mode = crate::config::MaterialMode::Kubejs;
+
+        let result = convert(&map, &config).unwrap();
+        if result.pack.is_empty() {
+            return; // no game install to read textures from
+        }
+
+        let script = result.pack.script();
+        let mut generated = 0;
+        for id in 0..result.palette.len() {
+            let name = result.palette.name(id as crate::voxel::grid::BlockId);
+            let Some(_) = name.strip_prefix("kubejs:") else { continue };
+            generated += 1;
+            assert!(
+                script.contains(&format!("event.create('{name}')")),
+                "{name} is in the palette but not registered"
+            );
+        }
+        assert!(generated > 0, "kubejs mode produced no generated blocks");
+    }
+
+    /// Textures must not displace the rules that carry meaning: a grate has
+    /// to stay see-through even though it has a perfectly good texture.
+    #[test]
+    fn named_rules_still_win_over_generated_textures() {
+        let Some(map) = sample_map() else { return };
+        let mut config = Config::default();
+        config.materials.mode = crate::config::MaterialMode::Kubejs;
+
+        let result = convert(&map, &config).unwrap();
+        if result.pack.is_empty() {
+            return;
+        }
+        let resolver = Resolver::with_textures(&config, map.materials(), &result.pack.ids())
+            .unwrap();
+
+        for (index, material) in map.materials().iter().enumerate() {
+            if material.name.contains("grate") || material.name.starts_with("glass/") {
+                let block = resolver.block_for_material(index);
+                assert!(
+                    block.is_some_and(|b| b.starts_with("minecraft:")),
+                    "{} became {block:?} instead of keeping its vanilla block",
+                    material.name
+                );
+            }
+        }
+    }
+
+    /// Vanilla mode must be untouched by any of this.
+    #[test]
+    fn vanilla_mode_generates_nothing() {
+        let Some(map) = sample_map() else { return };
+        let result = convert(&map, &Config::default()).unwrap();
+        assert!(result.pack.is_empty());
+        for id in 0..result.palette.len() {
+            let name = result.palette.name(id as crate::voxel::grid::BlockId);
+            assert!(name.starts_with("minecraft:"), "vanilla mode emitted {name}");
+        }
     }
 
     /// A map with terrain in it, since `az_c4_4` is nearly all interiors.

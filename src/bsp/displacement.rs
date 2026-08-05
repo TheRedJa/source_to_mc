@@ -80,7 +80,7 @@ impl super::Map {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use crate::bsp::Map;
     use std::path::Path;
 

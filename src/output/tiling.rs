@@ -34,6 +34,10 @@ pub struct Manifest {
     /// Brush entities written to their own schematics.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entities: Vec<EntityTile>,
+    /// Blocks these schematics need registered before they will paste. Empty
+    /// unless textures were generated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_blocks: Vec<String>,
     pub block_counts: std::collections::BTreeMap<String, usize>,
 }
 
@@ -118,6 +122,7 @@ pub fn write_tiles(
             bounds_max: [0, 0, 0],
             tiles: Vec::new(),
             entities: Vec::new(),
+            generated_blocks: Vec::new(),
             block_counts,
         });
     };
@@ -197,6 +202,7 @@ pub fn write_tiles(
         bounds_max: max,
         tiles,
         entities: Vec::new(),
+        generated_blocks: Vec::new(),
         block_counts,
     })
 }
@@ -225,6 +231,13 @@ pub fn paste_script(manifest: &Manifest) -> String {
         manifest.tiles.len(),
         manifest.total_blocks
     ));
+    if !manifest.generated_blocks.is_empty() {
+        out.push_str(&format!(
+            "#\n# These schematics use {} generated blocks and will NOT paste\n\
+             # correctly without the `kubejs` folder written next to them.\n",
+            manifest.generated_blocks.len()
+        ));
+    }
     out.push_str(&format!(
         "# Occupies X {}..{}, Y {}..{}, Z {}..{}.\n\n",
         manifest.bounds_min[0],

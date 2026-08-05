@@ -42,6 +42,18 @@ enum Command {
         #[arg(long, conflicts_with_all = ["stubs", "guessed"])]
         json: bool,
     },
+    /// Show which materials have a real Source texture behind them.
+    Textures {
+        map: PathBuf,
+        #[command(flatten)]
+        common: Common,
+        /// Only materials whose texture could not be found.
+        #[arg(long)]
+        missing: bool,
+        /// Emit the report as JSON.
+        #[arg(long, conflicts_with = "missing")]
+        json: bool,
+    },
     /// Voxelize a map and write Sponge v3 schematic tiles.
     Convert {
         map: PathBuf,
@@ -107,6 +119,19 @@ struct ConvertOptions {
     /// Also write a datapack defining a dimension tall enough for the map.
     #[arg(long)]
     emit_dimension: bool,
+    /// Where surface blocks come from. `kubejs` generates a block per material
+    /// carrying its real Source texture, plus a KubeJS pack registering them.
+    #[arg(long, value_enum, default_value_t = Textures::Vanilla)]
+    textures: Textures,
+}
+
+/// Where a surface's block comes from.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Textures {
+    /// Vanilla blocks, chosen by rules and average colour. No mods needed.
+    Vanilla,
+    /// Blocks generated from the map's own textures, registered by KubeJS.
+    Kubejs,
 }
 
 impl ConvertOptions {
@@ -128,6 +153,10 @@ impl ConvertOptions {
         if self.emit_dimension {
             config.output.emit_dimension = true;
         }
+        config.materials.mode = match self.textures {
+            Textures::Vanilla => src2mc::config::MaterialMode::Vanilla,
+            Textures::Kubejs => src2mc::config::MaterialMode::Kubejs,
+        };
     }
 }
 
@@ -158,6 +187,11 @@ struct Common {
     /// Ignore the built-in Half-Life 2 / Entropy: Zero material rules.
     #[arg(long)]
     no_builtin_rules: bool,
+    /// Extra game directory to search for `.vmt`/`.vtf` content; repeatable.
+    /// The map's own game directory and whatever its `gameinfo.txt` mounts are
+    /// searched automatically.
+    #[arg(long = "game-dir")]
+    game_dirs: Vec<PathBuf>,
 }
 
 impl Common {
@@ -182,6 +216,10 @@ impl Common {
         if self.no_builtin_rules {
             config.materials.builtin_rules = false;
         }
+        config
+            .materials
+            .game_dirs
+            .extend(self.game_dirs.iter().map(|p| p.display().to_string()));
         Ok(config)
     }
 }
@@ -194,6 +232,8 @@ fn load(path: &Path) -> Result<Map> {
 struct Converted {
     name: String,
     blocks: usize,
+    /// Generated blocks, so `batch` can merge them into one pack.
+    pack: src2mc::output::kubejs::Pack,
     manifest: tiling::Manifest,
     y_range: src2mc::inspect::YRangeReport,
     origin: [i32; 3],
@@ -202,6 +242,18 @@ struct Converted {
 /// Voxelize one map and write its schematics, manifest, paste script and
 /// entity dump into `out`.
 fn convert_one(map: &Map, config: &Config, out: &Path) -> Result<Converted> {
+    convert_into(map, config, out, true)
+}
+
+/// `write_pack` is false for `batch`, which merges every map's generated
+/// blocks into one pack at the top level instead: a texture shared across a
+/// campaign should be registered once, not once per map.
+fn convert_into(
+    map: &Map,
+    config: &Config,
+    out: &Path,
+    write_pack: bool,
+) -> Result<Converted> {
     eprintln!("converting {} at {} units/block...", map.name, config.scale.units_per_block);
 
     let result = src2mc::convert::convert(map, config)?;
@@ -217,6 +269,19 @@ fn convert_one(map: &Map, config: &Config, out: &Path) -> Result<Converted> {
         "  {} blocks after hollowing (from {})",
         stats.blocks, stats.blocks_before_hollow,
     );
+    if stats.shapes_fitted > 0 {
+        eprintln!(
+            "  {} blocks fitted to slabs or stairs ({:.1}%)",
+            stats.shapes_fitted,
+            100.0 * stats.shapes_fitted as f64 / stats.blocks.max(1) as f64,
+        );
+    }
+    if config.materials.mode == src2mc::config::MaterialMode::Kubejs {
+        eprintln!(
+            "  {} materials carry their own texture",
+            stats.textures_resolved
+        );
+    }
 
     if stats.blocks == 0 {
         eprintln!(
@@ -237,6 +302,32 @@ fn convert_one(map: &Map, config: &Config, out: &Path) -> Result<Converted> {
     )?;
 
     std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+
+    if !result.pack.is_empty() {
+        if write_pack {
+            let written = result.pack.write(out)?;
+            eprintln!(
+                "  {} generated blocks ({} KB of textures) in {}",
+                written.blocks,
+                written.texture_bytes / 1024,
+                written.root.display(),
+            );
+        }
+        manifest.generated_blocks = result
+            .pack
+            .blocks()
+            .flat_map(|b| {
+                let base = b.block_id();
+                let variants = result.pack.has_variants();
+                std::iter::once(base.clone()).chain(
+                    variants
+                        .then(|| [format!("{base}_slab"), format!("{base}_stairs")])
+                        .into_iter()
+                        .flatten(),
+                )
+            })
+            .collect();
+    }
 
     manifest.entities = tiling::write_entities(out, &result.separate, &result.palette)?;
     if !manifest.entities.is_empty() {
@@ -262,6 +353,7 @@ fn convert_one(map: &Map, config: &Config, out: &Path) -> Result<Converted> {
     Ok(Converted {
         name: map.name.clone(),
         blocks: stats.blocks,
+        pack: result.pack,
         manifest,
         y_range: inspect::y_range(src2mc::convert::block_bounds(map, &result.transform)),
         origin: config.transform.offset,
@@ -309,7 +401,7 @@ fn batch(
         let mut config = config.clone();
         config.transform.offset = origin;
         let dir = out.join(&map.name);
-        match convert_one(map, &config, &dir) {
+        match convert_into(map, &config, &dir, false) {
             Ok(result) => converted.push(result),
             // One bad map should not lose the rest of a campaign's work.
             Err(error) => {
@@ -320,6 +412,22 @@ fn batch(
     }
 
     std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+
+    // One pack for the whole batch, so a texture shared between maps is
+    // registered once and every map's schematics resolve against it.
+    let mut pack = src2mc::output::kubejs::Pack::default();
+    for result in &mut converted {
+        pack.merge(std::mem::take(&mut result.pack));
+    }
+    if !pack.is_empty() {
+        let written = pack.write(out)?;
+        eprintln!(
+            "{} generated blocks shared across the batch ({} KB of textures) in {}",
+            written.blocks,
+            written.texture_bytes / 1024,
+            written.root.display(),
+        );
+    }
 
     let index: Vec<_> = converted
         .iter()
@@ -410,6 +518,24 @@ fn main() -> Result<()> {
             if stubs {
                 print!("{}", report.stubs());
             } else if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.render());
+            }
+        }
+
+        Command::Textures { map, common, missing, json } => {
+            let config = common.resolve()?;
+            let map = load(&map)?;
+            let mut report = src2mc::source::report::report(
+                &map,
+                config.materials.texture_size,
+                &config.materials.game_dir_paths(),
+            );
+            if missing {
+                report.entries.retain(|e| !e.resolved && e.uses > 0);
+            }
+            if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print!("{}", report.render());

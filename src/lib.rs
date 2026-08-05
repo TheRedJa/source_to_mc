@@ -7,6 +7,7 @@ pub mod geom;
 pub mod inspect;
 pub mod output;
 pub mod palette;
+pub mod source;
 pub mod voxel;
 
 /// Minecraft 1.21.1. Written into every schematic so WorldEdit can convert
