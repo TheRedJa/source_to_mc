@@ -1,0 +1,95 @@
+# src2mc configuration. Every key is optional; anything omitted keeps the
+# default shown here. Pass with: src2mc convert map.bsp -c this-file.toml
+
+[scale]
+# Source units per Minecraft block. 16 is one Hammer grid square, making the
+# 72-unit player 4.5 blocks tall. 32 is closer to vanilla proportions but loses
+# fine trim; 8 doubles the detail and the block count.
+units_per_block = 16.0
+
+[transform]
+# "bounds_min" puts the map's lowest corner at (0, y_base, 0).
+# "map_origin" keeps Source's own origin.
+origin_mode = "bounds_min"
+y_base = 0
+# Extra rotation about the vertical axis, in degrees.
+rotate_yaw = 0.0
+
+[contents]
+# Skip faces flagged as sky rather than building a ceiling over the map.
+skip_sky = true
+# Skip brushes made entirely of nodraw/skip/hint/clip tool textures.
+skip_tool_brushes = true
+
+# What to do with each brush contents flag. Either "skip", "solid" (let the
+# material decide), or a forced block.
+[contents.actions]
+playerclip = "skip"
+monsterclip = "skip"
+areaportal = "skip"
+origin = "skip"
+water = { block = "minecraft:water" }
+slime = { block = "minecraft:water" }
+window = { block = "minecraft:glass" }
+grate = { block = "minecraft:iron_bars" }
+ladder = { block = "minecraft:ladder" }
+
+[materials]
+# Block used when nothing else matches. The rules engine and VTF colour
+# matching are not implemented yet, so at present everything solid uses this.
+fallback_block = "minecraft:stone"
+auto_palette = true
+palette_set = "full"
+# Extra directories searched for .vmt/.vtf content alongside the BSP's own
+# embedded pakfile, e.g. the game's material folders.
+game_dirs = []
+
+[fill]
+# "hollow" keeps only the surface; "solid" fills brush interiors.
+mode = "hollow"
+# How many voxels deep the surface shell is.
+shell_thickness = 1
+# 6 = faces only, 26 = faces, edges and corners.
+shell_neighborhood = 6
+interior_block = "minecraft:stone"
+
+[displacement]
+# Not implemented yet.
+enabled = true
+solidify = 2
+
+[entities]
+# Write entities.json alongside the schematics.
+manifest = true
+# "include" voxelizes brush entities with the world, "skip" leaves them out.
+brush_entities = "include"
+
+[entities.classname_modes]
+func_door = "separate"
+func_door_rotating = "separate"
+func_movelinear = "separate"
+func_tracktrain = "separate"
+
+[output]
+# Edge length in blocks of each emitted .schem tile.
+# Absent means one single schematic for the whole map (--single).
+tile_size = 256
+# Write a WorldEdit paste macro next to the tiles.
+paste_script = true
+# Emit a dimension_type JSON sized to the map. Not implemented yet.
+emit_dimension = false
+
+[output.voxelize]
+# "center" tests the voxel centre only (fastest).
+# "samples" tests an NxNxN grid and compares against fill_threshold.
+# "exact" is not implemented and currently behaves like "samples".
+mode = "samples"
+samples = 3
+fill_threshold = 0.5
+# Guarantee at least one voxel layer for brushes thinner than a block, so
+# E:Z's 4- and 8-unit trim does not vanish at 16 units/block.
+preserve_thin = true
+
+[performance]
+# Worker threads; 0 uses one per core.
+threads = 0
