@@ -2,5 +2,6 @@
 
 pub mod brush;
 pub mod grid;
+pub mod mesh;
 pub mod shell;
 pub mod transform;

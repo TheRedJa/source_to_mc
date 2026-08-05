@@ -44,6 +44,11 @@ impl BlockSolid {
 /// from its centre.
 const VOXEL_HALF_DIAGONAL: f64 = 0.866_025_403_784_438_6;
 
+/// Tolerance for deciding a corner lies on a plane, in block space. Loose
+/// enough to absorb the slop in Source's plane equations after scaling, tight
+/// enough not to merge two faces of a voxel.
+const EXACT_EPSILON: f64 = 1e-9;
+
 /// Occupied fraction of the voxel at `pos`, in `[0, 1]`.
 fn occupancy(solid: &BlockSolid, pos: IVec3, config: &Voxelize) -> f64 {
     let corner = Vec3::new(pos[0] as f64, pos[1] as f64, pos[2] as f64);
@@ -69,9 +74,16 @@ fn occupancy(solid: &BlockSolid, pos: IVec3, config: &Voxelize) -> f64 {
                 0.0
             }
         }
-        // `exact` is not implemented yet and falls back to dense sampling,
-        // which converges to the same answer as `samples` rises.
-        SampleMode::Samples | SampleMode::Exact => {
+        // Clip the voxel cube against the brush and take the real volume. No
+        // sampling resolution can quite match this on thin slivers, but it
+        // costs a plane-triple intersection per boundary voxel, so it is for
+        // final passes rather than iteration.
+        SampleMode::Exact => {
+            let mut planes = solid.planes.clone();
+            planes.extend(crate::geom::box_planes(corner, corner + Vec3::splat(1.0)));
+            crate::geom::polyhedron_volume(&planes, EXACT_EPSILON).clamp(0.0, 1.0)
+        }
+        SampleMode::Samples => {
             let n = config.samples.max(1);
             let step = 1.0 / n as f64;
             let mut inside = 0u32;
@@ -289,6 +301,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `exact` must return the true volume fraction, which is what makes it
+    /// worth its cost: a plane cutting a voxel in half reads exactly 0.5,
+    /// where a 3x3x3 sample grid can only ever report thirds.
+    #[test]
+    fn exact_mode_reports_the_true_volume_fraction() {
+        let mut solid = block_box(Vec3::ZERO, Vec3::splat(4.0));
+        // Cut the voxel at [1, 1, 1] cleanly through its middle.
+        solid.planes.push(Plane::new(Vec3::new(0.0, 1.0, 0.0), 1.5));
+        solid.side_of_plane.push(6);
+
+        let exact = Voxelize { mode: SampleMode::Exact, ..Voxelize::default() };
+        assert!((occupancy(&solid, [1, 1, 1], &exact) - 0.5).abs() < 1e-9);
+        assert_eq!(occupancy(&solid, [1, 0, 1], &exact), 1.0);
+        assert_eq!(occupancy(&solid, [1, 2, 1], &exact), 0.0);
+
+        let sampled = Voxelize { mode: SampleMode::Samples, samples: 3, ..Voxelize::default() };
+        let approx = occupancy(&solid, [1, 1, 1], &sampled);
+        assert!((approx - 0.5).abs() > 0.1, "sampling should be coarser, got {approx}");
+    }
+
+    /// On a brush cut at an awkward angle, `exact` and dense sampling must
+    /// converge to the same answer voxel by voxel.
+    #[test]
+    fn exact_mode_agrees_with_dense_sampling() {
+        let mut solid = block_box(Vec3::new(-1.4, 0.3, 0.6), Vec3::new(3.7, 4.2, 2.9));
+        solid.planes.push(Plane::new(Vec3::new(1.0, 2.0, 3.0).normalized(), 4.0));
+        solid.side_of_plane.push(6);
+
+        let exact = Voxelize { mode: SampleMode::Exact, ..Voxelize::default() };
+        let dense = Voxelize { mode: SampleMode::Samples, samples: 24, ..Voxelize::default() };
+
+        let mut compared = 0;
+        for x in -3..6 {
+            for y in -1..6 {
+                for z in -1..5 {
+                    let a = occupancy(&solid, [x, y, z], &exact);
+                    let b = occupancy(&solid, [x, y, z], &dense);
+                    assert!(
+                        (a - b).abs() < 0.06,
+                        "at [{x},{y},{z}]: exact {a} vs sampled {b}"
+                    );
+                    if a > 0.0 && a < 1.0 {
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert!(compared > 20, "only {compared} partial voxels exercised");
+    }
+
+    #[test]
+    fn exact_mode_voxelizes_a_whole_brush() {
+        let solid = block_box(Vec3::ZERO, Vec3::new(3.0, 3.0, 3.0));
+        let config = Voxelize { mode: SampleMode::Exact, ..Voxelize::default() };
+        assert_eq!(voxels(&solid, &config).len(), 27);
     }
 
     #[test]

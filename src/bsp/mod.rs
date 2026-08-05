@@ -3,6 +3,7 @@
 //! This module is the only place that talks to `vbsp` directly, so the rest of
 //! the tool is insulated from its quirks (see [`rawleaves`] for one).
 
+pub mod displacement;
 pub mod entities;
 pub mod lumps;
 pub mod rawleaves;

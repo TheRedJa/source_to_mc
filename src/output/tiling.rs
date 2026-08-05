@@ -31,7 +31,57 @@ pub struct Manifest {
     pub bounds_min: IVec3,
     pub bounds_max: IVec3,
     pub tiles: Vec<Tile>,
+    /// Brush entities written to their own schematics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<EntityTile>,
     pub block_counts: std::collections::BTreeMap<String, usize>,
+}
+
+/// A brush entity written on its own, outside the world tiles.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityTile {
+    pub file: String,
+    pub classname: String,
+    pub targetname: Option<String>,
+    /// Index into the map's `entities.json`.
+    pub entity: usize,
+    /// Where the entity sits in the world, so it can be put back.
+    pub min: IVec3,
+    pub max: IVec3,
+    pub blocks: usize,
+}
+
+/// Write one schematic per separated brush entity, into `dir/entities`.
+pub fn write_entities(
+    dir: &Path,
+    entities: &[crate::convert::SeparateEntity],
+    palette: &Palette,
+) -> Result<Vec<EntityTile>> {
+    if entities.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = dir.join("entities");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+
+    let mut written = Vec::with_capacity(entities.len());
+    for entity in entities {
+        let Some((min, max)) = entity.grid.bounds() else { continue };
+        let blocks: Vec<(IVec3, BlockId)> = entity.grid.iter().collect();
+        let file = format!("{}.schem", entity.name());
+        schem::write(&dir.join(&file), &blocks, palette, min, max, &file)?;
+
+        written.push(EntityTile {
+            file,
+            classname: entity.classname.clone(),
+            targetname: entity.targetname.clone(),
+            entity: entity.entity,
+            min,
+            max,
+            blocks: blocks.len(),
+        });
+    }
+    Ok(written)
 }
 
 fn floor_div(value: i32, divisor: i32) -> i32 {
@@ -67,6 +117,7 @@ pub fn write_tiles(
             bounds_min: [0, 0, 0],
             bounds_max: [0, 0, 0],
             tiles: Vec::new(),
+            entities: Vec::new(),
             block_counts,
         });
     };
@@ -145,6 +196,7 @@ pub fn write_tiles(
         bounds_min: min,
         bounds_max: max,
         tiles,
+        entities: Vec::new(),
         block_counts,
     })
 }

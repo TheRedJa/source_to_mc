@@ -16,12 +16,17 @@ Working today:
   and tool brushes are dropped.
 - Chooses a block per surface from its material: glob rules first, then the
   texture's average colour. Ships with rules for Half-Life 2 and Entropy: Zero.
+- Voxelizes displacement terrain, backed into solid so it is not a shell.
 - Hollows out solid volumes so only surfaces are emitted.
 - Writes Sponge Schematic **v3** `.schem` tiles plus a manifest and a WorldEdit
   paste script.
+- Writes moving brush entities (doors, platforms, trains) to their own
+  schematics, so they do not seal the openings they belong to.
 - Dumps every entity to JSON with positions in Minecraft coordinates.
+- Converts whole campaigns at once, laid out side by side, and emits a
+  dimension datapack tall enough to paste them into.
 
-Not implemented yet: displacements and static props.
+Not implemented yet: static props.
 
 ## Usage
 
@@ -42,6 +47,9 @@ src2mc convert  maps/ez2_c1_1.bsp -o out/ --units-per-block 16
 # Bigger tiles, or the whole map as one schematic.
 src2mc convert  maps/ez2_c1_1.bsp -o out/ --tile-size 1024
 src2mc convert  maps/ez2_c1_1.bsp -o out/ --single
+
+# A whole campaign, laid out side by side, with a dimension to paste it into.
+src2mc batch    maps/*.bsp -o out/ --spacing 256 --emit-dimension
 ```
 
 `--tile-size` accepts up to 32767, the schematic format's per-axis limit. The
@@ -61,6 +69,8 @@ Output of `convert`:
 | `manifest.json` | Tile positions, sizes, block counts per block type |
 | `paste.txt` | WorldEdit macro pasting every tile at its position |
 | `entities.json` | Every Source entity, verbatim, with Minecraft coordinates |
+| `entities/<class>_<name>_<n>.schem` | Moving brush entities, one file each |
+| `dimension/` | A datapack dimension sized to the map (`--emit-dimension`) |
 
 Paste with WorldEdit or FAWE: `//schem load <tile>` then `//paste -a -o`.
 
@@ -83,6 +93,35 @@ problem: a datapack `dimension_type` allows up to 4064 blocks
 (`min_y` >= -2032, `height` <= 4064, both multiples of 16, `min_y + height - 1 <= 2031`).
 Nothing is ever clamped or rescaled to fit; `inspect` reports the exact `min_y`
 and `height` a map needs.
+
+## Terrain, doors and whole campaigns
+
+**Displacements** are Source's terrain: a brush face subdivided into a grid of
+displaced vertices. They are a heightfield rather than a solid, so they are
+voxelized as triangles — using an exact separating-axis test against each voxel,
+since sampling leaves holes where a triangle crosses a voxel corner, and holes
+in terrain are what you notice by falling through them. The resulting surface is
+one voxel thick, so `solidify` drives it a few voxels further in, along the
+surface's own inward normal rather than downwards: displacements make cliffs and
+ceilings as often as ground.
+
+**Moving brush entities** get their own schematic each, under `entities/`. A
+`func_door` pasted into the world is a slab sealing the doorway it should open,
+so doors, rotating doors, movelinears and tracktrains are pulled out by default.
+Configure it per classname under `[entities.classname_modes]`.
+
+**`batch`** converts several maps into one output directory, offsetting each so
+none overlaps another, and writes a combined `paste_all.txt` and `batch.json`.
+Offsets come from each map's own footprint rather than a fixed stride, because a
+stride large enough for the biggest map strands everything else in empty space.
+`--layout stacked` puts them all at the origin instead, for comparing versions of
+one map.
+
+**`--emit-dimension`** writes a datapack next to the schematics defining a
+dimension with the `min_y` and `height` the map needs, plus a void generator, so
+there is nothing to dig out before pasting. This matters because WorldEdit drops
+out-of-range blocks *silently*: without it you paste a tall map, walk in, and
+find the top missing with no error anywhere.
 
 ## Materials
 
@@ -147,7 +186,7 @@ See `example-config.toml` for the full set with comments.
 
 ## Notes on Source BSP handling
 
-Two things worth knowing if you work on this code:
+Four things worth knowing if you work on this code:
 
 - `vbsp` sorts its `leaves` vector by cluster, so its leaf indices do **not**
   match the indices BSP node children reference. Associating brushes with the
@@ -162,6 +201,13 @@ Two things worth knowing if you work on this code:
   Zero's materials are patched this way, so rules would be useless without
   undoing it. The two nest, too: `d1_canals_01a` contains
   `maps/d1_canals_01a/maps/d1_canals_01a/nature/blendmudmud001a_wvt_patch_-1624_6208_7`.
+- A brush entity's geometry is **not in world space**. VBSP rewrites it to be
+  relative to the entity's `origin` keyvalue and leaves the model's own stored
+  origin at zero, so the coordinates in the plane lump have to have the entity
+  origin added back. This is not a rare case: 103 of the 115 brush entity models
+  in `d1_trainstation_02` are stored this way, and taken at face value every
+  door, button, trigger and `func_brush` in a map piles up around wherever
+  Source's origin happens to land.
 
 ## Building
 

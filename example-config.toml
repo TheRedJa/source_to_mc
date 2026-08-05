@@ -14,6 +14,9 @@ origin_mode = "bounds_min"
 y_base = 0
 # Extra rotation about the vertical axis, in degrees.
 rotate_yaw = 0.0
+# Block-space shift applied last. `batch` sets this per map to lay several
+# maps out side by side.
+offset = [0, 0, 0]
 
 [contents]
 # Skip faces flagged as sky rather than building a ceiling over the map.
@@ -71,8 +74,11 @@ shell_neighborhood = 6
 interior_block = "minecraft:stone"
 
 [displacement]
-# Not implemented yet.
+# Voxelize displacement surfaces: Source's terrain, cliffs and road surfaces.
 enabled = true
+# Voxels of solid backing driven into the surface behind it, so terrain is not
+# a shell you fall through. The direction is the surface's own inward normal,
+# so cliffs and ceilings are thickened the right way rather than downwards.
 solidify = 2
 
 [entities]
@@ -81,6 +87,8 @@ manifest = true
 # "include" voxelizes brush entities with the world, "skip" leaves them out.
 brush_entities = "include"
 
+# "separate" writes one schematic per entity under out/entities/, since a door
+# pasted into the world seals the doorway it is supposed to open.
 [entities.classname_modes]
 func_door = "separate"
 func_door_rotating = "separate"
@@ -93,13 +101,16 @@ func_tracktrain = "separate"
 tile_size = 256
 # Write a WorldEdit paste macro next to the tiles.
 paste_script = true
-# Emit a dimension_type JSON sized to the map. Not implemented yet.
+# Write a datapack defining a dimension tall enough for the map, next to the
+# schematics. Most Source maps do not fit vanilla's 384 blocks of height, and
+# WorldEdit drops out-of-range blocks silently.
 emit_dimension = false
 
 [output.voxelize]
 # "center" tests the voxel centre only (fastest).
 # "samples" tests an NxNxN grid and compares against fill_threshold.
-# "exact" is not implemented and currently behaves like "samples".
+# "exact" clips the voxel cube against the brush for the true volume fraction.
+# It is slower and meant for a final pass rather than for iterating.
 mode = "samples"
 samples = 3
 fill_threshold = 0.5

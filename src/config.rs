@@ -81,6 +81,9 @@ pub struct Transform {
     /// Extra rotation about the vertical axis, in degrees, applied before
     /// voxelization.
     pub rotate_yaw: f64,
+    /// Block-space offset applied last, after origin and rotation. `batch`
+    /// uses it to lay several maps out side by side.
+    pub offset: [i32; 3],
 }
 
 impl Default for Transform {
@@ -89,6 +92,7 @@ impl Default for Transform {
             origin_mode: OriginMode::BoundsMin,
             y_base: 0,
             rotate_yaw: 0.0,
+            offset: [0, 0, 0],
         }
     }
 }

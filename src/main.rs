@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use src2mc::bsp::{Map, entities};
 use src2mc::config::Config;
 use src2mc::inspect;
-use src2mc::output::tiling;
+use src2mc::output::{dimension, layout, tiling};
 use src2mc::voxel::transform::Transform;
 use std::path::{Path, PathBuf};
 
@@ -50,18 +50,27 @@ enum Command {
         /// Output directory.
         #[arg(short, long, default_value = "out")]
         out: PathBuf,
-        /// Edge length in blocks of each schematic tile (max 32767).
-        #[arg(long)]
-        tile_size: Option<u32>,
-        /// Write the whole map as one schematic instead of tiles.
-        #[arg(long, conflicts_with = "tile_size")]
-        single: bool,
-        /// Fill brush interiors instead of hollowing them out.
-        #[arg(long)]
-        solid: bool,
-        /// Voxels of surface kept when hollowing.
-        #[arg(long)]
-        shell_thickness: Option<u32>,
+        #[command(flatten)]
+        options: ConvertOptions,
+    },
+    /// Convert several maps into one output directory, laid out side by side.
+    Batch {
+        /// Maps to convert.
+        #[arg(required = true)]
+        maps: Vec<PathBuf>,
+        #[command(flatten)]
+        common: Common,
+        /// Output directory; each map gets a subdirectory.
+        #[arg(short, long, default_value = "out")]
+        out: PathBuf,
+        /// How to place the maps relative to each other.
+        #[arg(long, value_enum, default_value_t = Layout::Grid)]
+        layout: Layout,
+        /// Blocks of clear space between maps under `grid`.
+        #[arg(long, default_value_t = 256)]
+        spacing: u32,
+        #[command(flatten)]
+        options: ConvertOptions,
     },
     /// Dump every entity, with positions mapped to Minecraft coordinates.
     Entities {
@@ -75,6 +84,60 @@ enum Command {
         #[arg(long = "classname")]
         classnames: Vec<String>,
     },
+}
+
+/// Flags shared by `convert` and `batch`.
+#[derive(Args, Clone)]
+struct ConvertOptions {
+    /// Edge length in blocks of each schematic tile (max 32767).
+    #[arg(long)]
+    tile_size: Option<u32>,
+    /// Write each map as one schematic instead of tiles.
+    #[arg(long, conflicts_with = "tile_size")]
+    single: bool,
+    /// Fill brush interiors instead of hollowing them out.
+    #[arg(long)]
+    solid: bool,
+    /// Voxels of surface kept when hollowing.
+    #[arg(long)]
+    shell_thickness: Option<u32>,
+    /// Leave out displacement terrain.
+    #[arg(long)]
+    no_displacements: bool,
+    /// Also write a datapack defining a dimension tall enough for the map.
+    #[arg(long)]
+    emit_dimension: bool,
+}
+
+impl ConvertOptions {
+    fn apply(&self, config: &mut Config) {
+        if self.single {
+            config.output.tile_size = None;
+        } else if let Some(size) = self.tile_size {
+            config.output.tile_size = Some(size);
+        }
+        if self.solid {
+            config.fill.mode = src2mc::config::FillMode::Solid;
+        }
+        if let Some(thickness) = self.shell_thickness {
+            config.fill.shell_thickness = thickness;
+        }
+        if self.no_displacements {
+            config.displacement.enabled = false;
+        }
+        if self.emit_dimension {
+            config.output.emit_dimension = true;
+        }
+    }
+}
+
+/// How `batch` places maps relative to one another.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Layout {
+    /// Side by side in a grid, so no two maps overlap.
+    Grid,
+    /// All at the same origin, for comparing versions of one map.
+    Stacked,
 }
 
 #[derive(Args, Clone)]
@@ -127,6 +190,203 @@ fn load(path: &Path) -> Result<Map> {
     Map::load(path).with_context(|| format!("loading map {}", path.display()))
 }
 
+/// What one converted map contributed, for the batch index.
+struct Converted {
+    name: String,
+    blocks: usize,
+    manifest: tiling::Manifest,
+    y_range: src2mc::inspect::YRangeReport,
+    origin: [i32; 3],
+}
+
+/// Voxelize one map and write its schematics, manifest, paste script and
+/// entity dump into `out`.
+fn convert_one(map: &Map, config: &Config, out: &Path) -> Result<Converted> {
+    eprintln!("converting {} at {} units/block...", map.name, config.scale.units_per_block);
+
+    let result = src2mc::convert::convert(map, config)?;
+    let stats = &result.stats;
+    eprintln!(
+        "  {} brushes voxelized ({} skipped), {} displacements ({} skipped)",
+        stats.solids_voxelized,
+        stats.solids_skipped,
+        stats.displacements_voxelized,
+        stats.displacements_skipped,
+    );
+    eprintln!(
+        "  {} blocks after hollowing (from {})",
+        stats.blocks, stats.blocks_before_hollow,
+    );
+
+    if stats.blocks == 0 {
+        eprintln!(
+            "  warning: no blocks produced. Every surface was skipped, which is \
+             correct for a credits or skybox-only map but otherwise suggests the \
+             material rules are dropping too much — check `src2mc materials`."
+        );
+    }
+
+    let mut manifest = tiling::write_tiles(
+        out,
+        &map.name,
+        &result.grid,
+        &result.palette,
+        config.output.tile_size,
+        config.scale.units_per_block,
+        stats.block_counts.clone(),
+    )?;
+
+    std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+
+    manifest.entities = tiling::write_entities(out, &result.separate, &result.palette)?;
+    if !manifest.entities.is_empty() {
+        eprintln!(
+            "  {} moving brush entities written separately",
+            manifest.entities.len()
+        );
+    }
+    std::fs::write(out.join("manifest.json"), serde_json::to_string_pretty(&manifest)?)?;
+
+    if config.output.paste_script {
+        std::fs::write(out.join("paste.txt"), tiling::paste_script(&manifest))?;
+    }
+
+    if config.entities.manifest {
+        let records = entities::extract(map, &result.transform);
+        std::fs::write(out.join("entities.json"), serde_json::to_string_pretty(&records)?)?;
+        eprintln!("  {} entities recorded", records.len());
+    }
+
+    eprintln!("  {} tiles written to {}", manifest.tiles.len(), out.display());
+
+    Ok(Converted {
+        name: map.name.clone(),
+        blocks: stats.blocks,
+        manifest,
+        y_range: inspect::y_range(src2mc::convert::block_bounds(map, &result.transform)),
+        origin: config.transform.offset,
+    })
+}
+
+/// Convert several maps into one output directory.
+///
+/// Under `grid` each map is offset so none overlaps another, which is what
+/// makes a whole campaign walkable end to end. The offsets are computed from
+/// each map's own converted size rather than a fixed stride, because Source
+/// map sizes vary by an order of magnitude and a stride large enough for the
+/// biggest would leave the rest adrift in empty space.
+fn batch(
+    maps: &[PathBuf],
+    config: &Config,
+    out: &Path,
+    layout: Layout,
+    spacing: u32,
+) -> Result<()> {
+    // Sizes first, so the layout is known before anything is written.
+    let mut loaded = Vec::with_capacity(maps.len());
+    let mut footprints = Vec::with_capacity(maps.len());
+    for path in maps {
+        let map = load(path)?;
+        let size = Transform::new(config, map.bounds())
+            .transform_bounds(map.bounds())
+            .size();
+        footprints.push(layout::Footprint::new(size.x.ceil() as i32, size.z.ceil() as i32));
+        loaded.push(map);
+    }
+
+    let placements = match layout {
+        Layout::Stacked => layout::stacked(loaded.len()),
+        Layout::Grid => layout::grid(
+            &footprints,
+            layout::columns_for(loaded.len()),
+            spacing as i32,
+        ),
+    };
+
+    let mut converted = Vec::with_capacity(loaded.len());
+    let mut failures = Vec::new();
+    for (map, origin) in loaded.iter().zip(placements) {
+        let mut config = config.clone();
+        config.transform.offset = origin;
+        let dir = out.join(&map.name);
+        match convert_one(map, &config, &dir) {
+            Ok(result) => converted.push(result),
+            // One bad map should not lose the rest of a campaign's work.
+            Err(error) => {
+                eprintln!("  error: {} failed: {error:#}", map.name);
+                failures.push(map.name.clone());
+            }
+        }
+    }
+
+    std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+
+    let index: Vec<_> = converted
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "map": c.name,
+                "origin": c.origin,
+                "blocks": c.blocks,
+                "tiles": c.manifest.tiles.len(),
+                "min_y": c.y_range.min_y,
+                "max_y": c.y_range.max_y,
+            })
+        })
+        .collect();
+    std::fs::write(
+        out.join("batch.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "maps": index,
+            "failed": failures,
+        }))?,
+    )?;
+
+    // One script that pastes every tile of every map, in order.
+    let mut script = String::from(
+        "# Generated by src2mc batch. Paste with WorldEdit or FAWE.\n\
+         # Each map is offset so none overlaps another; -o places every tile\n\
+         # at the coordinates baked into it, so standing still is not required.\n\n",
+    );
+    for c in &converted {
+        script.push_str(&format!("# --- {} ({} blocks) ---\n", c.name, c.blocks));
+        for line in tiling::paste_script(&c.manifest).lines() {
+            if !line.starts_with('#') && !line.trim().is_empty() {
+                script.push_str(line);
+                script.push('\n');
+            }
+        }
+        script.push('\n');
+    }
+    std::fs::write(out.join("paste_all.txt"), script)?;
+
+    if config.output.emit_dimension && !converted.is_empty() {
+        // One dimension has to hold every map, so take the union of their
+        // ranges rather than the last one's.
+        let min_y = converted.iter().map(|c| c.y_range.min_y).min().unwrap();
+        let max_y = converted.iter().map(|c| c.y_range.max_y).max().unwrap();
+        let union = inspect::y_range(src2mc::geom::Aabb::new(
+            src2mc::geom::Vec3::new(0.0, min_y as f64, 0.0),
+            src2mc::geom::Vec3::new(0.0, max_y as f64, 0.0),
+        ));
+        let dir = out.join("dimension");
+        let emitted = dimension::write(&dir, "batch", &union)?;
+        eprintln!("{}", emitted.instructions(&dir));
+    }
+
+    eprintln!(
+        "\n{} of {} maps converted, {} blocks total, index at {}",
+        converted.len(),
+        maps.len(),
+        converted.iter().map(|c| c.blocks).sum::<usize>(),
+        out.join("batch.json").display(),
+    );
+    if !failures.is_empty() {
+        eprintln!("failed: {}", failures.join(", "));
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Inspect { map, common, json } => {
@@ -156,72 +416,22 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Convert { map, common, out, tile_size, single, solid, shell_thickness } => {
+        Command::Convert { map, common, out, options } => {
             let mut config = common.resolve()?;
-            if single {
-                config.output.tile_size = None;
-            } else if let Some(size) = tile_size {
-                config.output.tile_size = Some(size);
-            }
-            if solid {
-                config.fill.mode = src2mc::config::FillMode::Solid;
-            }
-            if let Some(thickness) = shell_thickness {
-                config.fill.shell_thickness = thickness;
-            }
-
+            options.apply(&mut config);
             let map = load(&map)?;
-            eprintln!("converting {} at {} units/block...", map.name, config.scale.units_per_block);
+            let converted = convert_one(&map, &config, &out)?;
 
-            let result = src2mc::convert::convert(&map, &config)?;
-            let stats = &result.stats;
-            eprintln!(
-                "  {} brushes voxelized ({} skipped), {} blocks after hollowing (from {})",
-                stats.solids_voxelized,
-                stats.solids_skipped,
-                stats.blocks,
-                stats.blocks_before_hollow,
-            );
-
-            if stats.blocks == 0 {
-                eprintln!(
-                    "  warning: no blocks produced. Every surface was skipped, which is \
-                     correct for a credits or skybox-only map but otherwise suggests the \
-                     material rules are dropping too much — check `src2mc materials`."
-                );
+            if config.output.emit_dimension {
+                let emitted = dimension::write(&out.join("dimension"), &map.name, &converted.y_range)?;
+                eprintln!("  {}", emitted.instructions(&out.join("dimension")));
             }
+        }
 
-            let manifest = tiling::write_tiles(
-                &out,
-                &map.name,
-                &result.grid,
-                &result.palette,
-                config.output.tile_size,
-                config.scale.units_per_block,
-                stats.block_counts.clone(),
-            )?;
-
-            std::fs::create_dir_all(&out)
-                .with_context(|| format!("creating {}", out.display()))?;
-            std::fs::write(
-                out.join("manifest.json"),
-                serde_json::to_string_pretty(&manifest)?,
-            )?;
-
-            if config.output.paste_script {
-                std::fs::write(out.join("paste.txt"), tiling::paste_script(&manifest))?;
-            }
-
-            if config.entities.manifest {
-                let records = entities::extract(&map, &result.transform);
-                std::fs::write(
-                    out.join("entities.json"),
-                    serde_json::to_string_pretty(&records)?,
-                )?;
-                eprintln!("  {} entities recorded", records.len());
-            }
-
-            eprintln!("  {} tiles written to {}", manifest.tiles.len(), out.display());
+        Command::Batch { maps, common, out, layout, spacing, options } => {
+            let mut config = common.resolve()?;
+            options.apply(&mut config);
+            batch(&maps, &config, &out, layout, spacing)?;
         }
 
         Command::Entities { map, common, out, classnames } => {
