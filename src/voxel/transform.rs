@@ -43,6 +43,9 @@ impl Transform {
                 -mapped.min.z,
             );
         }
+
+        let [x, y, z] = config.transform.offset;
+        transform.offset = transform.offset + Vec3::new(x as f64, y as f64, z as f64);
         transform
     }
 

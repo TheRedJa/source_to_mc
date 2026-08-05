@@ -17,12 +17,51 @@ pub struct Conversion {
     pub palette: Palette,
     pub transform: Transform,
     pub stats: Stats,
+    /// Brush entities pulled out into their own grids, for classnames
+    /// configured as `separate`.
+    pub separate: Vec<SeparateEntity>,
+}
+
+/// One brush entity converted on its own.
+///
+/// Doors, platforms and trains move, so their geometry belongs where the world
+/// is not: pasted into the world it would seal the doorway it is supposed to
+/// open. Kept apart, it is a schematic you can place wherever the mechanism you
+/// build for it needs it.
+#[derive(Debug, Clone)]
+pub struct SeparateEntity {
+    /// Index into the map's entity list.
+    pub entity: usize,
+    pub classname: String,
+    pub targetname: Option<String>,
+    /// The `*N` brush model the entity uses.
+    pub model: usize,
+    pub grid: VoxelGrid,
+}
+
+impl SeparateEntity {
+    /// A filename stem unique within one map.
+    pub fn name(&self) -> String {
+        let label = self
+            .targetname
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("unnamed");
+        let sanitized: String = label
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+            .collect();
+        // The entity index keeps two doors with the same targetname apart.
+        format!("{}_{}_{}", self.classname, sanitized, self.entity)
+    }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
     pub solids_voxelized: usize,
     pub solids_skipped: usize,
+    pub displacements_voxelized: usize,
+    pub displacements_skipped: usize,
     pub blocks_before_hollow: usize,
     pub blocks: usize,
     /// Voxel count per block type, for sourcing materials.
@@ -30,29 +69,104 @@ pub struct Stats {
 }
 
 /// Translate a brush into block space, mapping each plane through `transform`.
-fn to_block_solid(solid: &Solid, transform: &Transform) -> BlockSolid {
+///
+/// `origin` is the brush entity's own origin, which has to be added back
+/// first. VBSP rewrites a brush entity's geometry to be relative to its
+/// `origin` keyvalue, leaving the model's stored origin at zero, so the
+/// coordinates in the plane lump are *not* world space. In
+/// `d1_trainstation_02` that is 103 of 115 brush entity models: taken at face
+/// value, every door, button, trigger and func_brush in the map piles up
+/// around wherever Source's origin happens to land.
+fn to_block_solid(solid: &Solid, transform: &Transform, origin: Vec3) -> BlockSolid {
     let planes = solid
         .sides
         .iter()
-        .map(|side| transform.transform_plane(side.plane))
+        .map(|side| {
+            // Translating a plane moves its distance along its own normal.
+            let plane = crate::geom::Plane::new(
+                side.plane.normal,
+                side.plane.dist + side.plane.normal.dot(origin),
+            );
+            transform.transform_plane(plane)
+        })
         .collect();
     BlockSolid {
         planes,
-        bounds: transform.transform_bounds(solid.bounds),
+        bounds: transform.transform_bounds(Aabb::new(
+            solid.bounds.min + origin,
+            solid.bounds.max + origin,
+        )),
         side_of_plane: (0..solid.sides.len()).collect(),
     }
 }
 
-/// Which models to voxelize: worldspawn plus, depending on config, the brush
-/// entities.
-fn models_to_convert(map: &Map, config: &Config) -> Vec<usize> {
+/// Which brush model each entity owns, and what to do with it.
+struct EntityModel {
+    entity: usize,
+    classname: String,
+    targetname: Option<String>,
+    model: usize,
+    /// The entity's `origin`, which its geometry is stored relative to.
+    origin: Vec3,
+    mode: crate::config::BrushEntityMode,
+}
+
+/// Match every brush entity to its model and the mode configured for its
+/// classname.
+fn entity_models(map: &Map, config: &Config) -> Vec<EntityModel> {
+    let transform = Transform::new(config, map.bounds());
+    crate::bsp::entities::extract(map, &transform)
+        .into_iter()
+        .filter_map(|record| {
+            let model = record.brush_model?;
+            // Worldspawn is model 0 and is never a brush entity.
+            if model == 0 || model >= map.bsp.models.len() {
+                return None;
+            }
+            let mode = config
+                .entities
+                .classname_modes
+                .get(&record.classname)
+                .copied()
+                .unwrap_or(config.entities.brush_entities);
+            let origin = record
+                .origin_source
+                .map(|[x, y, z]| Vec3::new(x, y, z))
+                .unwrap_or(Vec3::ZERO);
+            Some(EntityModel {
+                entity: record.index,
+                classname: record.classname,
+                targetname: record.targetname,
+                model,
+                origin,
+                mode,
+            })
+        })
+        .collect()
+}
+
+/// Where each brush entity model's geometry has to be moved back to.
+fn model_origins(entities: &[EntityModel]) -> std::collections::HashMap<usize, Vec3> {
+    entities.iter().map(|e| (e.model, e.origin)).collect()
+}
+
+/// Which models go into the world grid: worldspawn, plus every brush entity
+/// not being written separately or skipped.
+fn models_to_convert(map: &Map, config: &Config, entities: &[EntityModel]) -> Vec<usize> {
     use crate::config::BrushEntityMode;
-    match config.entities.brush_entities {
-        BrushEntityMode::Skip => vec![0],
-        // `Separate` still needs its own output files, which the tiling layer
-        // does not do yet, so for now it is treated like `Include`.
-        BrushEntityMode::Include | BrushEntityMode::Separate => (0..map.bsp.models.len()).collect(),
-    }
+    let modes: std::collections::HashMap<usize, BrushEntityMode> =
+        entities.iter().map(|e| (e.model, e.mode)).collect();
+
+    (0..map.bsp.models.len())
+        .filter(|model| {
+            // Worldspawn is the world and is always converted. A model no
+            // entity claims falls back to the global setting rather than being
+            // dropped, so malformed entity data cannot silently lose geometry.
+            *model == 0
+                || modes.get(model).copied().unwrap_or(config.entities.brush_entities)
+                    == BrushEntityMode::Include
+        })
+        .collect()
 }
 
 /// Texture flags that mean "this face is never drawn", so it should never
@@ -109,22 +223,63 @@ fn side_block<'a>(
     }
 }
 
-pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
-    let transform = Transform::new(config, map.bounds());
-    let resolver = Resolver::new(config, map.materials())?;
+/// Voxelize one displacement into its own grid.
+///
+/// The surface is a shell one voxel thick, which you would fall straight
+/// through and which looks like paper from below, so it is backed by
+/// `solidify` more voxels driven into the solid side. That direction is the
+/// face's own inward normal rather than simply down: displacements make walls
+/// and ceilings as often as they make ground, and thickening a cliff downwards
+/// would leave its face just as thin.
+fn voxelize_displacement(
+    surface: &crate::bsp::displacement::Surface,
+    transform: &Transform,
+    solidify: u32,
+    block: BlockId,
+) -> VoxelGrid {
+    use crate::voxel::mesh::{Triangle, voxelize_triangle};
+
+    let mut grid = VoxelGrid::new();
+    let inward = transform.transform_direction(-surface.normal);
+
+    for tri in &surface.triangles {
+        let mapped = Triangle::new(
+            transform.to_block_space(tri.a),
+            transform.to_block_space(tri.b),
+            transform.to_block_space(tri.c),
+        );
+        voxelize_triangle(&mapped, |pos| {
+            grid.set(pos, block);
+            for step in 1..=solidify {
+                let offset = inward * step as f64;
+                grid.set(
+                    [
+                        pos[0] + offset.x.round() as i32,
+                        pos[1] + offset.y.round() as i32,
+                        pos[2] + offset.z.round() as i32,
+                    ],
+                    block,
+                );
+            }
+        });
+    }
+    grid
+}
+
+/// Voxelize a set of brushes into one grid, interning blocks into `palette`.
+fn voxelize_solids(
+    solids: &[Solid],
+    map: &Map,
+    config: &Config,
+    resolver: &Resolver,
+    transform: &Transform,
+    origins: &std::collections::HashMap<usize, Vec3>,
+    palette: &Mutex<Palette>,
+    skipped: &std::sync::atomic::AtomicUsize,
+) -> VoxelGrid {
     let skip_sky = config.contents.skip_sky;
 
-    // Gather every brush first so the voxelization itself parallelizes cleanly.
-    let solids: Vec<Solid> = models_to_convert(map, config)
-        .into_iter()
-        .flat_map(|model| map.solids(model))
-        .collect();
-
-    // The palette is shared and rarely written to after the first few brushes.
-    let palette = Mutex::new(Palette::new());
-    let skipped = std::sync::atomic::AtomicUsize::new(0);
-
-    let grid = solids
+    solids
         .par_iter()
         .fold(VoxelGrid::new, |mut grid, solid| {
             let decision = resolver.decide(solid.flags);
@@ -133,7 +288,8 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
                 return grid;
             }
 
-            let block_solid = to_block_solid(solid, &transform);
+            let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
+            let block_solid = to_block_solid(solid, transform, origin);
 
             // Resolve the block for each side once, rather than per voxel.
             let side_blocks: Vec<Option<BlockId>> = solid
@@ -141,7 +297,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
                 .iter()
                 .map(|side| {
                     let material = side.texture_info.and_then(|i| map.material_index(i));
-                    side_block(&decision, &resolver, material, side.texture_flags, skip_sky)
+                    side_block(&decision, resolver, material, side.texture_flags, skip_sky)
                         .map(|name| palette.lock().unwrap().intern(name))
                 })
                 .collect();
@@ -166,7 +322,92 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         .reduce(VoxelGrid::new, |mut a, b| {
             a.merge(b);
             a
-        });
+        })
+}
+
+pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
+    let transform = Transform::new(config, map.bounds());
+    let resolver = Resolver::new(config, map.materials())?;
+
+    let entity_models = entity_models(map, config);
+
+    // Gather every brush first so the voxelization itself parallelizes cleanly.
+    let solids: Vec<Solid> = models_to_convert(map, config, &entity_models)
+        .into_iter()
+        .flat_map(|model| map.solids(model))
+        .collect();
+
+    // The palette is shared and rarely written to after the first few brushes.
+    let palette = Mutex::new(Palette::new());
+    let skipped = std::sync::atomic::AtomicUsize::new(0);
+
+    let origins = model_origins(&entity_models);
+    let grid = voxelize_solids(
+        &solids, map, config, &resolver, &transform, &origins, &palette, &skipped,
+    );
+
+    // Brush entities configured as `separate` get their own grid each, so a
+    // door is a schematic you can place where your mechanism needs it rather
+    // than a slab sealing the doorway it should open.
+    let separate: Vec<SeparateEntity> = entity_models
+        .iter()
+        .filter(|e| e.mode == crate::config::BrushEntityMode::Separate)
+        .filter_map(|entity| {
+            let solids = map.solids(entity.model);
+            if solids.is_empty() {
+                return None;
+            }
+            let grid = voxelize_solids(
+                &solids, map, config, &resolver, &transform, &origins, &palette, &skipped,
+            );
+            (grid.count() > 0).then(|| SeparateEntity {
+                entity: entity.entity,
+                classname: entity.classname.clone(),
+                targetname: entity.targetname.clone(),
+                model: entity.model,
+                grid,
+            })
+        })
+        .collect();
+
+    // Displacements: Source's terrain, and the reason a converted outdoor map
+    // used to be a floating shell of buildings over nothing.
+    let displacements_skipped = std::sync::atomic::AtomicUsize::new(0);
+    let surfaces = if config.displacement.enabled {
+        map.displacement_surfaces()
+    } else {
+        Vec::new()
+    };
+    let mut grid = grid;
+    if !surfaces.is_empty() {
+        let terrain = surfaces
+            .par_iter()
+            .fold(VoxelGrid::new, |mut grid, surface| {
+                let block = surface
+                    .material
+                    .and_then(|m| resolver.block_for_material(m))
+                    .map(|name| palette.lock().unwrap().intern(name));
+                match block {
+                    Some(block) => grid.merge(voxelize_displacement(
+                        surface,
+                        &transform,
+                        config.displacement.solidify,
+                        block,
+                    )),
+                    None => {
+                        displacements_skipped
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                grid
+            })
+            .reduce(VoxelGrid::new, |mut a, b| {
+                a.merge(b);
+                a
+            });
+        grid.merge(terrain);
+    }
+    let displacements_skipped = displacements_skipped.into_inner();
 
     let blocks_before_hollow = grid.count();
     let grid = match config.fill.mode {
@@ -189,6 +430,8 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         stats: Stats {
             solids_voxelized: solids.len() - skipped,
             solids_skipped: skipped,
+            displacements_voxelized: surfaces.len() - displacements_skipped,
+            displacements_skipped,
             blocks_before_hollow,
             blocks: grid.count(),
             block_counts,
@@ -196,6 +439,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         grid,
         palette,
         transform,
+        separate,
     })
 }
 
@@ -383,6 +627,135 @@ mod tests {
         );
     }
 
+    /// VBSP stores a brush entity's geometry relative to its `origin`, so the
+    /// coordinates in the plane lump are not world space. Every converted
+    /// brush entity has to end up near the entity that owns it, not piled up
+    /// around wherever Source's origin lands.
+    #[test]
+    fn brush_entities_land_where_their_entity_is() {
+        let Some(map) = sample_map() else { return };
+        let config = Config::default();
+        let transform = Transform::new(&config, map.bounds());
+        let resolver = Resolver::new(&config, map.materials()).unwrap();
+        let origins = model_origins(&entity_models(&map, &config));
+
+        let _ = &resolver;
+        let mut checked = 0;
+        for (model, origin) in &origins {
+            if origin.x == 0.0 && origin.y == 0.0 && origin.z == 0.0 {
+                continue;
+            }
+            let Some(solid) = map.solids(*model).into_iter().next() else { continue };
+            let placed = to_block_solid(&solid, &transform, *origin).bounds;
+            let entity = transform.to_block_space(*origin);
+
+            // An entity's origin need not be inside its own brush — a door's
+            // is at its hinge — so the test is proximity, not containment.
+            // Half the brush's own extent plus a few blocks is generous, and
+            // still nothing like the hundreds of blocks the untranslated
+            // geometry is out by.
+            let slack = placed.size().length() + 8.0;
+            let distance = (placed.center() - entity).length();
+            assert!(
+                distance <= slack,
+                "model {model} is {distance:.0} blocks from its entity, allowing {slack:.0}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no origin-relative brush entities to check");
+    }
+
+    /// The same in the other direction, so the test above cannot quietly pass
+    /// on a no-op: dropping the origin must put the geometry far from its
+    /// entity, which is the bug this fixes.
+    #[test]
+    fn ignoring_the_entity_origin_misplaces_the_geometry() {
+        let Some(map) = sample_map() else { return };
+        let config = Config::default();
+        let transform = Transform::new(&config, map.bounds());
+        let origins = model_origins(&entity_models(&map, &config));
+
+        let (mut with_total, mut without_total, mut count) = (0.0, 0.0, 0);
+        for (model, origin) in &origins {
+            if origin.x == 0.0 && origin.y == 0.0 && origin.z == 0.0 {
+                continue;
+            }
+            let Some(solid) = map.solids(*model).into_iter().next() else { continue };
+            let entity = transform.to_block_space(*origin);
+            with_total += (to_block_solid(&solid, &transform, *origin).bounds.center() - entity)
+                .length();
+            without_total += (to_block_solid(&solid, &transform, Vec3::ZERO).bounds.center()
+                - entity)
+                .length();
+            count += 1;
+        }
+
+        assert!(count > 0);
+        let (with, without) = (with_total / count as f64, without_total / count as f64);
+        assert!(
+            without > with * 10.0,
+            "untranslated geometry averages {without:.0} blocks from its entity \
+             and translated {with:.0}; the translation is doing nothing"
+        );
+    }
+
+    /// A map with terrain in it, since `az_c4_4` is nearly all interiors.
+    fn terrain_map() -> Option<Map> {
+        let path = Path::new(
+            "/mnt/games/SteamLibrary/steamapps/common/Half-Life 2/hl2/maps/d1_canals_01a.bsp",
+        );
+        path.exists().then(|| Map::load(path).unwrap())
+    }
+
+    #[test]
+    fn displacements_add_terrain_and_can_be_turned_off() {
+        let Some(map) = terrain_map() else { return };
+        assert!(!map.bsp.displacements.is_empty());
+
+        let mut without = Config::default();
+        without.displacement.enabled = false;
+        let without = convert(&map, &without).unwrap();
+        let with = convert(&map, &Config::default()).unwrap();
+
+        assert_eq!(without.stats.displacements_voxelized, 0);
+        assert!(with.stats.displacements_voxelized > 0);
+        assert!(
+            with.stats.blocks > without.stats.blocks,
+            "terrain added nothing: {} vs {}",
+            with.stats.blocks,
+            without.stats.blocks
+        );
+    }
+
+    /// Terrain must land inside the map, not somewhere off in space, and it
+    /// must be thicker than the single-voxel shell the triangles alone give.
+    #[test]
+    fn terrain_is_solid_and_inside_the_map() {
+        let Some(map) = terrain_map() else { return };
+        let result = convert(&map, &Config::default()).unwrap();
+        let bounds = block_bounds(&map, &result.transform);
+        let (min, max) = result.grid.bounds().unwrap();
+
+        for axis in 0..3 {
+            assert!(
+                min[axis] as f64 >= bounds.min.axis(axis) - 4.0,
+                "geometry at {min:?} escapes {bounds:?}"
+            );
+            assert!(
+                max[axis] as f64 <= bounds.max.axis(axis) + 4.0,
+                "geometry at {max:?} escapes {bounds:?}"
+            );
+        }
+
+        let mut thin = Config::default();
+        thin.displacement.solidify = 0;
+        let thin = convert(&map, &thin).unwrap();
+        assert!(
+            result.stats.blocks_before_hollow > thin.stats.blocks_before_hollow,
+            "solidify added no backing"
+        );
+    }
+
     #[test]
     fn converted_geometry_lands_inside_the_map_bounds() {
         let Some(map) = sample_map() else { return };
@@ -440,3 +813,4 @@ mod tests {
         assert!(without.stats.blocks <= with.stats.blocks);
     }
 }
+

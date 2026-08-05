@@ -72,7 +72,7 @@ fn round_up_to_16(v: i32) -> i32 {
     v.div_euclid(16) * 16 + if v.rem_euclid(16) == 0 { 0 } else { 16 }
 }
 
-fn y_range(bounds_blocks: Aabb) -> YRangeReport {
+pub fn y_range(bounds_blocks: Aabb) -> YRangeReport {
     let min_y = bounds_blocks.min.y.floor() as i32;
     let max_y = bounds_blocks.max.y.ceil() as i32;
     let height = max_y - min_y + 1;

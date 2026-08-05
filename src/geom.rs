@@ -230,6 +230,86 @@ pub fn polyhedron_vertices(planes: &[Plane], epsilon: f64) -> Vec<Vec3> {
     out
 }
 
+/// Exact volume of the convex polyhedron defined by `planes`.
+///
+/// The vertices alone do not give a volume — they have to be organised into
+/// faces first. Each plane's face is the set of vertices lying on it, which is
+/// a convex polygon; fanning that polygon into triangles and taking the signed
+/// tetrahedron volume from an interior point sums to the whole. Using the
+/// polyhedron's own centroid as that point keeps every tetrahedron positive,
+/// so no winding order needs to be established.
+pub fn polyhedron_volume(planes: &[Plane], epsilon: f64) -> f64 {
+    let verts = polyhedron_vertices(planes, epsilon);
+    if verts.len() < 4 {
+        return 0.0;
+    }
+
+    let centroid = verts.iter().fold(Vec3::ZERO, |a, b| a + *b) / verts.len() as f64;
+    let mut volume = 0.0;
+
+    for plane in planes {
+        let face: Vec<Vec3> = verts
+            .iter()
+            .copied()
+            .filter(|v| plane.distance_to(*v).abs() <= epsilon)
+            .collect();
+        if face.len() < 3 {
+            continue;
+        }
+
+        // Order the face's vertices around its own centre, in the plane's own
+        // two-dimensional basis. Unordered, a fan would produce overlapping
+        // triangles and the wrong area.
+        let hub = face.iter().fold(Vec3::ZERO, |a, b| a + *b) / face.len() as f64;
+        let u = perpendicular(plane.normal);
+        let v = plane.normal.cross(u);
+        let mut ordered: Vec<(f64, Vec3)> = face
+            .iter()
+            .map(|p| {
+                let d = *p - hub;
+                (d.dot(v).atan2(d.dot(u)), *p)
+            })
+            .collect();
+        ordered.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        for window in 1..ordered.len() - 1 {
+            let (a, b, c) = (ordered[0].1, ordered[window].1, ordered[window + 1].1);
+            volume += tetrahedron_volume(centroid, a, b, c);
+        }
+    }
+
+    volume
+}
+
+/// Any unit vector perpendicular to `n`.
+fn perpendicular(n: Vec3) -> Vec3 {
+    // Cross with whichever axis `n` is least aligned to, so the result is
+    // never near zero.
+    let axis = match n.major_axis() {
+        0 => Vec3::new(0.0, 1.0, 0.0),
+        1 => Vec3::new(0.0, 0.0, 1.0),
+        _ => Vec3::new(1.0, 0.0, 0.0),
+    };
+    n.cross(axis).normalized()
+}
+
+fn tetrahedron_volume(apex: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f64 {
+    let (x, y, z) = (a - apex, b - apex, c - apex);
+    x.dot(y.cross(z)).abs() / 6.0
+}
+
+/// The six outward-facing planes of an axis-aligned box.
+pub fn box_planes(min: Vec3, max: Vec3) -> [Plane; 6] {
+    [
+        Plane::new(Vec3::new(-1.0, 0.0, 0.0), -min.x),
+        Plane::new(Vec3::new(1.0, 0.0, 0.0), max.x),
+        Plane::new(Vec3::new(0.0, -1.0, 0.0), -min.y),
+        Plane::new(Vec3::new(0.0, 1.0, 0.0), max.y),
+        Plane::new(Vec3::new(0.0, 0.0, -1.0), -min.z),
+        Plane::new(Vec3::new(0.0, 0.0, 1.0), max.z),
+    ]
+}
+
 /// Bounding box of the convex polyhedron defined by `planes`, or `None` when
 /// the half-spaces do not enclose a finite volume.
 pub fn polyhedron_bounds(planes: &[Plane], epsilon: f64) -> Option<Aabb> {
@@ -250,14 +330,7 @@ mod tests {
 
     /// Six outward-facing planes forming an axis-aligned box.
     fn box_planes(min: Vec3, max: Vec3) -> Vec<Plane> {
-        vec![
-            Plane::new(Vec3::new(-1.0, 0.0, 0.0), -min.x),
-            Plane::new(Vec3::new(1.0, 0.0, 0.0), max.x),
-            Plane::new(Vec3::new(0.0, -1.0, 0.0), -min.y),
-            Plane::new(Vec3::new(0.0, 1.0, 0.0), max.y),
-            Plane::new(Vec3::new(0.0, 0.0, -1.0), -min.z),
-            Plane::new(Vec3::new(0.0, 0.0, 1.0), max.z),
-        ]
+        super::box_planes(min, max).to_vec()
     }
 
     #[test]
@@ -293,6 +366,76 @@ mod tests {
             Plane::new(Vec3::new(0.0, 0.0, -1.0), 0.0),
         ];
         assert!(polyhedron_bounds(&planes, 1e-4).is_none());
+    }
+
+    #[test]
+    fn box_volume_is_the_product_of_its_sides() {
+        let planes = box_planes(Vec3::new(-1.0, 2.0, 0.5), Vec3::new(3.0, 8.0, 2.5));
+        let volume = polyhedron_volume(&planes, 1e-9);
+        assert!((volume - 4.0 * 6.0 * 2.0).abs() < 1e-9, "got {volume}");
+    }
+
+    #[test]
+    fn a_cube_cut_corner_to_corner_has_half_the_volume() {
+        let mut planes = box_planes(Vec3::ZERO, Vec3::splat(2.0));
+        // Diagonal through two opposite edges of the x/y square.
+        planes.push(Plane::new(Vec3::new(1.0, 1.0, 0.0).normalized(), 2.0 / 2f64.sqrt()));
+        let volume = polyhedron_volume(&planes, 1e-9);
+        assert!((volume - 4.0).abs() < 1e-9, "got {volume}");
+    }
+
+    /// Slicing a unit cube at `x + y + z = c` removes a corner tetrahedron of
+    /// side `3 - c`, so long as that side fits within one edge.
+    #[test]
+    fn a_sliced_corner_matches_the_hand_computed_volume() {
+        let cut = |c: f64| {
+            let mut planes = box_planes(Vec3::ZERO, Vec3::splat(1.0));
+            planes.push(Plane::new(Vec3::splat(1.0).normalized(), c / 3f64.sqrt()));
+            polyhedron_volume(&planes, 1e-9)
+        };
+
+        let corner = (3.0f64 - 2.5).powi(3) / 6.0;
+        assert!((cut(2.5) - (1.0 - corner)).abs() < 1e-9, "got {}", cut(2.5));
+
+        // Cutting through the centre is exactly half, by symmetry.
+        assert!((cut(1.5) - 0.5).abs() < 1e-9, "got {}", cut(1.5));
+    }
+
+    /// Volume and the sampling approximation must agree as sampling gets finer,
+    /// which is the property `exact` mode is built on.
+    #[test]
+    fn volume_agrees_with_dense_sampling() {
+        let mut planes = box_planes(Vec3::ZERO, Vec3::splat(1.0));
+        planes.push(Plane::new(Vec3::new(1.0, 2.0, 0.5).normalized(), 1.1));
+        let volume = polyhedron_volume(&planes, 1e-9);
+
+        let n = 120;
+        let step = 1.0 / n as f64;
+        let mut inside = 0u32;
+        for i in 0..n {
+            for j in 0..n {
+                for k in 0..n {
+                    let p = Vec3::new(
+                        (i as f64 + 0.5) * step,
+                        (j as f64 + 0.5) * step,
+                        (k as f64 + 0.5) * step,
+                    );
+                    if planes.iter().all(|pl| pl.distance_to(p) <= 0.0) {
+                        inside += 1;
+                    }
+                }
+            }
+        }
+        let sampled = inside as f64 / (n * n * n) as f64;
+        assert!((volume - sampled).abs() < 2e-3, "exact {volume} vs sampled {sampled}");
+    }
+
+    #[test]
+    fn degenerate_and_empty_polyhedra_have_no_volume() {
+        assert_eq!(polyhedron_volume(&[], 1e-9), 0.0);
+        // A box with min above max encloses nothing.
+        let planes = box_planes(Vec3::splat(1.0), Vec3::ZERO);
+        assert_eq!(polyhedron_volume(&planes, 1e-9), 0.0);
     }
 
     #[test]
