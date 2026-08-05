@@ -17,6 +17,9 @@ Working today:
 - Chooses a block per surface from its material: glob rules first, then the
   texture's average colour. Ships with rules for Half-Life 2 and Entropy: Zero.
 - Voxelizes displacement terrain, backed into solid so it is not a shell.
+- Optionally extracts the map's **real textures** and emits them as Minecraft
+  blocks through a generated KubeJS pack.
+- Fits half-height and stepped geometry to slabs and stairs.
 - Hollows out solid volumes so only surfaces are emitted.
 - Writes Sponge Schematic **v3** `.schem` tiles plus a manifest and a WorldEdit
   paste script.
@@ -38,6 +41,10 @@ src2mc inspect  maps/ez2_c1_1.bsp
 src2mc materials maps/ez2_c1_1.bsp
 src2mc materials maps/ez2_c1_1.bsp --stubs > my-rules.toml
 
+# Which materials have a real Source texture behind them.
+src2mc textures maps/ez2_c1_1.bsp
+src2mc textures maps/ez2_c1_1.bsp --missing
+
 # Entities only, no voxelization.
 src2mc entities maps/ez2_c1_1.bsp --classname func_door -o doors.json
 
@@ -50,6 +57,9 @@ src2mc convert  maps/ez2_c1_1.bsp -o out/ --single
 
 # A whole campaign, laid out side by side, with a dimension to paste it into.
 src2mc batch    maps/*.bsp -o out/ --spacing 256 --emit-dimension
+
+# With the map's own textures, as generated blocks (needs KubeJS).
+src2mc convert  maps/ez2_c1_1.bsp -o out/ --textures kubejs
 ```
 
 `--tile-size` accepts up to 32767, the schematic format's per-axis limit. The
@@ -71,6 +81,7 @@ Output of `convert`:
 | `entities.json` | Every Source entity, verbatim, with Minecraft coordinates |
 | `entities/<class>_<name>_<n>.schem` | Moving brush entities, one file each |
 | `dimension/` | A datapack dimension sized to the map (`--emit-dimension`) |
+| `kubejs/` | Generated textured blocks and their script (`--textures kubejs`) |
 
 Paste with WorldEdit or FAWE: `//schem load <tile>` then `//paste -a -o`.
 
@@ -174,6 +185,70 @@ src2mc convert map.bsp --palette-set stone,concrete -o out/
 src2mc convert map.bsp --no-builtin-rules -o out/
 ```
 
+## Real textures, as real blocks
+
+By default a wall becomes the vanilla block closest to its average colour. With
+`--textures kubejs` it becomes the actual Half-Life 2 concrete.
+
+Minecraft cannot add blocks from a resource pack alone — a pack only retextures
+blocks that already exist — so something has to register them, and
+[KubeJS](https://modrinth.com/mod/kubejs) is the least intrusive way: its
+`kubejs/assets/` folder loads exactly like a resource pack, and a generated
+startup script registers each block under its own namespace, so nothing vanilla
+is overwritten. Both halves are written into the output directory:
+
+```
+kubejs/assets/kubejs/textures/block/<id>.png
+kubejs/startup_scripts/src2mc_blocks.js
+```
+
+Copy that `kubejs` folder into a NeoForge 1.21.1 instance next to `mods`, and
+restart — KubeJS cannot hot-reload registrations. **A schematic converted this
+way will not paste correctly without its pack**, so the required block ids are
+listed in `manifest.json` and `paste.txt` says so.
+
+The textures are not in the maps. A BSP's pakfile holds mostly the cubemap
+*patch* stubs the compiler generated — `az_c4_4` ships 22 `.vmt` and 5 `.vtf` —
+while the real textures live in the game's VPKs and a mod's loose `materials/`
+folder. The search path is rebuilt from the map's own `gameinfo.txt`, so
+Entropy: Zero 2's chain through `ez2/`, `mapbase/` and `hl2/` resolves without
+configuration. `src2mc textures <map>` shows what was found and where; across
+all 170 stock maps it resolves 98.3% of materials in use, the rest being render
+targets like `_rt_Camera` and water shaders that have no `$basetexture` at all.
+
+Rules still win where the *kind* of block matters: a grate stays `iron_bars`
+rather than becoming an opaque cube with a grate painted on it. Alpha-tested
+materials are registered `cutout` and translucent ones `translucent`, and an
+alpha-tested texture is re-thresholded when downsampled — averaging a grate's
+alpha to 16x16 otherwise makes every texel part-transparent, which cutout
+rendering draws as a solid block.
+
+## Sub-block detail
+
+A block is a 1 m cube, so at 16 units/block every 8-unit step and kerb rounds
+away. `[shapes] enabled` fits half-height and stepped geometry to **slabs and
+stairs**, from a 2x2x2 occupancy mask recorded during voxelization and applied
+after hollowing. On `d1_trainstation_02` that recovers about 7% of blocks as
+slabs or stairs, with no measurable cost, and every schematic tool handles them
+natively.
+
+The mask is stored in the same sparse 16-cubed sections as the block grid.
+Keying it per voxel in a hash map instead cost about 48 bytes each, which on
+E:Z2's largest map was a 6 GB peak against 657 MB for the whole rest of the
+conversion.
+
+Only block families that have vanilla slab and stair variants can change;
+anything else stays a full cube, and an unrecognised mask always stays a full
+cube too — losing a step is far less noticeable than opening a hole in a wall.
+Generated textured blocks need `[shapes] kubejs_variants = true` to gain
+variants, which triples how many blocks KubeJS registers at startup.
+
+Chisels & Bits was considered and rejected: every C&B block shares one id with
+its shape in block-entity NBT, and WorldEdit copy/paste renders them invisible
+([WorldEdit #2390](https://github.com/EngineHub/WorldEdit/issues/2390)). For
+true detail everywhere, `--units-per-block 8` still works — E:Z2's tallest map
+then needs ~2426 blocks of height, inside the 4064 a dimension allows.
+
 ## Configuration
 
 Every setting lives in one TOML file, and anything omitted keeps its default:
@@ -186,7 +261,7 @@ See `example-config.toml` for the full set with comments.
 
 ## Notes on Source BSP handling
 
-Four things worth knowing if you work on this code:
+Five things worth knowing if you work on this code:
 
 - `vbsp` sorts its `leaves` vector by cluster, so its leaf indices do **not**
   match the indices BSP node children reference. Associating brushes with the
@@ -208,6 +283,11 @@ Four things worth knowing if you work on this code:
   in `d1_trainstation_02` are stored this way, and taken at face value every
   door, button, trigger and `func_brush` in a map piles up around wherever
   Source's origin happens to land.
+- `gameinfo.txt` is not uniform across mods. Half-Life 2 writes `SearchPaths`
+  unquoted, Entropy: Zero 2 writes `"SearchPaths"`, and E:Z2's content sits
+  behind `|gameinfo_path|ez2/*` and `|all_source_engine_paths|mapbase/*`.
+  Missing any of those finds nothing at all: before the parser handled them,
+  E:Z2 resolved 0 of 127 materials rather than 125.
 
 ## Building
 

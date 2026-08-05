@@ -40,6 +40,20 @@ grate = { block = "minecraft:iron_bars" }
 ladder = { block = "minecraft:ladder" }
 
 [materials]
+# "vanilla" picks vanilla blocks by rules and average colour, and needs no
+# mods. "kubejs" generates a block per material carrying its real Source
+# texture and writes a KubeJS pack registering them, which the schematics then
+# require in order to paste. Textures are read from the game install; see the
+# `textures` command if any turn up missing.
+mode = "vanilla"
+
+# Edge length of generated block textures. 16 matches vanilla.
+texture_size = 16
+
+# Extra game directories to search for .vmt/.vtf content. The map's own game
+# directory and everything its gameinfo.txt mounts are searched automatically.
+game_dirs = []
+
 # Your own rules file, relative to this config. Its rules are tested before the
 # built-in ones, so anything here wins. See the `materials` command for stubs.
 # rules = "my-rules.toml"
@@ -72,6 +86,16 @@ shell_thickness = 1
 # 6 = faces only, 26 = faces, edges and corners.
 shell_neighborhood = 6
 interior_block = "minecraft:stone"
+
+[shapes]
+# Fit half-height and stepped geometry to slabs and stairs, doubling the
+# effective vertical resolution. Vanilla blocks only, and only for the block
+# families that have slab and stair variants; anything else stays a full cube.
+enabled = true
+# Also register slab and stair variants of every generated textured block, so
+# shape fitting works in "kubejs" mode too. Off by default: it triples the
+# number of blocks KubeJS registers at startup and the size of the pack.
+kubejs_variants = false
 
 [displacement]
 # Voxelize displacement surfaces: Source's terrain, cliffs and road surfaces.

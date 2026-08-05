@@ -70,6 +70,8 @@ pub enum Source {
     Tool,
     /// Matched rule number `n`, counting user rules before built-in ones.
     Rule(usize),
+    /// A generated block carrying the material's own Source texture.
+    Texture,
     /// Matched by average colour.
     Auto,
     /// Nothing matched, so the configured fallback was used.
@@ -81,6 +83,7 @@ impl Source {
         match self {
             Source::Tool => "tool".into(),
             Source::Rule(index) => format!("rule {}", index + 1),
+            Source::Texture => "texture".into(),
             Source::Auto => "auto".into(),
             Source::Fallback => "fallback".into(),
         }
@@ -118,6 +121,20 @@ impl Resolver {
     /// Fails only on a bad configuration: an unknown `palette_set`, or rules
     /// that do not compile.
     pub fn new(config: &Config, materials: &[Material]) -> Result<Resolver> {
+        Resolver::with_textures(config, materials, &BTreeMap::new())
+    }
+
+    /// As [`Resolver::new`], with generated texture blocks keyed by material.
+    ///
+    /// A texture beats colour matching but not a rule that names a block: no
+    /// texture makes a grate see-through, so `*grate*` staying `iron_bars` is
+    /// the difference between a grate and an opaque cube with a grate painted
+    /// on it. Rules that only narrow colour matching yield to the texture.
+    pub fn with_textures(
+        config: &Config,
+        materials: &[Material],
+        textures: &BTreeMap<String, String>,
+    ) -> Result<Resolver> {
         let sets = blocks::parse_set(&config.materials.palette_set)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("in [materials] palette_set")?;
@@ -140,14 +157,19 @@ impl Resolver {
 
         resolver.assignments = materials
             .iter()
-            .map(|material| resolver.assign(material, auto))
+            .map(|material| resolver.assign(material, auto, textures))
             .collect();
         Ok(resolver)
     }
 
     /// `default_sets` is the configured `palette_set`, or `None` when colour
     /// matching is switched off entirely.
-    fn assign(&self, material: &Material, default_sets: Option<u16>) -> Assignment {
+    fn assign(
+        &self,
+        material: &Material,
+        default_sets: Option<u16>,
+        textures: &BTreeMap<String, String>,
+    ) -> Assignment {
         let color = auto::display_color(material.reflectivity);
         let matched = self.rules.matches(&material.name).map(|(index, _)| index);
         let finish = |block: Option<String>, source: Source| Assignment {
@@ -177,6 +199,11 @@ impl Resolver {
                 }
                 Action::Auto(_) => {}
             }
+        }
+
+        // The material's own texture, where one was generated for it.
+        if let Some(block) = textures.get(&material.name) {
+            return finish(Some(block.clone()), Source::Texture);
         }
 
         if let Some(block) =
