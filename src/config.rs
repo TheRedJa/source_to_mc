@@ -26,7 +26,23 @@ impl Config {
     pub fn load(path: &Path) -> Result<Config> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
+        let mut config: Config =
+            toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+        // A `rules` path is relative to the config that names it, so that a
+        // config and its rules can be moved together.
+        config.load_rules(path.parent().unwrap_or(Path::new(".")))?;
+        Ok(config)
+    }
+
+    /// Read the rules file named by `[materials] rules`, resolving a relative
+    /// path against `base`.
+    pub fn load_rules(&mut self, base: &Path) -> Result<()> {
+        let Some(rules) = &self.materials.rules else {
+            return Ok(());
+        };
+        let path = base.join(rules);
+        self.materials.loaded_rules = crate::palette::rules::Rules::load(&path)?;
+        Ok(())
     }
 }
 
@@ -126,27 +142,33 @@ impl Default for Contents {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Materials {
-    /// Path to a rules TOML, relative to the config file.
+    /// Path to a rules TOML, relative to the config file. Its rules are tested
+    /// before the built-in ones, so they win.
     pub rules: Option<String>,
+    /// Also use the Half-Life 2 / Entropy: Zero rules shipped in the binary.
+    pub builtin_rules: bool,
     /// Fall back to average-colour matching for unmatched materials.
     pub auto_palette: bool,
-    /// Restrict auto-palette results to this named block set.
+    /// Restrict auto-palette results to this named block set: `full`, or a
+    /// comma-separated list of `stone`, `concrete`, `wool`, `terracotta`,
+    /// `wood`, `natural`, `metal`, `nether`.
     pub palette_set: String,
     /// Block used when nothing matches and auto-palette is off.
     pub fallback_block: String,
-    /// Extra directories searched for `.vmt`/`.vtf` content, alongside the
-    /// BSP's embedded pakfile.
-    pub game_dirs: Vec<String>,
+    /// The rules named by `rules`, filled in by [`Config::load`].
+    #[serde(skip)]
+    pub loaded_rules: crate::palette::rules::Rules,
 }
 
 impl Default for Materials {
     fn default() -> Self {
         Materials {
             rules: None,
+            builtin_rules: true,
             auto_palette: true,
             palette_set: "full".into(),
             fallback_block: "minecraft:stone".into(),
-            game_dirs: Vec::new(),
+            loaded_rules: Default::default(),
         }
     }
 }

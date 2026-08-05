@@ -55,9 +55,64 @@ fn models_to_convert(map: &Map, config: &Config) -> Vec<usize> {
     }
 }
 
-pub fn convert(map: &Map, config: &Config) -> Conversion {
+/// Texture flags that mean "this face is never drawn", so it should never
+/// become blocks either. Checked per side, because a brush commonly mixes one
+/// visible face with five nodraw ones.
+fn is_invisible(flags: vbsp::TextureFlags) -> bool {
+    use vbsp::TextureFlags as F;
+    flags.intersects(F::NODRAW | F::SKIP | F::HINT | F::TRIGGER)
+}
+
+/// The block one brush side contributes, or `None` if it contributes nothing.
+///
+/// The material can veto the brush's contents, which matters more than it
+/// sounds. A fog volume is a brush flagged `WINDOW`, because fog is
+/// translucent, wearing `tools/toolsfog`. Taking the contents at face value
+/// turns a city block of atmosphere into a solid cube of glass: in `az_c1_2`
+/// that was 1.9 million glass blocks, six times the rest of the map put
+/// together. The material knows it is not a window.
+fn side_block<'a>(
+    decision: &'a Decision,
+    resolver: &'a Resolver,
+    material: Option<usize>,
+    flags: vbsp::TextureFlags,
+    skip_sky: bool,
+) -> Option<&'a str> {
+    use vbsp::TextureFlags as F;
+    if is_invisible(flags) || (skip_sky && flags.intersects(F::SKY | F::SKY2D)) {
+        return None;
+    }
+
+    match material {
+        // A material that resolves to no block drops the side outright.
+        Some(index) => {
+            let block = resolver.block_for_material(index)?;
+            match decision {
+                // A rule that names a block outranks the contents flag, which
+                // is only ever a guess about what the brush is. Entropy: Zero
+                // 2's arctic maps flag their snow sheets `WINDOW` because they
+                // are translucent; the `*snow*` rule knows better than to make
+                // them glass.
+                Decision::Force(_) if resolver.named_by_rule(index) => Some(block),
+                Decision::Force(forced) => Some(forced),
+                Decision::ByMaterial => Some(block),
+                Decision::Skip => None,
+            }
+        }
+        // A side with no texture info at all still bounds the brush, so it
+        // gets the fallback rather than punching a hole in it.
+        None => match decision {
+            Decision::Force(forced) => Some(forced),
+            Decision::ByMaterial => Some(resolver.fallback_block()),
+            Decision::Skip => None,
+        },
+    }
+}
+
+pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let transform = Transform::new(config, map.bounds());
-    let resolver = Resolver::new(config);
+    let resolver = Resolver::new(config, map.materials())?;
+    let skip_sky = config.contents.skip_sky;
 
     // Gather every brush first so the voxelization itself parallelizes cleanly.
     let solids: Vec<Solid> = models_to_convert(map, config)
@@ -85,19 +140,13 @@ pub fn convert(map: &Map, config: &Config) -> Conversion {
                 .sides
                 .iter()
                 .map(|side| {
-                    let block = match &decision {
-                        Decision::Force(block) => Some(block.as_str()),
-                        Decision::ByMaterial => {
-                            let material = side.texture_info.and_then(|i| map.material_name(i));
-                            resolver.block_for_material(material)
-                        }
-                        Decision::Skip => None,
-                    };
-                    block.map(|name| palette.lock().unwrap().intern(name))
+                    let material = side.texture_info.and_then(|i| map.material_index(i));
+                    side_block(&decision, &resolver, material, side.texture_flags, skip_sky)
+                        .map(|name| palette.lock().unwrap().intern(name))
                 })
                 .collect();
 
-            // A brush whose every side is a tool texture contributes nothing.
+            // A brush whose every side was vetoed contributes nothing.
             if side_blocks.iter().all(Option::is_none) {
                 skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return grid;
@@ -136,7 +185,7 @@ pub fn convert(map: &Map, config: &Config) -> Conversion {
     }
 
     let skipped = skipped.into_inner();
-    Conversion {
+    Ok(Conversion {
         stats: Stats {
             solids_voxelized: solids.len() - skipped,
             solids_skipped: skipped,
@@ -147,7 +196,7 @@ pub fn convert(map: &Map, config: &Config) -> Conversion {
         grid,
         palette,
         transform,
-    }
+    })
 }
 
 /// Bounds of the map in block space, for reporting.
@@ -162,7 +211,128 @@ pub fn block_bounds(map: &Map, transform: &Transform) -> Aabb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bsp::Material;
     use std::path::Path;
+    use vbsp::TextureFlags;
+
+    fn resolver(materials: &[Material]) -> Resolver {
+        Resolver::new(&Config::default(), materials).unwrap()
+    }
+
+    fn material(name: &str) -> Material {
+        Material {
+            name: name.into(),
+            raw_name: name.into(),
+            reflectivity: [0.2, 0.2, 0.2],
+        }
+    }
+
+    /// Fog volumes are brushes flagged `WINDOW`, because fog is translucent.
+    /// Trusting the contents flag alone paves a city block in glass.
+    #[test]
+    fn a_tool_material_vetoes_the_contents_flag() {
+        let materials = [material("tools/toolsfog"), material("tools/toolsinvisible")];
+        let r = resolver(&materials);
+        let glass = Decision::Force("minecraft:glass".into());
+        for index in 0..materials.len() {
+            assert_eq!(
+                side_block(&glass, &r, Some(index), TextureFlags::empty(), true),
+                None,
+                "{} became glass",
+                materials[index].name
+            );
+        }
+    }
+
+    /// The veto must not disarm the flag where it is right: a real window
+    /// brush wears a glass material and has to stay glass.
+    #[test]
+    fn a_real_window_still_honours_the_contents_flag() {
+        let materials = [material("glass/glasswindow002a")];
+        let r = resolver(&materials);
+        assert_eq!(
+            side_block(
+                &Decision::Force("minecraft:glass".into()),
+                &r,
+                Some(0),
+                TextureFlags::empty(),
+                true,
+            ),
+            Some("minecraft:glass")
+        );
+    }
+
+    /// Translucent snow is flagged `WINDOW`, but a rule naming snow is a
+    /// statement of intent and beats the flag's guess.
+    #[test]
+    fn a_named_rule_outranks_the_contents_flag() {
+        let materials = [material("ground/snow01")];
+        let r = resolver(&materials);
+        assert!(r.named_by_rule(0));
+        assert_eq!(
+            side_block(
+                &Decision::Force("minecraft:glass".into()),
+                &r,
+                Some(0),
+                TextureFlags::empty(),
+                true,
+            ),
+            Some("minecraft:snow_block")
+        );
+    }
+
+    /// A colour match is only a guess, so it must not override the flag: a
+    /// water brush wearing an unrecognised material is still water.
+    #[test]
+    fn a_colour_guess_does_not_outrank_the_contents_flag() {
+        let materials = [material("custom/unknownsurface")];
+        let r = resolver(&materials);
+        assert!(!r.named_by_rule(0));
+        assert_eq!(
+            side_block(
+                &Decision::Force("minecraft:water".into()),
+                &r,
+                Some(0),
+                TextureFlags::empty(),
+                true,
+            ),
+            Some("minecraft:water")
+        );
+    }
+
+    #[test]
+    fn faces_the_engine_never_draws_contribute_nothing() {
+        let materials = [material("concrete/concretewall001a")];
+        let r = resolver(&materials);
+        for flag in [
+            TextureFlags::NODRAW,
+            TextureFlags::SKIP,
+            TextureFlags::HINT,
+            TextureFlags::TRIGGER,
+            TextureFlags::SKY,
+            TextureFlags::SKY2D,
+        ] {
+            assert_eq!(
+                side_block(&Decision::ByMaterial, &r, Some(0), flag, true),
+                None,
+                "{flag:?} face was kept"
+            );
+        }
+        assert!(
+            side_block(&Decision::ByMaterial, &r, Some(0), TextureFlags::empty(), true).is_some()
+        );
+    }
+
+    /// A side carrying no texture info at all still bounds its brush, so it
+    /// must not punch a hole in it.
+    #[test]
+    fn a_side_without_a_material_uses_the_fallback() {
+        let r = resolver(&[]);
+        assert_eq!(
+            side_block(&Decision::ByMaterial, &r, None, TextureFlags::empty(), true),
+            Some("minecraft:stone")
+        );
+    }
 
     fn sample_map() -> Option<Map> {
         let path = Path::new(concat!(
@@ -175,7 +345,7 @@ mod tests {
     #[test]
     fn converts_a_real_map_to_blocks() {
         let Some(map) = sample_map() else { return };
-        let result = convert(&map, &Config::default());
+        let result = convert(&map, &Config::default()).unwrap();
 
         assert!(result.stats.blocks > 10_000, "got {}", result.stats.blocks);
         assert!(result.stats.solids_voxelized > 0);
@@ -188,10 +358,35 @@ mod tests {
         );
     }
 
+    /// No single block should dominate a converted map. Before materials
+    /// landed, fog volumes flagged `WINDOW` made glass 86% of some Entropy:
+    /// Zero maps; a regression there would show up here first.
+    #[test]
+    fn no_single_block_swamps_a_converted_map() {
+        let Some(map) = sample_map() else { return };
+        let result = convert(&map, &Config::default()).unwrap();
+        let total = result.stats.blocks;
+        let (block, count) = result
+            .stats
+            .block_counts
+            .iter()
+            .max_by_key(|(_, count)| **count)
+            .unwrap();
+        assert!(
+            count * 2 < total,
+            "{block} is {count} of {total} blocks"
+        );
+        assert!(
+            result.stats.block_counts.len() > 8,
+            "only {} block types",
+            result.stats.block_counts.len()
+        );
+    }
+
     #[test]
     fn converted_geometry_lands_inside_the_map_bounds() {
         let Some(map) = sample_map() else { return };
-        let result = convert(&map, &Config::default());
+        let result = convert(&map, &Config::default()).unwrap();
         let bounds = block_bounds(&map, &result.transform);
         let (min, max) = result.grid.bounds().unwrap();
 
@@ -207,8 +402,8 @@ mod tests {
 
         let mut solid_config = Config::default();
         solid_config.fill.mode = FillMode::Solid;
-        let solid = convert(&map, &solid_config);
-        let hollow = convert(&map, &Config::default());
+        let solid = convert(&map, &solid_config).unwrap();
+        let hollow = convert(&map, &Config::default()).unwrap();
 
         assert!(
             hollow.stats.blocks * 2 < solid.stats.blocks,
@@ -224,8 +419,8 @@ mod tests {
         let mut coarse = Config::default();
         coarse.scale.units_per_block = 32.0;
 
-        let fine = convert(&map, &Config::default());
-        let coarse = convert(&map, &coarse);
+        let fine = convert(&map, &Config::default()).unwrap();
+        let coarse = convert(&map, &coarse).unwrap();
         assert!(
             coarse.stats.blocks < fine.stats.blocks,
             "coarse {} vs fine {}",
@@ -240,8 +435,8 @@ mod tests {
         let mut config = Config::default();
         config.entities.brush_entities = crate::config::BrushEntityMode::Skip;
 
-        let without = convert(&map, &config);
-        let with = convert(&map, &Config::default());
+        let without = convert(&map, &config).unwrap();
+        let with = convert(&map, &Config::default()).unwrap();
         assert!(without.stats.blocks <= with.stats.blocks);
     }
 }
