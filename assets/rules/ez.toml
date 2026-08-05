@@ -1,0 +1,167 @@
+# Built-in material rules for Half-Life 2 and Entropy: Zero.
+#
+# These ship inside the binary and are consulted after your own rules file, so
+# anything you write wins. Turn them off with `builtin_rules = false` under
+# `[materials]`, or `--no-builtin-rules`.
+#
+# Rules are tested top to bottom and the first match wins, so specific patterns
+# come before broad ones. Patterns are case-insensitive and `*` crosses `/`.
+# Materials are matched after normalization, so `maps/<map>/concrete/wall_1_2_3`
+# has already become `concrete/wall`.
+#
+# The approach here: name a block outright only where the *kind* of block
+# matters and no colour could imply it — bars must be bars, a ladder must be
+# climbable, glass must be see-through. Everything else uses `auto` with a
+# `set`, which picks the nearest colour from that family of blocks. That keeps
+# wood looking like wood while preserving the light and dark variation across a
+# map, which a fixed mapping flattens: Entropy: Zero's metal ranges from near
+# white to near black, and turning all of it into iron blocks loses the map.
+
+# --- Nothing that should ever become a block -------------------------------
+
+[[rule]]
+match = ["tools/*", "*toolsnodraw*", "*toolsskip*", "*toolshint*", "*toolsclip*"]
+skip = true
+
+# Decals, overlays and sprites are painted onto other surfaces and have no
+# geometry of their own. Skyboxes are the void outside the map.
+[[rule]]
+match = ["decals/*", "overlays/*", "sprites/*", "*skybox*", "sky/*", "skybox/*"]
+skip = true
+
+# Atmosphere. Fog, cloud and haze brushes are flagged translucent, which reads
+# as "window", and they are the size of the areas they tint — a single fog
+# volume in az_c1_2 spans a city block. Left in, they entomb the map: they were
+# 86% of some Entropy: Zero conversions.
+[[rule]]
+match = ["*fog*", "*cloud*", "*haze*", "*smoke*", "*dust*"]
+skip = true
+
+# `halflife/black` is the void behind and beneath a map, not a surface. It is
+# painted on brushes big enough to be 94% of Entropy: Zero 2's chapter six.
+# Override it with a rule of your own if you want black walls back.
+[[rule]]
+match = ["halflife/black", "*/black"]
+skip = true
+
+# --- Where the kind of block is the whole point ----------------------------
+
+# Grates, fences and railings read as bars far better than as a solid wall.
+[[rule]]
+match = ["*grate*", "*fence*", "*railing*", "*chainlink*", "*catwalk*"]
+block = "minecraft:iron_bars"
+
+[[rule]]
+match = ["*ladder*"]
+block = "minecraft:ladder"
+
+# Combine glass and force fields are tinted; ordinary windows are not.
+[[rule]]
+match = ["glass/combine*", "effects/combine*", "*forcefield*"]
+block = "minecraft:light_blue_stained_glass"
+
+[[rule]]
+match = ["glass/*", "*glasswindow*", "*trainglass*", "*windowglass*"]
+block = "minecraft:glass"
+
+[[rule]]
+match = ["*water*", "*toxicslime*", "*slime*"]
+block = "minecraft:water"
+
+[[rule]]
+match = [
+    "lights/*",
+    "*lightpanel*",
+    "*fluorescent*",
+    "*light_panel*",
+    "plastic/plastic_light*",
+]
+block = "minecraft:glowstone"
+
+# --- Broad surface families, matched by colour within a family -------------
+
+# Combine architecture is near-black panelled metal. Deepslate and blackstone
+# are the only families dark enough.
+[[rule]]
+match = ["metal/citadel*", "metal/metalcombine*", "*combinecore*", "*combinewall*"]
+auto = true
+set = "stone"
+
+[[rule]]
+match = ["metal/metaltrack*", "metal/metalrail*"]
+block = "minecraft:deepslate"
+
+# Ores and copper give the only convincing metallic tones, with stone filling
+# in the greys that dominate Half-Life 2's industrial textures.
+[[rule]]
+match = ["metal/*", "*metalwall*", "*metaltruss*", "*metalhull*", "*metaldoor*", "*metalvent*", "*metalpipe*"]
+auto = true
+set = "metal,stone"
+
+[[rule]]
+match = ["concrete/*", "*concretewall*", "*concretefloor*", "stone/*", "tile/*", "*asphalt*", "*asphault*"]
+auto = true
+set = "stone"
+
+[[rule]]
+match = ["plaster/*", "*plasterwall*", "*wallpaper*"]
+auto = true
+set = "terracotta,stone"
+
+# Brick is iconic enough that the block is worth naming, but Half-Life 2 has
+# pale brick as well as red, so the family still decides which.
+[[rule]]
+match = ["brick/*", "*brickwall*", "*brickfloor*"]
+auto = true
+set = "terracotta,stone"
+
+[[rule]]
+match = ["wood/*", "*wooddoor*", "*woodbeam*", "*woodwall*", "*woodfloor*", "carpet/*"]
+auto = true
+set = "wood"
+
+# Trains, cables and the rest of the vehicle and industrial fittings.
+[[rule]]
+match = ["vehicle/*", "cable/*", "composite/*", "*handrail*", "*_metal*"]
+auto = true
+set = "metal,stone"
+
+# Painted plastic panelling, which Entropy: Zero 2 uses heavily. Concrete is
+# the only family with the same flat saturated finish.
+[[rule]]
+match = ["plastic/*"]
+auto = true
+set = "concrete"
+
+# --- Ground and nature -----------------------------------------------------
+
+[[rule]]
+match = ["*snow*"]
+block = "minecraft:snow_block"
+
+[[rule]]
+match = [
+    "nature/*",
+    "ground/*",
+    "wet/*",
+    "xen/*",
+    "*dirtfloor*",
+    "*mudfloor*",
+    "*gravelfloor*",
+    "*cliff*",
+    "*cavewall*",
+    "*icicle*",
+]
+auto = true
+set = "natural,stone"
+
+# --- Everything else -------------------------------------------------------
+
+# Building facades, shopfronts, props, signage and the two games' own custom
+# textures are photo-sourced and vary far too much for a fixed mapping, so they
+# get the whole palette. The catch-all last line means a material family this
+# file has never heard of is still matched by colour rather than falling back
+# to one undifferentiated block.
+[[rule]]
+match = ["*"]
+auto = true

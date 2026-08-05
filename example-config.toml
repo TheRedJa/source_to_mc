@@ -17,6 +17,8 @@ rotate_yaw = 0.0
 
 [contents]
 # Skip faces flagged as sky rather than building a ceiling over the map.
+# Faces flagged nodraw, skip, hint or trigger are always dropped: the engine
+# never draws them, so they are not surfaces.
 skip_sky = true
 # Skip brushes made entirely of nodraw/skip/hint/clip tool textures.
 skip_tool_brushes = true
@@ -35,14 +37,29 @@ grate = { block = "minecraft:iron_bars" }
 ladder = { block = "minecraft:ladder" }
 
 [materials]
-# Block used when nothing else matches. The rules engine and VTF colour
-# matching are not implemented yet, so at present everything solid uses this.
-fallback_block = "minecraft:stone"
+# Your own rules file, relative to this config. Its rules are tested before the
+# built-in ones, so anything here wins. See the `materials` command for stubs.
+# rules = "my-rules.toml"
+
+# Also use the Half-Life 2 / Entropy: Zero rules shipped inside the binary.
+builtin_rules = true
+
+# Match anything no rule pins down against the average colour of its texture.
+# Turning this off makes every unpinned material `fallback_block`.
 auto_palette = true
+
+# Which blocks colour matching may choose from: "full", or a comma-separated
+# list of stone, concrete, wool, terracotta, wood, natural, metal, nether,
+# exotic. A rule can narrow this further with its own `set`.
+#
+# "full" includes wool, which matches pale rendered facades better than
+# anything else but is flammable; drop it by listing the sets you do want.
 palette_set = "full"
-# Extra directories searched for .vmt/.vtf content alongside the BSP's own
-# embedded pakfile, e.g. the game's material folders.
-game_dirs = []
+
+# Used when neither a rule nor a colour has an answer. In practice this only
+# happens for self-illuminated textures — monitors, logos — which Source stores
+# no reflectivity for.
+fallback_block = "minecraft:stone"
 
 [fill]
 # "hollow" keeps only the surface; "solid" fills brush interiors.

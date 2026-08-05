@@ -27,11 +27,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// List every material the map references.
+    /// Show what every material in the map resolves to, and why.
     Materials {
         map: PathBuf,
         #[command(flatten)]
         common: Common,
+        /// Emit the colour-matched materials as rules, ready to edit.
+        #[arg(long)]
+        stubs: bool,
+        /// Only materials decided by colour matching or the fallback.
+        #[arg(long, conflicts_with = "stubs")]
+        guessed: bool,
+        /// Emit the report as JSON.
+        #[arg(long, conflicts_with_all = ["stubs", "guessed"])]
+        json: bool,
     },
     /// Voxelize a map and write Sponge v3 schematic tiles.
     Convert {
@@ -76,6 +85,16 @@ struct Common {
     /// Source units per Minecraft block; overrides the config.
     #[arg(long)]
     units_per_block: Option<f64>,
+    /// Material rules TOML, tested before the built-in rules.
+    #[arg(long)]
+    rules: Option<PathBuf>,
+    /// Blocks colour matching may pick: `full`, or a comma-separated list of
+    /// stone, concrete, wool, terracotta, wood, natural, metal, nether.
+    #[arg(long)]
+    palette_set: Option<String>,
+    /// Ignore the built-in Half-Life 2 / Entropy: Zero material rules.
+    #[arg(long)]
+    no_builtin_rules: bool,
 }
 
 impl Common {
@@ -87,6 +106,18 @@ impl Common {
         if let Some(units) = self.units_per_block {
             anyhow::ensure!(units > 0.0, "--units-per-block must be positive");
             config.scale.units_per_block = units;
+        }
+        if let Some(rules) = &self.rules {
+            // A path given on the command line is relative to the shell's
+            // directory, not to whatever config file was also passed.
+            config.materials.rules = Some(rules.display().to_string());
+            config.load_rules(Path::new("."))?;
+        }
+        if let Some(set) = &self.palette_set {
+            config.materials.palette_set = set.clone();
+        }
+        if self.no_builtin_rules {
+            config.materials.builtin_rules = false;
         }
         Ok(config)
     }
@@ -109,11 +140,19 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Materials { map, common } => {
-            common.resolve()?;
+        Command::Materials { map, common, stubs, guessed, json } => {
+            let config = common.resolve()?;
             let map = load(&map)?;
-            for material in map.materials() {
-                println!("{material}");
+            let mut report = src2mc::palette::report::report(&map, &config)?;
+            if guessed {
+                report.entries.retain(|e| e.decided_by == "auto" || e.decided_by == "fallback");
+            }
+            if stubs {
+                print!("{}", report.stubs());
+            } else if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.render());
             }
         }
 
@@ -134,7 +173,7 @@ fn main() -> Result<()> {
             let map = load(&map)?;
             eprintln!("converting {} at {} units/block...", map.name, config.scale.units_per_block);
 
-            let result = src2mc::convert::convert(&map, &config);
+            let result = src2mc::convert::convert(&map, &config)?;
             let stats = &result.stats;
             eprintln!(
                 "  {} brushes voxelized ({} skipped), {} blocks after hollowing (from {})",
@@ -143,6 +182,14 @@ fn main() -> Result<()> {
                 stats.blocks,
                 stats.blocks_before_hollow,
             );
+
+            if stats.blocks == 0 {
+                eprintln!(
+                    "  warning: no blocks produced. Every surface was skipped, which is \
+                     correct for a credits or skybox-only map but otherwise suggests the \
+                     material rules are dropping too much — check `src2mc materials`."
+                );
+            }
 
             let manifest = tiling::write_tiles(
                 &out,

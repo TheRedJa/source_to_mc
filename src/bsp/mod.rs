@@ -27,6 +27,81 @@ pub struct Side {
     pub displacement: Option<usize>,
 }
 
+/// A material the map references, one per entry in the texture-data lump.
+#[derive(Debug, Clone)]
+pub struct Material {
+    /// Authored material path: lowercased, with the compiler's cubemap and
+    /// blend-patch decorations undone. This is what rules match against.
+    pub name: String,
+    /// Exactly as stored in the BSP.
+    pub raw_name: String,
+    /// The compiler's average texture colour, in linear light. Source stores it
+    /// so radiosity can bounce light off the surface, which makes it a free
+    /// stand-in for decoding the `.vtf` ourselves.
+    pub reflectivity: [f64; 3],
+}
+
+/// Undo the decorations the map compiler adds to material paths.
+///
+/// A face lit by an `env_cubemap` has its material rewritten to a per-map patch
+/// material, `maps/<mapname>/<real path>_<x>_<y>_<z>`, naming the cubemap's
+/// origin. Displacement blend textures get a `_wvt_patch` suffix the same way.
+/// Both hide the authored path, and in Entropy: Zero two thirds of all
+/// materials are patched, so rules would be useless without this.
+///
+/// Patching nests: a blend material already living under `maps/<mapname>/`
+/// picks up a *second* prefix when a cubemap patches it as well, which is why
+/// this strips repeatedly rather than once. `d1_canals_01a` has several.
+pub fn normalize_material(name: &str) -> String {
+    let lower = name.to_ascii_lowercase().replace('\\', "/");
+    let mut path = lower.as_str();
+    let mut patched = false;
+
+    // Bounded rather than `loop`, so a pathological name cannot spin.
+    for _ in 0..8 {
+        if let Some((_, tail)) = path.strip_prefix("maps/").and_then(|r| r.split_once('/')) {
+            path = tail;
+            patched = true;
+            continue;
+        }
+        // The cubemap origin is exactly three integers, and only ever appears
+        // on a patched material. Stripping trailing numbers from an ordinary
+        // name would eat part of it: `metal/metalwall048a_2_3_4` is a real
+        // material path, not a patch.
+        if patched {
+            let stripped = strip_cubemap_origin(path);
+            if stripped.len() < path.len() {
+                path = stripped;
+                continue;
+            }
+        }
+        if let Some(stripped) = path.strip_suffix("_wvt_patch") {
+            path = stripped;
+            continue;
+        }
+        break;
+    }
+
+    path.to_string()
+}
+
+/// Remove a trailing `_<x>_<y>_<z>`, or return the path untouched.
+fn strip_cubemap_origin(path: &str) -> &str {
+    let mut head = path;
+    for _ in 0..3 {
+        match head.rsplit_once('_') {
+            Some((rest, tail)) if is_integer(tail) && !rest.is_empty() => head = rest,
+            _ => return path,
+        }
+    }
+    head
+}
+
+fn is_integer(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// A convex brush, ready to voxelize.
 #[derive(Debug, Clone)]
 pub struct Solid {
@@ -44,6 +119,8 @@ pub struct Map {
     pub name: String,
     /// Leaf brush ranges in original BSP order, which `vbsp` does not preserve.
     leaf_brushes: Vec<rawleaves::LeafBrushRange>,
+    /// One entry per texture-data lump entry, in lump order.
+    materials: Vec<Material>,
     /// Bytes repaired in the entity lump because they were not valid UTF-8.
     pub repaired_bytes: usize,
 }
@@ -65,11 +142,27 @@ impl Map {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "map".into());
+        let materials = (0..bsp.textures_data.len())
+            .map(|index| {
+                let data = &bsp.textures_data[index];
+                let raw_name = vbsp::Handle::new(&bsp, data).name().to_string();
+                Material {
+                    name: normalize_material(&raw_name),
+                    raw_name,
+                    reflectivity: [
+                        data.reflectivity.x as f64,
+                        data.reflectivity.y as f64,
+                        data.reflectivity.z as f64,
+                    ],
+                }
+            })
+            .collect();
         Ok(Map {
             bsp,
             path: path.to_path_buf(),
             name,
             leaf_brushes,
+            materials,
             repaired_bytes,
         })
     }
@@ -87,18 +180,42 @@ impl Map {
         self.bsp.texture_info(texture_info).map(|info| info.name())
     }
 
-    /// Every distinct material referenced by the map's brush sides.
-    pub fn materials(&self) -> Vec<&str> {
-        let mut seen: Vec<&str> = self
-            .bsp
-            .textures_info
-            .iter()
-            .enumerate()
-            .filter_map(|(i, _)| self.material_name(i))
-            .collect();
-        seen.sort_unstable();
-        seen.dedup();
-        seen
+    /// Every material the map references, one per texture-data entry.
+    pub fn materials(&self) -> &[Material] {
+        &self.materials
+    }
+
+    /// Index into [`Map::materials`] for a texture-info index. Several
+    /// texture-infos share one material when the same texture is used with
+    /// different alignments.
+    pub fn material_index(&self, texture_info: usize) -> Option<usize> {
+        let info = self.bsp.textures_info.get(texture_info)?;
+        let index = usize::try_from(info.texture_data_index).ok()?;
+        (index < self.materials.len()).then_some(index)
+    }
+
+    /// How many brush sides use each material, indexed as [`Map::materials`]
+    /// is. Materials used by faces but no brush side score zero: those are
+    /// displacement and detail surfaces, which we do not voxelize yet.
+    pub fn material_usage(&self) -> Vec<usize> {
+        let mut counts = vec![0usize; self.materials.len()];
+        for side in &self.bsp.brush_sides {
+            if let Some(index) = usize::try_from(side.texture_info)
+                .ok()
+                .and_then(|i| self.material_index(i))
+            {
+                counts[index] += 1;
+            }
+        }
+        counts
+    }
+
+    /// Distinct normalized material paths, sorted.
+    pub fn material_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.materials.iter().map(|m| m.name.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        names
     }
 
     /// Brush indices belonging to `model`, found by walking its node subtree
@@ -200,6 +317,93 @@ mod tests {
             "/Entropy Zero/EntropyZero/maps/az_c4_4.bsp"
         ));
         path.exists().then(|| Map::load(path).unwrap())
+    }
+
+    #[test]
+    fn cubemap_patched_materials_normalize_to_the_authored_path() {
+        assert_eq!(
+            normalize_material("maps/az_bg_default/brick/brickwall031b_-621_2666_2908"),
+            "brick/brickwall031b"
+        );
+        assert_eq!(
+            normalize_material("maps/ez2_c1_1/building_template/building_template019c_-864_-84_3648"),
+            "building_template/building_template019c"
+        );
+    }
+
+    #[test]
+    fn blend_patch_materials_lose_their_suffix() {
+        assert_eq!(
+            normalize_material("CONCRETE/BlendConcDirt004a_wvt_patch"),
+            "concrete/blendconcdirt004a"
+        );
+        assert_eq!(
+            normalize_material("maps/az_c4_4/nature/blendcliffdirt001a_wvt_patch"),
+            "nature/blendcliffdirt001a"
+        );
+    }
+
+    /// A blend material lives under `maps/<map>/` already, so a cubemap patch
+    /// on top of it produces two prefixes and both decorations at once. Real
+    /// example, from `d1_canals_01a`.
+    #[test]
+    fn nested_patching_is_unwound_completely() {
+        assert_eq!(
+            normalize_material(
+                "maps/d1_canals_01a/maps/d1_canals_01a/nature/blendmudmud001a_wvt_patch_-1624_6208_7"
+            ),
+            "nature/blendmudmud001a"
+        );
+    }
+
+    #[test]
+    fn plain_materials_are_only_lowercased() {
+        assert_eq!(
+            normalize_material("CONCRETE\\CONCRETEWALL001A"),
+            "concrete/concretewall001a"
+        );
+        assert_eq!(normalize_material("tools/toolsnodraw"), "tools/toolsnodraw");
+    }
+
+    /// Trailing numbers are part of nearly every Source material name, so only
+    /// the three that follow a `maps/` prefix may be stripped.
+    #[test]
+    fn version_numbers_in_ordinary_names_survive() {
+        assert_eq!(
+            normalize_material("metal/metalwall048a_2_3_4"),
+            "metal/metalwall048a_2_3_4"
+        );
+        assert_eq!(normalize_material("maps/x/metal/wall_1_2"), "metal/wall_1_2");
+    }
+
+    #[test]
+    fn real_materials_carry_a_usable_reflectivity() {
+        let Some(map) = sample_map() else { return };
+        assert!(!map.materials().is_empty());
+        for material in map.materials() {
+            assert!(
+                material.reflectivity.iter().all(|c| c.is_finite() && *c >= 0.0),
+                "{} has reflectivity {:?}",
+                material.name,
+                material.reflectivity
+            );
+        }
+        // Patching should have been undone for the bulk of them.
+        let patched = map
+            .materials()
+            .iter()
+            .filter(|m| m.name.starts_with("maps/"))
+            .count();
+        assert_eq!(patched, 0, "cubemap patching survived normalization");
+    }
+
+    #[test]
+    fn texture_infos_resolve_to_materials() {
+        let Some(map) = sample_map() else { return };
+        for index in 0..map.bsp.textures_info.len() {
+            let material = map.material_index(index).expect("every texture info has a material");
+            assert!(material < map.materials().len());
+        }
     }
 
     #[test]

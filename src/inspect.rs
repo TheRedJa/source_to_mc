@@ -144,7 +144,7 @@ pub fn report(map: &Map, config: &Config) -> Report {
         brush_entity_models: map.bsp.models.len().saturating_sub(1),
         displacements: map.bsp.displacements.len(),
         static_props: map.bsp.static_props().count(),
-        materials: map.materials().len(),
+        materials: map.material_names().len(),
         entities: entity_records.len(),
         bounding_volume_blocks,
         y_range,
