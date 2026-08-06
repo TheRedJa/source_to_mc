@@ -24,6 +24,9 @@ pub struct Surface {
     pub normal: Vec3,
     /// Index into [`crate::bsp::Map::materials`].
     pub material: Option<usize>,
+    /// The face's texture projection, for choosing which piece of a split
+    /// texture belongs at each voxel of the terrain.
+    pub texcoord: Option<super::texcoord::TexCoord>,
     pub bounds: Aabb,
 }
 
@@ -73,6 +76,11 @@ impl super::Map {
             triangles,
             normal: normal.normalized(),
             material: self.material_index(face.texture_info as usize),
+            texcoord: self
+                .bsp
+                .textures_info
+                .get(face.texture_info as usize)
+                .map(super::texcoord::TexCoord::of),
             bounds,
         })
     }

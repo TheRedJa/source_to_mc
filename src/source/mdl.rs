@@ -22,6 +22,13 @@ use std::sync::Arc;
 pub struct Part {
     /// Triangles in model space, in Source units.
     pub triangles: Vec<[Vec3; 3]>,
+    /// Each triangle's centroid in texture space, so a model shows the piece
+    /// of its sheet that really belongs there rather than one corner of it.
+    ///
+    /// The centroid, not the corners: a triangle covers a range of the sheet
+    /// but a Minecraft block wears one texture, and at a metre per block the
+    /// triangles are small enough that the middle is the honest answer.
+    pub uvs: Vec<[f64; 2]>,
     /// Material path as it would be written in a `.vmt` lookup, lowercased and
     /// without the `materials/` prefix or extension.
     pub material: String,
@@ -105,18 +112,24 @@ impl<'a> Models<'a> {
             Vec3::new(t.x as f64, t.y as f64, t.z as f64)
         };
 
-        let mut parts: HashMap<String, Vec<[Vec3; 3]>> = HashMap::new();
+        let mut parts: HashMap<String, (Vec<[Vec3; 3]>, Vec<[f64; 2]>)> = HashMap::new();
         let vertices = model.vertices();
 
         for mesh in model.meshes() {
             let material = self.material_of(&model, mesh.material_index());
-            let triangles = parts.entry(material).or_default();
+            let (triangles, uvs) = parts.entry(material).or_default();
             for strip in mesh.vertex_strip_indices() {
                 let indices: Vec<usize> = strip.collect();
                 for tri in indices.chunks_exact(3) {
                     let corners = [tri[0], tri[1], tri[2]].map(|i| vertices.get(i));
                     let [Some(a), Some(b), Some(c)] = corners else { continue };
                     triangles.push([place(a.position), place(b.position), place(c.position)]);
+                    uvs.push(std::array::from_fn(|axis| {
+                        let sum = a.texture_coordinates[axis]
+                            + b.texture_coordinates[axis]
+                            + c.texture_coordinates[axis];
+                        f64::from(sum) / 3.0
+                    }));
                 }
             }
         }
@@ -130,7 +143,7 @@ impl<'a> Models<'a> {
         Model {
             parts: parts
                 .into_iter()
-                .map(|(material, triangles)| Part { triangles, material })
+                .map(|(material, (triangles, uvs))| Part { triangles, uvs, material })
                 .collect(),
             bounds,
         }
@@ -195,9 +208,24 @@ mod tests {
         assert!(!model.bounds.is_empty());
         for part in &model.parts {
             assert!(!part.material.is_empty());
+            assert_eq!(part.triangles.len(), part.uvs.len());
             for tri in &part.triangles {
                 assert!(tri.iter().all(|v| v.is_finite()));
             }
+            // An unwrap covers the sheet, so the centroids have to spread over
+            // it rather than all landing in one corner.
+            let spread = |axis: usize| {
+                let lo = part.uvs.iter().map(|uv| uv[axis]).fold(f64::MAX, f64::min);
+                let hi = part.uvs.iter().map(|uv| uv[axis]).fold(f64::MIN, f64::max);
+                hi - lo
+            };
+            assert!(
+                spread(0) > 0.05 && spread(1) > 0.05,
+                "{} unwraps to a point: u spread {}, v spread {}",
+                part.material,
+                spread(0),
+                spread(1)
+            );
         }
     }
 

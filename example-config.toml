@@ -56,6 +56,17 @@ mode = "vanilla"
 # Edge length of generated block textures. 16 matches vanilla.
 texture_size = 16
 
+# Split each texture across as many blocks as it really covers in the map,
+# instead of squeezing all of it onto every block face. A 512-pixel wall
+# texture at Hammer's default scale covers eight blocks of wall; shrunk onto
+# one face it is a smear, cut into eight it reads as brick again and the
+# pattern lines up across the wall. Costs one registered block per tile.
+tile_textures = true
+# Most tiles a texture may be split into along one axis. Past this a tile
+# covers several blocks rather than being dropped, so the texture still lines
+# up with itself, just more coarsely. 8 covers the common case exactly.
+tile_max = 8
+
 # Extra game directories to search for .vmt/.vtf content. The map's own game
 # directory and everything its gameinfo.txt mounts are searched automatically.
 game_dirs = []

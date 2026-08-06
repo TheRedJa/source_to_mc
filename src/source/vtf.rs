@@ -34,6 +34,24 @@ const ALPHA_CUTOFF: u8 = 128;
 /// choosing the cutoff that best preserves how much of the original was
 /// see-through.
 pub fn decode(data: &[u8], size: u32, alpha_test: bool) -> Result<RgbaImage> {
+    Ok(decode_tiles(data, size, alpha_test, [1, 1])?.remove(0))
+}
+
+/// Decode a VTF and cut it into a `grid` of `size` x `size` tiles, row by row.
+///
+/// This is what stops a wall looking like a smear. A Source wall texture is
+/// laid out to cover several metres of surface, and squeezing all of it onto
+/// one block face throws away everything that made it read as brick or
+/// panelling. Cut into the pieces that really are in front of each block, the
+/// detail comes back and the pattern lines up across the wall.
+///
+/// One tile is the whole texture, so [`decode`] is this with a 1x1 grid.
+pub fn decode_tiles(
+    data: &[u8],
+    size: u32,
+    alpha_test: bool,
+    grid: [u32; 2],
+) -> Result<Vec<RgbaImage>> {
     let vtf = vtf::from_bytes(data).map_err(|e| anyhow::anyhow!("{e}"))?;
     let image: DynamicImage = vtf
         .highres_image
@@ -44,17 +62,40 @@ pub fn decode(data: &[u8], size: u32, alpha_test: bool) -> Result<RgbaImage> {
         bail!("texture has no pixels");
     }
 
+    // Coverage is measured over the whole texture, not per tile. A grate's
+    // solid bars and its holes are unevenly spread, and thresholding each
+    // tile to its own coverage would make the sparse ones vanish.
     let coverage = alpha_test.then(|| {
         let pixels = image.to_rgba8();
         let solid = pixels.pixels().filter(|p| p.0[3] >= ALPHA_CUTOFF).count();
         solid as f64 / pixels.pixels().len().max(1) as f64
     });
 
-    let mut resized = resize(image, size);
-    if let Some(coverage) = coverage {
-        binarize_alpha(&mut resized, coverage);
+    let (columns, rows) = (grid[0].max(1), grid[1].max(1));
+    let mut tiles = Vec::with_capacity((columns * rows) as usize);
+    for row in 0..rows {
+        for column in 0..columns {
+            // Boundaries are computed from the edges rather than by
+            // multiplying a tile width, so a texture whose size does not
+            // divide evenly still tiles it completely and without gaps.
+            let x0 = image.width() * column / columns;
+            let x1 = (image.width() * (column + 1) / columns).max(x0 + 1);
+            let y0 = image.height() * row / rows;
+            let y1 = (image.height() * (row + 1) / rows).max(y0 + 1);
+
+            let cropped = if columns == 1 && rows == 1 {
+                image.clone()
+            } else {
+                image.crop_imm(x0, y0, x1 - x0, y1 - y0)
+            };
+            let mut tile = resize(cropped, size);
+            if let Some(coverage) = coverage {
+                binarize_alpha(&mut tile, coverage);
+            }
+            tiles.push(tile);
+        }
     }
-    Ok(resized)
+    Ok(tiles)
 }
 
 /// Snap alpha to fully on or off, keeping roughly `coverage` of the image
@@ -97,18 +138,28 @@ fn resize(mut image: DynamicImage, size: u32) -> RgbaImage {
     image.resize_exact(size, size, FilterType::Lanczos3).to_rgba8()
 }
 
+/// What a texture's header says, without decoding its pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Header {
+    /// Average colour in linear light — the same quantity the map compiler
+    /// copies into the BSP for world materials.
+    pub reflectivity: [f64; 3],
+    pub size: [u32; 2],
+}
+
 /// Decodes textures on demand, keeping each one only once.
 pub struct Textures<'a> {
     vfs: &'a Vfs,
     size: u32,
     /// `None` records a texture we already failed to find, so a missing file
     /// is not searched for once per material that references it.
-    cache: HashMap<(String, bool), Option<RgbaImage>>,
+    cache: HashMap<(String, bool, u32, u32), Option<Vec<RgbaImage>>>,
+    headers: HashMap<String, Option<Header>>,
 }
 
 impl<'a> Textures<'a> {
     pub fn new(vfs: &'a Vfs, size: u32) -> Textures<'a> {
-        Textures { vfs, size, cache: HashMap::new() }
+        Textures { vfs, size, cache: HashMap::new(), headers: HashMap::new() }
     }
 
     /// Load `$basetexture`, e.g. `Concrete/concretewall001a`.
@@ -117,18 +168,36 @@ impl<'a> Textures<'a> {
     /// texture is downsampled, so the same file can legitimately be wanted
     /// both ways.
     pub fn get(&mut self, base_texture: &str, alpha_test: bool) -> Option<&RgbaImage> {
-        let key = (base_texture.to_ascii_lowercase().replace('\\', "/"), alpha_test);
-        if !self.cache.contains_key(&key) {
-            let decoded = self.load(&key.0, alpha_test);
-            self.cache.insert(key.clone(), decoded);
-        }
-        self.cache.get(&key)?.as_ref()
+        self.tiles(base_texture, alpha_test, [1, 1])?.first()
     }
 
-    fn load(&self, key: &str, alpha_test: bool) -> Option<RgbaImage> {
-        let path = format!("materials/{}.vtf", key.trim_end_matches(".vtf"));
-        let data = self.vfs.open(&path)?;
-        decode(&data, self.size, alpha_test).ok()
+    /// Load a texture cut into a `grid` of tiles, row by row.
+    ///
+    /// The grid is part of the key, as the alpha-test flag is: the same file
+    /// can legitimately be wanted at two layouts, and neither answer is a
+    /// substitute for the other.
+    pub fn tiles(
+        &mut self,
+        base_texture: &str,
+        alpha_test: bool,
+        grid: [u32; 2],
+    ) -> Option<&[RgbaImage]> {
+        let key = (
+            base_texture.to_ascii_lowercase().replace('\\', "/"),
+            alpha_test,
+            grid[0].max(1),
+            grid[1].max(1),
+        );
+        if !self.cache.contains_key(&key) {
+            let decoded = self.load(&key.0, alpha_test, [key.2, key.3]);
+            self.cache.insert(key.clone(), decoded);
+        }
+        self.cache.get(&key)?.as_deref()
+    }
+
+    fn load(&self, key: &str, alpha_test: bool, grid: [u32; 2]) -> Option<Vec<RgbaImage>> {
+        let data = self.vfs.open(&path_of(key))?;
+        decode_tiles(&data, self.size, alpha_test, grid).ok()
     }
 
     /// How many distinct textures have been decoded successfully.
@@ -136,19 +205,34 @@ impl<'a> Textures<'a> {
         self.cache.values().filter(|v| v.is_some()).count()
     }
 
-    /// The average colour a texture declares, in linear light, without
-    /// decoding its pixels.
+    /// What a texture's header says, without decoding its pixels.
     ///
-    /// This is the same quantity the map compiler copies into the BSP for
-    /// world materials, so a model's material can be colour-matched on exactly
-    /// the same footing as a wall's — and reading a header is far cheaper than
-    /// decompressing a 1024x1024 DXT image to average it ourselves.
-    pub fn reflectivity(&self, base_texture: &str) -> Option<[f64; 3]> {
+    /// Reading a header is far cheaper than decompressing a 1024x1024 DXT
+    /// image, and it answers both questions the palette asks before it knows
+    /// whether it wants the pixels at all: what colour the surface averages
+    /// to, and how many texels there are to divide between blocks.
+    pub fn header(&mut self, base_texture: &str) -> Option<Header> {
         let key = base_texture.to_ascii_lowercase().replace('\\', "/");
-        let data = self.vfs.open(&format!("materials/{}.vtf", key.trim_end_matches(".vtf")))?;
-        let header = vtf::from_bytes(&data).ok()?.header.reflectivity;
-        Some(header.map(f64::from))
+        if let Some(cached) = self.headers.get(&key) {
+            return *cached;
+        }
+        let header = self.read_header(&key);
+        self.headers.insert(key, header);
+        header
     }
+
+    fn read_header(&self, key: &str) -> Option<Header> {
+        let data = self.vfs.open(&path_of(key))?;
+        let header = vtf::from_bytes(&data).ok()?.header;
+        Some(Header {
+            reflectivity: header.reflectivity.map(f64::from),
+            size: [u32::from(header.width), u32::from(header.height)],
+        })
+    }
+}
+
+fn path_of(key: &str) -> String {
+    format!("materials/{}.vtf", key.trim_end_matches(".vtf"))
 }
 
 /// Encode an image as PNG bytes.

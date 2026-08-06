@@ -5,7 +5,7 @@ use crate::config::{Config, FillMode};
 use crate::geom::{Aabb, Vec3};
 use crate::palette::{Decision, Resolver};
 use crate::voxel::brush::BlockSolid;
-use crate::voxel::grid::{BlockId, Palette, VoxelGrid};
+use crate::voxel::grid::{BlockId, IVec3, Palette, VoxelGrid};
 use crate::voxel::shell;
 use crate::voxel::transform::Transform;
 use rayon::prelude::*;
@@ -246,11 +246,17 @@ fn voxelize_displacement(
     transform: &Transform,
     solidify: u32,
     block: BlockId,
+    tiles: Option<&TileSet>,
 ) -> VoxelGrid {
     use crate::voxel::mesh::{Triangle, voxelize_triangle};
 
     let mut grid = VoxelGrid::new();
     let inward = transform.transform_direction(-surface.normal);
+    // Terrain is world geometry like any other, so a split texture is chosen
+    // by the same world projection the brushes use.
+    let uv = tiles
+        .zip(surface.texcoord)
+        .map(|(set, tex)| (Uv::new(tex, transform, Vec3::ZERO), set));
 
     for tri in &surface.triangles {
         let mapped = Triangle::new(
@@ -259,6 +265,18 @@ fn voxelize_displacement(
             transform.to_block_space(tri.c),
         );
         voxelize_triangle(&mapped, |pos| {
+            let block = match uv {
+                Some((uv, set)) => {
+                    let centre = Vec3::new(
+                        pos[0] as f64 + 0.5,
+                        pos[1] as f64 + 0.5,
+                        pos[2] as f64 + 0.5,
+                    );
+                    let (s, t) = uv.at(centre);
+                    set.at(s, t)
+                }
+                None => block,
+            };
             grid.set(pos, block);
             for step in 1..=solidify {
                 let offset = inward * step as f64;
@@ -288,11 +306,18 @@ fn voxelize_prop(
     transform: &Transform,
     solidify: u32,
     block: BlockId,
+    tiles: Option<&TileSet>,
 ) -> VoxelGrid {
     use crate::voxel::mesh::{Triangle, voxelize_triangle};
 
     let mut grid = VoxelGrid::new();
-    for tri in &surface.triangles {
+    for (index, tri) in surface.triangles.iter().enumerate() {
+        // A model's UVs are an unwrap of the whole sheet, so the tile is read
+        // straight off the triangle rather than from a world projection.
+        let block = match (tiles, surface.uvs.get(index)) {
+            (Some(set), Some(uv)) => set.at_uv(*uv),
+            _ => block,
+        };
         let mapped = Triangle::new(
             transform.to_block_space(tri[0]),
             transform.to_block_space(tri[1]),
@@ -320,6 +345,143 @@ fn voxelize_prop(
     grid
 }
 
+/// A material's texture split across several blocks, and the blocks it was
+/// split into.
+///
+/// The point of the whole exercise: a Source wall texture covers metres of
+/// surface, so squeezing it onto one block face throws away everything that
+/// made it read as brick or panelling. With the pieces registered separately,
+/// each voxel can take the one that is really in front of it.
+struct TileSet {
+    grid: [u32; 2],
+    /// How many texels wide and tall one tile is.
+    texels_per_tile: [f64; 2],
+    /// Blocks in row-major order, as the pack registered them.
+    ids: Vec<BlockId>,
+}
+
+impl TileSet {
+    fn at(&self, s: f64, t: f64) -> BlockId {
+        let index = |value: f64, axis: usize| {
+            let tile = (value / self.texels_per_tile[axis]).floor();
+            // A texture repeats across a wall, so a coordinate off the end of
+            // it wraps rather than clamping.
+            (tile as i64).rem_euclid(self.grid[axis] as i64) as usize
+        };
+        let (column, row) = (index(s, 0), index(t, 1));
+        self.ids[row * self.grid[0] as usize + column]
+    }
+
+    /// The tile at a normalized texture coordinate, as a model stores it.
+    fn at_uv(&self, uv: [f64; 2]) -> BlockId {
+        let index = |value: f64, axis: usize| {
+            let tile = (value * self.grid[axis] as f64).floor();
+            (tile as i64).rem_euclid(self.grid[axis] as i64) as usize
+        };
+        let (column, row) = (index(uv[0], 0), index(uv[1], 1));
+        self.ids[row * self.grid[0] as usize + column]
+    }
+}
+
+/// Texel coordinates as a function of block-space position.
+///
+/// Both the texture projection and the block transform are affine, so their
+/// composition is too and can be reduced to two dot products — which matters,
+/// because this is evaluated once per voxel.
+#[derive(Clone, Copy)]
+struct Uv {
+    s: (Vec3, f64),
+    t: (Vec3, f64),
+}
+
+impl Uv {
+    /// `origin` is the brush entity's own origin: its geometry is stored
+    /// relative to it and so are its texture vectors, so it has to come back
+    /// off before the projection is applied.
+    fn new(tex: crate::bsp::texcoord::TexCoord, transform: &Transform, origin: Vec3) -> Uv {
+        let source = |p: Vec3| transform.to_source_space(p) - origin;
+        let at = Vec3::ZERO;
+        let (s0, t0) = (tex.s(source(at)), tex.t(source(at)));
+        let axis = |i: usize| {
+            let mut e = Vec3::ZERO;
+            match i {
+                0 => e.x = 1.0,
+                1 => e.y = 1.0,
+                _ => e.z = 1.0,
+            }
+            (tex.s(source(e)) - s0, tex.t(source(e)) - t0)
+        };
+        let (sx, tx) = axis(0);
+        let (sy, ty) = axis(1);
+        let (sz, tz) = axis(2);
+        Uv {
+            s: (Vec3::new(sx, sy, sz), s0),
+            t: (Vec3::new(tx, ty, tz), t0),
+        }
+    }
+
+    fn at(&self, p: Vec3) -> (f64, f64) {
+        (self.s.0.dot(p) + self.s.1, self.t.0.dot(p) + self.t.1)
+    }
+}
+
+/// Work out, once, which materials have a split texture and what blocks it was
+/// split into.
+///
+/// Only materials the palette actually resolves to their generated block are
+/// included: a rule naming `iron_bars` for a grate outranks the texture, and
+/// tiling a block the map will never place would be nonsense.
+fn tile_sets(
+    map: &Map,
+    materials: &[crate::bsp::Material],
+    resolver: &Resolver,
+    pack: &crate::output::kubejs::Pack,
+    palette: &Mutex<Palette>,
+) -> Vec<Option<TileSet>> {
+    if pack.tilings().is_empty() {
+        return Vec::new();
+    }
+    let scales = crate::bsp::texcoord::material_scales(map);
+
+    materials
+        .iter()
+        .enumerate()
+        .map(|(index, material)| {
+            let grid = pack.tilings().get(&material.name).copied()?;
+            // The resolver has the last word: a named rule beats the texture.
+            let assigned = resolver.block_for_material(index)?;
+            if assigned != pack.tile_id(&material.name, 0, 0)? {
+                return None;
+            }
+
+            // Tiles divide the texture, so the texel size of one is the
+            // texture's own size over the grid — whatever scale the faces
+            // using it happen to be at.
+            let size = scales
+                .get(index)
+                .copied()
+                .flatten()
+                .map(|scale| scale.size)
+                .unwrap_or([grid[0], grid[1]]);
+
+            let mut ids = Vec::with_capacity((grid[0] * grid[1]) as usize);
+            for row in 0..grid[1] {
+                for column in 0..grid[0] {
+                    let id = pack.tile_id(&material.name, column, row)?;
+                    ids.push(palette.lock().unwrap().intern(&id));
+                }
+            }
+            Some(TileSet {
+                grid,
+                texels_per_tile: std::array::from_fn(|axis| {
+                    (size[axis] as f64 / grid[axis] as f64).max(1.0)
+                }),
+                ids,
+            })
+        })
+        .collect()
+}
+
 /// Voxelize a set of brushes into one grid, interning blocks into `palette`.
 fn voxelize_solids(
     solids: &[Solid],
@@ -328,6 +490,7 @@ fn voxelize_solids(
     resolver: &Resolver,
     transform: &Transform,
     origins: &std::collections::HashMap<usize, Vec3>,
+    tiles: &[Option<TileSet>],
     palette: &Mutex<Palette>,
     skipped: &std::sync::atomic::AtomicUsize,
 ) -> (VoxelGrid, crate::voxel::shapes::MaskGrid) {
@@ -363,15 +526,45 @@ fn voxelize_solids(
                 skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return (grid, masks);
             }
-            let default_block = side_blocks.iter().flatten().copied().next();
+            // The side a voxel falls back to when its own nearest face is one
+            // the engine never draws. Half a brush's sides are nodraw, so this
+            // is not a rare case: it decides the block for a large share of
+            // the voxels in the map, and taking the tiled path here too is
+            // what keeps a wall from being half one repeated tile.
+            let default_side = side_blocks.iter().position(Option::is_some);
+
+            // Where a face's material was split across several blocks, the
+            // projection that says which piece belongs at each voxel.
+            let side_tiles: Vec<Option<(Uv, &TileSet)>> = solid
+                .sides
+                .iter()
+                .map(|side| {
+                    let info_index = side.texture_info?;
+                    let set = tiles.get(map.material_index(info_index)?)?.as_ref()?;
+                    let info = map.bsp.textures_info.get(info_index)?;
+                    let tex = crate::bsp::texcoord::TexCoord::of(info);
+                    Some((Uv::new(tex, transform, origin), set))
+                })
+                .collect();
+
+            let block_of = |side: usize, pos: IVec3| -> Option<BlockId> {
+                let base = side_blocks.get(side).copied().flatten()?;
+                let Some((uv, set)) = side_tiles.get(side).and_then(Option::as_ref) else {
+                    return Some(base);
+                };
+                let centre =
+                    Vec3::new(pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5);
+                let (s, t) = uv.at(centre);
+                Some(set.at(s, t))
+            };
 
             crate::voxel::brush::voxelize_with_shape(
                 &block_solid,
                 &config.output.voxelize,
                 |pos, side, mask| {
                     let block = side
-                        .and_then(|s| side_blocks.get(s).copied().flatten())
-                        .or(default_block);
+                        .and_then(|s| block_of(s, pos))
+                        .or_else(|| default_side.and_then(|s| block_of(s, pos)));
                     if let Some(block) = block {
                         grid.set(pos, block);
                         if want_masks {
@@ -476,8 +669,9 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let skipped = std::sync::atomic::AtomicUsize::new(0);
 
     let origins = model_origins(&entity_models);
+    let tiles = tile_sets(map, &materials, &resolver, &assets.pack, &palette);
     let (grid, masks) = voxelize_solids(
-        &solids, map, config, &resolver, &transform, &origins, &palette, &skipped,
+        &solids, map, config, &resolver, &transform, &origins, &tiles, &palette, &skipped,
     );
 
     // Brush entities configured as `separate` get their own grid each, so a
@@ -492,7 +686,8 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
                 return None;
             }
             let (grid, _) = voxelize_solids(
-                &solids, map, config, &resolver, &transform, &origins, &palette, &skipped,
+                &solids, map, config, &resolver, &transform, &origins, &tiles, &palette,
+                &skipped,
             );
             (grid.count() > 0).then(|| SeparateEntity {
                 entity: entity.entity,
@@ -527,6 +722,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
                         &transform,
                         config.displacement.solidify,
                         block,
+                        surface.material.and_then(|m| tiles.get(m)).and_then(Option::as_ref),
                     )),
                     None => {
                         displacements_skipped
@@ -556,7 +752,13 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
                     .block_for_material(surface.material)
                     .map(|name| palette.lock().unwrap().intern(name));
                 if let Some(block) = block {
-                    grid.merge(voxelize_prop(surface, &transform, config.props.solidify, block));
+                    grid.merge(voxelize_prop(
+                        surface,
+                        &transform,
+                        config.props.solidify,
+                        block,
+                        tiles.get(surface.material).and_then(Option::as_ref),
+                    ));
                 }
                 grid
             })
@@ -1037,6 +1239,126 @@ mod tests {
             "hollow {} vs solid {}",
             hollow.stats.blocks,
             solid.stats.blocks
+        );
+    }
+
+    /// The claim the whole tiling feature rests on: at Hammer's default
+    /// texture scale, one Minecraft block of wall is one tile of a 512-pixel
+    /// texture split eight ways. Walk a block along the wall, advance one
+    /// tile — and wrap round at the end, because the texture repeats.
+    #[test]
+    fn one_block_of_wall_advances_one_tile() {
+        use crate::bsp::texcoord::TexCoord;
+
+        let mut config = Config::default();
+        config.transform.origin_mode = crate::config::OriginMode::MapOrigin;
+        let transform = Transform::new(&config, Aabb::new(Vec3::ZERO, Vec3::splat(1024.0)));
+
+        // A wall in the X/Z plane at four texels per unit: 16 units per block
+        // is 64 texels, and a 512-pixel texture split into 8 gives 64-texel
+        // tiles. So one block of wall is exactly one tile.
+        let tex = TexCoord { u: [4.0, 0.0, 0.0, 0.0], v: [0.0, 0.0, -4.0, 0.0] };
+        let uv = Uv::new(tex, &transform, Vec3::ZERO);
+        let set = TileSet {
+            grid: [8, 8],
+            texels_per_tile: [64.0, 64.0],
+            ids: (0..64).collect(),
+        };
+
+        // Blocks 0..8 along the wall must give tiles 0..8 in order.
+        let tile_at = |block: Vec3| {
+            let (s, t) = uv.at(block);
+            set.at(s, t)
+        };
+        let base = transform.to_block_space(Vec3::new(8.0, 0.0, -8.0));
+        for step in 0..8 {
+            let here = Vec3::new(base.x + step as f64, base.y, base.z);
+            assert_eq!(
+                tile_at(here),
+                step as BlockId,
+                "block {step} along the wall should be tile {step}"
+            );
+        }
+        // The ninth block starts the texture again.
+        assert_eq!(tile_at(Vec3::new(base.x + 8.0, base.y, base.z)), 0);
+        // And so does the block eight before the first, going the other way.
+        assert_eq!(tile_at(Vec3::new(base.x - 8.0, base.y, base.z)), 0);
+        assert_eq!(tile_at(Vec3::new(base.x - 1.0, base.y, base.z)), 7);
+    }
+
+    /// The other axis, and the one easiest to get upside down: Source's V
+    /// points *down* a wall, so climbing must walk back up the tile rows.
+    #[test]
+    fn climbing_a_wall_walks_up_the_texture() {
+        use crate::bsp::texcoord::TexCoord;
+
+        let mut config = Config::default();
+        config.transform.origin_mode = crate::config::OriginMode::MapOrigin;
+        let transform = Transform::new(&config, Aabb::new(Vec3::ZERO, Vec3::splat(1024.0)));
+
+        let tex = TexCoord { u: [4.0, 0.0, 0.0, 0.0], v: [0.0, 0.0, -4.0, 0.0] };
+        let uv = Uv::new(tex, &transform, Vec3::ZERO);
+        let set = TileSet {
+            grid: [8, 8],
+            texels_per_tile: [64.0, 64.0],
+            ids: (0..64).collect(),
+        };
+
+        // Source Z is Minecraft Y: one block up is one row earlier. Start a
+        // few rows in, so the step being measured is not the wrap.
+        let low = transform.to_block_space(Vec3::new(8.0, 0.0, -56.0));
+        let (s, t) = uv.at(low);
+        let below = set.at(s, t);
+        let (s, t) = uv.at(Vec3::new(low.x, low.y + 1.0, low.z));
+        let above = set.at(s, t);
+        assert_eq!(
+            above + set.grid[0] as BlockId,
+            below,
+            "going up a block should move one tile row towards the top of the texture"
+        );
+    }
+
+    /// A whole map's worth: no tile may dominate, or the projection is not
+    /// really varying and every wall is the same smear it was before.
+    #[test]
+    fn tiles_spread_across_a_real_map() {
+        let Some(map) = sample_map() else { return };
+        let mut config = Config::default();
+        config.materials.mode = crate::config::MaterialMode::Kubejs;
+
+        let result = convert(&map, &config).unwrap();
+        if result.pack.tilings().is_empty() {
+            return; // no game install to read textures from
+        }
+
+        // Group the counts by material and check the busiest tile of the
+        // busiest material is not most of it.
+        let mut per_material: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (name, count) in &result.stats.block_counts {
+            let Some(rest) = name.strip_prefix("kubejs:") else { continue };
+            let Some((base, _)) = rest.rsplit_once('_').and_then(|(a, b)| {
+                b.parse::<u32>().ok()?;
+                a.rsplit_once('_')
+            }) else {
+                continue;
+            };
+            per_material.entry(base.to_string()).or_default().push(*count);
+        }
+
+        let (material, counts) = per_material
+            .iter()
+            .max_by_key(|(_, counts)| counts.iter().sum::<usize>())
+            .expect("kubejs mode produced no tiled blocks");
+        let total: usize = counts.iter().sum();
+        let busiest = *counts.iter().max().unwrap();
+        assert!(
+            counts.len() > 4,
+            "{material} only used {} tiles",
+            counts.len()
+        );
+        assert!(
+            busiest * 4 < total,
+            "{material}: one tile is {busiest} of {total} blocks, so the texture              is not really being split across the wall"
         );
     }
 

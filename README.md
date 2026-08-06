@@ -17,8 +17,13 @@ Working today:
 - Chooses a block per surface from its material: glob rules first, then the
   texture's average colour. Ships with rules for Half-Life 2 and Entropy: Zero.
 - Voxelizes displacement terrain, backed into solid so it is not a shell.
+- Voxelizes **static props**: the fences, railings, catwalks, crates, signs and
+  lamps that fill a map's rooms, none of which is in any brush lump.
+- Leaves out the **3D skybox room**, the scale model of the horizon that would
+  otherwise convert into a second, wrongly-sized map.
 - Optionally extracts the map's **real textures** and emits them as Minecraft
-  blocks through a generated KubeJS pack.
+  blocks through a generated KubeJS pack, each texture **split across as many
+  blocks as it really covers** in the map.
 - Fits half-height and stepped geometry to slabs and stairs.
 - Hollows out solid volumes so only surfaces are emitted.
 - Writes Sponge Schematic **v3** `.schem` tiles plus a manifest and a WorldEdit
@@ -29,7 +34,8 @@ Working today:
 - Converts whole campaigns at once, laid out side by side, and emits a
   dimension datapack tall enough to paste them into.
 
-Not implemented yet: static props.
+Not implemented yet: dynamic props (`prop_physics` and friends), and Entropy:
+Zero 2's MapBase-specific entities.
 
 ## Usage
 
@@ -115,6 +121,37 @@ in terrain are what you notice by falling through them. The resulting surface is
 one voxel thick, so `solidify` drives it a few voxels further in, along the
 surface's own inward normal rather than downwards: displacements make cliffs and
 ceilings as often as ground.
+
+**Static props** are everything a map puts *in* its rooms: the fences and
+railings along a platform, the catwalks over the canals, the crates, radiators,
+lamps and signs. `prop_static` does not survive compilation as an entity — VBSP
+writes the placements into the `sprp` game lump — and none of the geometry is in
+any brush lump, so a map converted from brushes alone is an accurate but empty
+shell. `d1_trainstation_02` alone places 299 of them. Each model's `.mdl`,
+`.vvd` and `.dx90.vtx` are read off the same search path the textures come from,
+LOD 0 is flattened to triangles, and those go through the same rasterizer
+displacements use. A prop's material is a material like any other, so it gets
+the same rules, the same colour matching and the same generated block; its
+average colour comes from the `.vtf` header, which is where the map compiler
+reads it from too.
+
+Props are surfaces, not solids, so a fence stays one block thick. `[props]
+min_size` drops anything under 12 units — maps are full of pebbles and cans —
+and `max_size` is the lever for backdrop scenery, which is placed as ordinary
+props thousands of units across and can be tens of thousands of blocks of one
+dark material. It is off by default, because that scenery really is there.
+
+**The 3D skybox** is a map's model of its own horizon: a sealed room off in a
+corner holding a miniature of the skyline, which the engine renders scaled up
+and far away. Converted literally it is a second, wrongly-sized map, and the
+void between the two rooms is most of the schematic's volume. Nothing in the
+format marks that room, but the `sky_camera` stands inside it and nowhere else,
+so it is found as the smallest island of touching brushes enclosing the camera —
+with a cap on how much of the map that island may be, and a check that no player
+start is inside it, because dropping the level would be the worse failure. On
+`d1_trainstation_02` leaving it out takes the bounding volume from 349M blocks
+to 149M, halves the number of schematic tiles, and brings the map inside a
+vanilla world's height. Turn it off with `[contents] skip_3d_skybox = false`.
 
 **Moving brush entities** get their own schematic each, under `entities/`. A
 `func_door` pasted into the world is a slab sealing the doorway it should open,
@@ -223,6 +260,29 @@ alpha-tested texture is re-thresholded when downsampled — averaging a grate's
 alpha to 16x16 otherwise makes every texel part-transparent, which cutout
 rendering draws as a solid block.
 
+### One texture, many blocks
+
+A Source wall texture is not sized for one block. A 512-pixel concrete texture
+at Hammer's default scale of 0.25 covers 2048 units of wall, which at 16 units
+per block is eight blocks. Squeezing all 512 pixels onto every block face is
+what made converted walls look like a smear.
+
+A face does not store UVs; it stores two 4-vectors projecting a world position
+straight into texel coordinates, and the length of each is texels per unit. So
+the map itself says how many blocks one repeat of a texture covers. Each
+texture is cut into that many pieces, one registered block apiece, and every
+voxel takes the piece that really is in front of it — so the bricks line up
+across the wall again. `[materials] tile_max` caps it at 8 per axis, which is
+exactly the common case; past that a tile spans several blocks rather than
+being dropped, so the pattern still lines up, just more coarsely.
+
+Models have no texture scale to read — their UVs are an unwrap of the whole
+sheet — so a prop's tile comes from the triangle's own texture coordinate
+instead. Turn the whole thing off with `[materials] tile_textures = false`.
+
+On `d1_trainstation_02` this is 198 materials registering 9088 blocks, about
+6 MB of 16x16 PNGs, and no measurable conversion cost.
+
 ## Sub-block detail
 
 A block is a 1 m cube, so at 16 units/block every 8-unit step and kerb rounds
@@ -240,8 +300,11 @@ conversion.
 Only block families that have vanilla slab and stair variants can change;
 anything else stays a full cube, and an unrecognised mask always stays a full
 cube too — losing a step is far less noticeable than opening a hole in a wall.
-Generated textured blocks need `[shapes] kubejs_variants = true` to gain
-variants, which triples how many blocks KubeJS registers at startup.
+
+This is vanilla-only. KubeJS 2101 registers blocks through exactly two
+builders, `basic` and `detector`, so a generated textured block cannot be a
+slab or a stair: `--textures kubejs` gives you the real textures and full cubes,
+and vanilla mode gives you sub-block shapes.
 
 Chisels & Bits was considered and rejected: every C&B block shares one id with
 its shape in block-entity NBT, and WorldEdit copy/paste renders them invisible

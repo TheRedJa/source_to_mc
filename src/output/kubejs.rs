@@ -73,6 +73,9 @@ pub struct Block {
     pub render_type: RenderType,
     /// `$surfaceprop`, used to pick a sound.
     pub surface_prop: Option<String>,
+    /// Which piece of the material's texture this is, when the texture is
+    /// split across several blocks. `None` means the whole thing.
+    pub tile: Option<[u32; 2]>,
 }
 
 impl Block {
@@ -93,6 +96,10 @@ impl Block {
             } else {
                 name.push(c);
             }
+        }
+        // Tiles of one texture are otherwise indistinguishable in the menu.
+        if let Some([u, v]) = self.tile {
+            name.push_str(&format!(" {}-{}", u + 1, v + 1));
         }
         name
     }
@@ -130,6 +137,8 @@ impl Block {
 #[derive(Debug, Default)]
 pub struct Pack {
     blocks: BTreeMap<String, Block>,
+    /// How many blocks across and down each split material's texture runs.
+    tiling: BTreeMap<String, [u32; 2]>,
 }
 
 /// Turn a Source material path into a Minecraft resource id.
@@ -191,23 +200,89 @@ impl Pack {
         texture: RgbaImage,
         assets: &MaterialAssets,
     ) -> String {
-        let id = block_id(material);
-        let block = Block {
-            id: id.clone(),
-            material: material.to_string(),
-            texture,
-            render_type: RenderType::of(assets),
-            surface_prop: assets.surface_prop.clone(),
+        self.insert_tiled(material, std::slice::from_ref(&texture), [1, 1], assets)
+    }
+
+    /// Register a material split into a `grid` of tiles, one block each, and
+    /// return the id of the first.
+    ///
+    /// `tiles` is row-major, as [`crate::source::vtf::decode_tiles`] returns
+    /// it. A 1x1 grid is an ordinary single block and is not recorded as
+    /// tiled, so nothing downstream has to special-case it.
+    pub fn insert_tiled(
+        &mut self,
+        material: &str,
+        tiles: &[RgbaImage],
+        grid: [u32; 2],
+        assets: &MaterialAssets,
+    ) -> String {
+        let base = block_id(material);
+        let (columns, rows) = (grid[0].max(1), grid[1].max(1));
+        let split = columns > 1 || rows > 1;
+
+        let mut first = format!("{NAMESPACE}:{base}");
+        for row in 0..rows {
+            for column in 0..columns {
+                let Some(texture) = tiles.get((row * columns + column) as usize) else {
+                    continue;
+                };
+                let tile = split.then_some([column, row]);
+                let id = match tile {
+                    Some([u, v]) => format!("{base}_{u}_{v}"),
+                    None => base.clone(),
+                };
+                let block = Block {
+                    id: id.clone(),
+                    material: material.to_string(),
+                    texture: texture.clone(),
+                    render_type: RenderType::of(assets),
+                    surface_prop: assets.surface_prop.clone(),
+                    tile,
+                };
+                if row == 0 && column == 0 {
+                    first = block.block_id();
+                }
+                self.blocks.entry(id).or_insert(block);
+            }
+        }
+        if split {
+            self.tiling.insert(material.to_string(), [columns, rows]);
+        }
+        first
+    }
+
+    /// How many blocks across and down a material's texture is split, or
+    /// `[1, 1]` if it is not.
+    pub fn tiling(&self, material: &str) -> [u32; 2] {
+        self.tiling.get(material).copied().unwrap_or([1, 1])
+    }
+
+    /// Every material's tiling, for building the palette.
+    pub fn tilings(&self) -> &BTreeMap<String, [u32; 2]> {
+        &self.tiling
+    }
+
+    /// The block for one tile of a material, wrapping out-of-range indices so
+    /// a texture that repeats across a wall keeps repeating.
+    pub fn tile_id(&self, material: &str, column: u32, row: u32) -> Option<String> {
+        let base = block_id(material);
+        let [columns, rows] = self.tiling(material);
+        let id = if columns > 1 || rows > 1 {
+            format!("{base}_{}_{}", column % columns, row % rows)
+        } else {
+            base
         };
-        let block_id = block.block_id();
-        self.blocks.entry(id).or_insert(block);
-        block_id
+        self.blocks.contains_key(&id).then(|| format!("{NAMESPACE}:{id}"))
     }
 
     /// Material path to namespaced block id, for the palette.
+    ///
+    /// A split material reports its first tile: that is what a surface gets
+    /// when nothing knows which piece of the texture belongs in front of it.
     pub fn ids(&self) -> BTreeMap<String, String> {
         self.blocks
             .values()
+            .filter(|b| b.tile.is_none_or(|t| t == [0, 0]))
             .map(|b| (b.material.clone(), b.block_id()))
             .collect()
     }
@@ -216,6 +291,9 @@ impl Pack {
     pub fn merge(&mut self, other: Pack) {
         for (id, block) in other.blocks {
             self.blocks.entry(id).or_insert(block);
+        }
+        for (material, grid) in other.tiling {
+            self.tiling.entry(material).or_insert(grid);
         }
     }
 
@@ -355,6 +433,7 @@ mod tests {
                 texture: texture(),
                 render_type: RenderType::Solid,
                 surface_prop: prop.map(str::to_string),
+                tile: None,
             }
             .sound_type()
         };

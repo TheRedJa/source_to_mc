@@ -10,6 +10,7 @@
 //! props are placed, and the conversion falls back to what the BSP alone can
 //! tell it.
 
+use crate::bsp::texcoord::{MaterialScale, material_scales};
 use crate::bsp::{Map, Material};
 use crate::config::Config;
 use crate::geom::Vec3;
@@ -32,6 +33,8 @@ pub struct Extracted {
     pub props_skipped: usize,
     /// Distinct models read successfully.
     pub models_loaded: usize,
+    /// Blocks registered for materials split across several of them.
+    pub tiles: usize,
 }
 
 /// One placed prop's triangles, ready to voxelize.
@@ -39,6 +42,8 @@ pub struct Extracted {
 pub struct PropSurface {
     /// Triangles in Source world space.
     pub triangles: Vec<[Vec3; 3]>,
+    /// Each triangle's centroid in texture space, parallel to `triangles`.
+    pub uvs: Vec<[f64; 2]>,
     /// Index into the material list [`Assets::materials`] returns.
     pub material: usize,
 }
@@ -91,10 +96,18 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
         ..Assets::default()
     };
 
+    // How many blocks each texture really covers in this map, so it can be
+    // cut into that many pieces rather than shrunk onto one block face.
+    let scales = if config.materials.tile_textures {
+        material_scales(map)
+    } else {
+        vec![None; map.materials().len()]
+    };
+
     // The map's own materials first, so their indices stay exactly the ones
     // `Map::material_index` hands out.
     let mut seen: Vec<&str> = Vec::new();
-    for material in map.materials() {
+    for (index, material) in map.materials().iter().enumerate() {
         if seen.contains(&material.name.as_str()) {
             continue;
         }
@@ -106,15 +119,23 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
         if !want_pack || material.name.starts_with("tools/") {
             continue;
         }
+        let grid = scales
+            .get(index)
+            .copied()
+            .flatten()
+            .map(|scale| grid_for(scale, config))
+            .unwrap_or([1, 1]);
         let resolved = insert_block(
             &mut assets.pack,
             &materials,
             &mut textures,
             &material.name,
             Some(&material.raw_name),
+            grid,
         );
         if resolved {
             assets.stats.resolved += 1;
+            assets.stats.tiles += (grid[0] * grid[1]).saturating_sub(1) as usize;
         }
     }
 
@@ -125,6 +146,28 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
     assets
 }
 
+/// How many blocks across and down to split a material's texture.
+///
+/// The natural answer is however many blocks of surface one repeat of the
+/// texture covers, which is what `blocks_spanned` computes. Past the cap a
+/// tile simply covers more than one block: the texture still lines up with
+/// itself, at coarser resolution, which is a far better failure than
+/// registering a thousand blocks for one sign.
+fn grid_for(scale: MaterialScale, config: &Config) -> [u32; 2] {
+    let max = config.materials.tile_max.max(1);
+    let spanned = scale.blocks_spanned(config.scale.units_per_block);
+    std::array::from_fn(|axis| (spanned[axis].round() as i64).clamp(1, max as i64) as u32)
+}
+
+/// Texels of a model's texture taken to be worth one block.
+///
+/// A `.mdl` has no texture scale to read: its UVs are an unwrap of the whole
+/// model onto the sheet, so nothing relates a texel to a world unit. 64 is
+/// what the ordinary world material works out to — a 512 texture at Hammer's
+/// default scale over 16 units per block — so props are split at the same
+/// granularity as the walls behind them.
+const PROP_TEXELS_PER_TILE: u32 = 64;
+
 /// Resolve one material to a generated block and add it to the pack.
 fn insert_block(
     pack: &mut Pack,
@@ -132,12 +175,14 @@ fn insert_block(
     textures: &mut Textures,
     name: &str,
     raw_name: Option<&str>,
+    grid: [u32; 2],
 ) -> bool {
     let Some(assets) = materials.assets(name, raw_name) else { return false };
-    let Some(image) = textures.get(&assets.base_texture, assets.alpha_test) else {
+    let Some(tiles) = textures.tiles(&assets.base_texture, assets.alpha_test, grid) else {
         return false;
     };
-    pack.insert(name, image.clone(), &assets);
+    let tiles = tiles.to_vec();
+    pack.insert_tiled(name, &tiles, grid, &assets);
     true
 }
 
@@ -200,11 +245,20 @@ fn place_props(
                     let index = base + assets.prop_materials.len();
                     assets
                         .prop_materials
-                        .push(prop_material(materials, textures, &part.material));
-                    if want_pack
-                        && insert_block(&mut assets.pack, materials, textures, &part.material, None)
-                    {
-                        assets.stats.resolved += 1;
+                        .push(prop_material(materials, &mut *textures, &part.material));
+                    if want_pack {
+                        let grid = prop_grid(materials, textures, &part.material, config);
+                        if insert_block(
+                            &mut assets.pack,
+                            materials,
+                            textures,
+                            &part.material,
+                            None,
+                            grid,
+                        ) {
+                            assets.stats.resolved += 1;
+                            assets.stats.tiles += (grid[0] * grid[1]).saturating_sub(1) as usize;
+                        }
                     }
                     index_of.insert(part.material.clone(), index);
                     index
@@ -213,6 +267,7 @@ fn place_props(
 
             assets.props.push(PropSurface {
                 triangles: part.triangles.iter().map(|tri| tri.map(|v| prop.place(v))).collect(),
+                uvs: part.uvs.clone(),
                 material,
             });
         }
@@ -227,16 +282,37 @@ fn place_props(
 ///
 /// The average colour comes from the `.vtf` header, which is where the map
 /// compiler reads it from too when it bakes `reflectivity` into the BSP.
-fn prop_material(materials: &Materials, textures: &Textures, name: &str) -> Material {
+fn prop_material(materials: &Materials, textures: &mut Textures, name: &str) -> Material {
     let reflectivity = materials
         .assets(name, None)
-        .and_then(|assets| textures.reflectivity(&assets.base_texture))
+        .and_then(|assets| textures.header(&assets.base_texture))
+        .map(|header| header.reflectivity)
         .unwrap_or([0.0; 3]);
     Material {
         name: name.to_string(),
         raw_name: name.to_string(),
         reflectivity,
     }
+}
+
+/// How finely to split a model's texture. See [`PROP_TEXELS_PER_TILE`].
+fn prop_grid(
+    materials: &Materials,
+    textures: &mut Textures,
+    name: &str,
+    config: &Config,
+) -> [u32; 2] {
+    if !config.materials.tile_textures {
+        return [1, 1];
+    }
+    let Some(header) = materials
+        .assets(name, None)
+        .and_then(|assets| textures.header(&assets.base_texture))
+    else {
+        return [1, 1];
+    };
+    let max = config.materials.tile_max.max(1);
+    std::array::from_fn(|axis| (header.size[axis] / PROP_TEXELS_PER_TILE).clamp(1, max))
 }
 
 fn globset(patterns: &[String]) -> Result<globset::GlobSet, globset::Error> {
@@ -277,13 +353,104 @@ mod tests {
             "only {} materials resolved",
             assets.stats.resolved
         );
-        assert_eq!(assets.pack.len(), assets.stats.resolved);
+        // One block per material, plus the extra tiles each split one needs.
+        assert_eq!(assets.pack.len(), assets.stats.resolved + assets.stats.tiles);
+        assert!(
+            assets.stats.tiles > assets.stats.resolved,
+            "only {} extra tiles for {} materials: textures are barely being split",
+            assets.stats.tiles,
+            assets.stats.resolved
+        );
 
         // Every generated block must carry a texture of the configured size.
         for block in assets.pack.blocks() {
             assert_eq!(block.texture.dimensions(), (16, 16), "{}", block.id);
             assert!(!block.id.is_empty());
         }
+    }
+
+    /// A texture split across N blocks must give N genuinely different tiles,
+    /// not N copies of the same downsample.
+    #[test]
+    fn splitting_a_texture_gives_different_tiles() {
+        let Some(map) = sample_map() else { return };
+        let assets = extract(&map, &kubejs());
+
+        let Some((material, grid)) = assets
+            .pack
+            .tilings()
+            .iter()
+            .find(|(_, grid)| grid[0] > 2 && grid[1] > 2)
+        else {
+            return;
+        };
+
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        for row in 0..grid[1] {
+            for column in 0..grid[0] {
+                let id = assets.pack.tile_id(material, column, row).unwrap();
+                let block = assets
+                    .pack
+                    .blocks()
+                    .find(|b| b.block_id() == id)
+                    .unwrap_or_else(|| panic!("{id} is not registered"));
+                seen.push(block.texture.as_raw().clone());
+            }
+        }
+        let distinct = {
+            let mut sorted = seen.clone();
+            sorted.sort();
+            sorted.dedup();
+            sorted.len()
+        };
+        assert!(
+            distinct * 2 > seen.len(),
+            "{material} split into {} tiles but only {distinct} are distinct",
+            seen.len()
+        );
+    }
+
+    /// Every tile has to be reachable through the id the palette will use, or
+    /// the schematic names blocks the pack never registered.
+    #[test]
+    fn every_tile_of_a_split_material_is_registered() {
+        let Some(map) = sample_map() else { return };
+        let assets = extract(&map, &kubejs());
+        let script = assets.pack.script();
+
+        for (material, grid) in assets.pack.tilings() {
+            for row in 0..grid[1] {
+                for column in 0..grid[0] {
+                    let id = assets
+                        .pack
+                        .tile_id(material, column, row)
+                        .unwrap_or_else(|| panic!("{material} tile {column},{row} has no id"));
+                    assert!(
+                        script.contains(&format!("event.create('{id}')")),
+                        "{id} is not registered"
+                    );
+                }
+            }
+            // Out-of-range indices wrap, because a texture repeats along a
+            // wall and a face can run well past one repeat of it.
+            assert_eq!(
+                assets.pack.tile_id(material, grid[0], grid[1]),
+                assets.pack.tile_id(material, 0, 0)
+            );
+        }
+    }
+
+    /// Turning tiling off has to give exactly one block per material again.
+    #[test]
+    fn tiling_can_be_turned_off() {
+        let Some(map) = sample_map() else { return };
+        let mut config = kubejs();
+        config.materials.tile_textures = false;
+
+        let assets = extract(&map, &config);
+        assert!(assets.pack.tilings().is_empty());
+        assert_eq!(assets.stats.tiles, 0);
+        assert_eq!(assets.pack.len(), assets.stats.resolved);
     }
 
     /// Tool textures never become blocks, so generating one would be dead
