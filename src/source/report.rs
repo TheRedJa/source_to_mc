@@ -81,9 +81,9 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
             .get(index)
             .copied()
             .flatten()
-            .filter(|_| config.materials.tile_textures)
-            .map(|scale| crate::source::extract::grid_for(scale, config))
-            .unwrap_or(crate::source::extract::WHOLE);
+            .map(crate::source::extract::Layout::World)
+            .unwrap_or(crate::source::extract::Layout::Unknown)
+            .split(config, config.materials.tile_max);
         add(
             &mut entries,
             &mut textures,
@@ -108,13 +108,13 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
                     continue;
                 }
                 seen.push(part.material.clone());
-                let split = crate::source::extract::prop_grid(
+                let split = crate::source::extract::sheet_layout(
                     &materials,
                     &mut textures,
                     &part.material,
-                    config,
                     part.uv_per_unit,
-                );
+                )
+                .split(config, config.materials.tile_max);
                 add(&mut entries, &mut textures, &part.material, None, 0, split, true);
             }
         }

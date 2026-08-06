@@ -193,17 +193,22 @@ pub struct Materials {
     /// that are really in front of each block, the detail comes back and the
     /// pattern lines up across the wall. Costs one registered block per tile.
     pub tile_textures: bool,
-    /// Largest number of tiles a texture may be split into along one axis.
+    /// Blocks one generated pack may register, or 0 for no limit.
     ///
-    /// The cap on how many blocks the pack registers. A tile is always one
-    /// block; past the cap only the first `tile_max` blocks' worth of the
-    /// texture is used and that window repeats, so this sets how often the
-    /// pattern comes round rather than how detailed it is.
+    /// The real cost of splitting textures is not disk — 100k blocks is about
+    /// 60 MB of 16x16 PNGs — but what a KubeJS instance pays to register them
+    /// at startup. So the control is a ceiling on the pack, which means the
+    /// same setting behaves sensibly for a single room and for a campaign:
+    /// textures are cut as finely as the budget allows and no finer.
     ///
-    /// 16 covers all but the most stretched materials outright, and costs
-    /// about 11k blocks a map. Raise it for maps built around big cliff and
-    /// ground blends — Highway 17's span 77 blocks — at roughly quadratic
-    /// cost in the materials that need it.
+    /// Entropy: Zero's 17 maps as one pack come to about 92k blocks with every
+    /// texture at full resolution, so the default lets that through untouched.
+    pub max_blocks: usize,
+    /// Hard ceiling on tiles per axis, whatever the budget allows.
+    ///
+    /// Rarely the binding constraint: a texture is never cut finer than its
+    /// own resolution can feed, so most materials stop well short of this and
+    /// the budget decides the rest.
     pub tile_max: u32,
     /// The rules named by `rules`, filled in by [`Config::load`].
     #[serde(skip)]
@@ -229,7 +234,8 @@ impl Default for Materials {
             game_dirs: Vec::new(),
             texture_size: 16,
             tile_textures: true,
-            tile_max: 16,
+            max_blocks: 100_000,
+            tile_max: 64,
             loaded_rules: Default::default(),
         }
     }

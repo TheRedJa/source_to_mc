@@ -137,8 +137,13 @@ impl Block {
 #[derive(Debug, Default)]
 pub struct Pack {
     blocks: BTreeMap<String, Block>,
-    /// How many blocks across and down each split material's texture runs.
-    tiling: BTreeMap<String, [u32; 2]>,
+    /// How each split material's texture was actually cut.
+    ///
+    /// Stored rather than recomputed, because the cut and the projection that
+    /// indexes it must agree exactly. Deriving one of them again from the
+    /// config is how they drifted apart twice: once stretching a tile over ten
+    /// blocks of cliff, once over two.
+    tiling: BTreeMap<String, crate::bsp::texcoord::Split>,
 }
 
 /// Turn a Source material path into a Minecraft resource id.
@@ -200,7 +205,12 @@ impl Pack {
         texture: RgbaImage,
         assets: &MaterialAssets,
     ) -> String {
-        self.insert_tiled(material, std::slice::from_ref(&texture), [1, 1], assets)
+        let whole = crate::bsp::texcoord::Split {
+            grid: [1, 1],
+            texels_per_tile: [1.0, 1.0],
+            window: [u32::MAX; 2],
+        };
+        self.insert_tiled(material, std::slice::from_ref(&texture), whole, assets)
     }
 
     /// Register a material split into a `grid` of tiles, one block each, and
@@ -213,12 +223,12 @@ impl Pack {
         &mut self,
         material: &str,
         tiles: &[RgbaImage],
-        grid: [u32; 2],
+        split: crate::bsp::texcoord::Split,
         assets: &MaterialAssets,
     ) -> String {
         let base = block_id(material);
-        let (columns, rows) = (grid[0].max(1), grid[1].max(1));
-        let split = columns > 1 || rows > 1;
+        let (columns, rows) = (split.grid[0].max(1), split.grid[1].max(1));
+        let split_it = columns > 1 || rows > 1;
 
         let mut first = format!("{NAMESPACE}:{base}");
         for row in 0..rows {
@@ -226,7 +236,7 @@ impl Pack {
                 let Some(texture) = tiles.get((row * columns + column) as usize) else {
                     continue;
                 };
-                let tile = split.then_some([column, row]);
+                let tile = split_it.then_some([column, row]);
                 let id = match tile {
                     Some([u, v]) => format!("{base}_{u}_{v}"),
                     None => base.clone(),
@@ -245,8 +255,8 @@ impl Pack {
                 self.blocks.entry(id).or_insert(block);
             }
         }
-        if split {
-            self.tiling.insert(material.to_string(), [columns, rows]);
+        if split_it {
+            self.tiling.insert(material.to_string(), split);
         }
         first
     }
@@ -254,12 +264,24 @@ impl Pack {
     /// How many blocks across and down a material's texture is split, or
     /// `[1, 1]` if it is not.
     pub fn tiling(&self, material: &str) -> [u32; 2] {
-        self.tiling.get(material).copied().unwrap_or([1, 1])
+        self.tiling.get(material).map(|s| s.grid).unwrap_or([1, 1])
+    }
+
+    /// Exactly how a material's texture was cut, for the projection that has
+    /// to index it.
+    pub fn split(&self, material: &str) -> Option<crate::bsp::texcoord::Split> {
+        self.tiling.get(material).copied()
     }
 
     /// Every material's tiling, for building the palette.
-    pub fn tilings(&self) -> &BTreeMap<String, [u32; 2]> {
+    pub fn tilings(&self) -> &BTreeMap<String, crate::bsp::texcoord::Split> {
         &self.tiling
+    }
+
+    /// How many blocks the pack registers, which is what a KubeJS instance
+    /// pays for at startup.
+    pub fn registered(&self) -> usize {
+        self.blocks.len()
     }
 
     /// The block for one tile of a material, wrapping out-of-range indices so
@@ -292,8 +314,8 @@ impl Pack {
         for (id, block) in other.blocks {
             self.blocks.entry(id).or_insert(block);
         }
-        for (material, grid) in other.tiling {
-            self.tiling.entry(material).or_insert(grid);
+        for (material, split) in other.tiling {
+            self.tiling.entry(material).or_insert(split);
         }
     }
 
