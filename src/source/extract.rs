@@ -42,8 +42,9 @@ pub struct Extracted {
 pub struct PropSurface {
     /// Triangles in Source world space.
     pub triangles: Vec<[Vec3; 3]>,
-    /// Each triangle's centroid in texture space, parallel to `triangles`.
-    pub uvs: Vec<[f64; 2]>,
+    /// Each triangle corner's position in texture space, parallel to
+    /// `triangles`.
+    pub uvs: Vec<[[f64; 2]; 3]>,
     /// Index into the material list [`Assets::materials`] returns.
     pub material: usize,
 }
@@ -159,14 +160,6 @@ pub(crate) fn grid_for(scale: MaterialScale, config: &Config) -> Split {
     scale.split(config.scale.units_per_block, config.materials.tile_max)
 }
 
-/// Texels of a model's texture taken to be worth one block.
-///
-/// A `.mdl` has no texture scale to read: its UVs are an unwrap of the whole
-/// model onto the sheet, so nothing relates a texel to a world unit. 64 is
-/// what the ordinary world material works out to — a 512 texture at Hammer's
-/// default scale over 16 units per block — so props are split at the same
-/// granularity as the walls behind them.
-const PROP_TEXELS_PER_TILE: u32 = 64;
 
 /// Resolve one material to a generated block and add it to the pack.
 fn insert_block(
@@ -249,7 +242,8 @@ fn place_props(
                         .prop_materials
                         .push(prop_material(materials, &mut *textures, &part.material));
                     if want_pack {
-                        let split = prop_grid(materials, textures, &part.material, config);
+                        let split =
+                            prop_grid(materials, textures, &part.material, config, part.uv_per_unit);
                         if insert_block(
                             &mut assets.pack,
                             materials,
@@ -303,6 +297,7 @@ pub(crate) fn prop_grid(
     textures: &mut Textures,
     name: &str,
     config: &Config,
+    uv_per_unit: f64,
 ) -> Split {
     if !config.materials.tile_textures {
         return WHOLE;
@@ -313,11 +308,22 @@ pub(crate) fn prop_grid(
     else {
         return WHOLE;
     };
-    // A model's sheet is an unwrap, so the whole of it is always used: unlike
-    // a wall, there is no repeat to window into.
+    // How many blocks of surface one pass over the sheet covers, measured off
+    // the model's own geometry. Guessing a fixed texels-per-block instead is
+    // wrong by a factor of several on anything large — `rockcliff02a` puts one
+    // sheet across 39 blocks of cliff — and the excess comes back as blocks of
+    // repeated texture.
+    let blocks = if uv_per_unit > 0.0 && uv_per_unit.is_finite() {
+        1.0 / (uv_per_unit * config.scale.units_per_block)
+    } else {
+        1.0
+    };
+    // A model's sheet is an unwrap, not a repeating texture, so the whole of it
+    // is always used: unlike a wall there is nothing to window into, and a
+    // sheet stretched past the cap keeps some repetition.
     let max = config.materials.tile_max.max(1);
     let grid: [u32; 2] =
-        std::array::from_fn(|axis| (header.size[axis] / PROP_TEXELS_PER_TILE).clamp(1, max));
+        std::array::from_fn(|_| (blocks.round() as i64).clamp(1, i64::from(max)) as u32);
     Split {
         grid,
         texels_per_tile: std::array::from_fn(|axis| {

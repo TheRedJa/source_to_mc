@@ -256,7 +256,16 @@ fn voxelize_displacement(
     // by the same world projection the brushes use.
     let uv = tiles
         .zip(surface.texcoord)
-        .map(|(set, tex)| (Uv::new(tex, transform, Vec3::ZERO), set));
+        .map(|(set, tex)| {
+            let uv = Uv::new(
+                tex,
+                transform,
+                Vec3::ZERO,
+                set.texels_per_tile,
+                transform.units_per_block(),
+            );
+            (uv, set)
+        });
 
     for tri in &surface.triangles {
         let mapped = Triangle::new(
@@ -312,12 +321,6 @@ fn voxelize_prop(
 
     let mut grid = VoxelGrid::new();
     for (index, tri) in surface.triangles.iter().enumerate() {
-        // A model's UVs are an unwrap of the whole sheet, so the tile is read
-        // straight off the triangle rather than from a world projection.
-        let block = match (tiles, surface.uvs.get(index)) {
-            (Some(set), Some(uv)) => set.at_uv(*uv),
-            _ => block,
-        };
         let mapped = Triangle::new(
             transform.to_block_space(tri[0]),
             transform.to_block_space(tri[1]),
@@ -327,7 +330,24 @@ fn voxelize_prop(
             continue;
         }
         let inward = -mapped.normal();
+        // A model's UVs are an unwrap of the whole sheet, so the tile comes
+        // off the triangle rather than from a world projection — but
+        // interpolated across it, not taken once for the whole triangle. A
+        // model's triangles are not block-sized: `rockcliff02a` is a handful
+        // of huge ones, and one tile each paints the cliff in patches.
+        let corners = tiles.and(surface.uvs.get(index));
         voxelize_triangle(&mapped, |pos| {
+            let block = match (tiles, corners) {
+                (Some(set), Some(corners)) => {
+                    let centre = Vec3::new(
+                        pos[0] as f64 + 0.5,
+                        pos[1] as f64 + 0.5,
+                        pos[2] as f64 + 0.5,
+                    );
+                    set.at_uv(interpolate(&mapped, corners, centre))
+                }
+                _ => block,
+            };
             grid.set(pos, block);
             for step in 1..=solidify {
                 let offset = inward * step as f64;
@@ -361,33 +381,37 @@ struct TileSet {
 }
 
 impl TileSet {
-    fn at(&self, s: f64, t: f64) -> BlockId {
+    /// The tile at a position already measured in tiles. See [`Uv`].
+    fn at(&self, column: f64, row: f64) -> BlockId {
         let index = |value: f64, axis: usize| {
-            let tile = (value / self.texels_per_tile[axis]).floor();
             // A texture repeats across a wall, so a coordinate off the end of
             // it wraps rather than clamping.
-            (tile as i64).rem_euclid(self.grid[axis] as i64) as usize
+            (value.floor() as i64).rem_euclid(self.grid[axis] as i64) as usize
         };
-        let (column, row) = (index(s, 0), index(t, 1));
+        let (column, row) = (index(column, 0), index(row, 1));
         self.ids[row * self.grid[0] as usize + column]
     }
 
     /// The tile at a normalized texture coordinate, as a model stores it.
     fn at_uv(&self, uv: [f64; 2]) -> BlockId {
-        let index = |value: f64, axis: usize| {
-            let tile = (value * self.grid[axis] as f64).floor();
-            (tile as i64).rem_euclid(self.grid[axis] as i64) as usize
-        };
-        let (column, row) = (index(uv[0], 0), index(uv[1], 1));
-        self.ids[row * self.grid[0] as usize + column]
+        self.at(uv[0] * self.grid[0] as f64, uv[1] * self.grid[1] as f64)
     }
 }
 
-/// Texel coordinates as a function of block-space position.
+/// Tile coordinates as a function of block-space position: how many tiles
+/// along the surface's own texture axes a point lies.
 ///
 /// Both the texture projection and the block transform are affine, so their
 /// composition is too and can be reduced to two dot products — which matters,
 /// because this is evaluated once per voxel.
+///
+/// The division by tile size happens here rather than in [`TileSet`] because
+/// **the tile size is a property of the face, not of the material**. One
+/// material is used at several scales in the same map: `nature/cliffface001a`
+/// appears in `d2_coast_07` at six different rates, from a third of a texel
+/// per unit to two. A tile size taken from the material's typical scale is
+/// then too wide for every face using a larger one, and the wall comes out in
+/// 2x2 blocks of the same picture.
 #[derive(Clone, Copy)]
 struct Uv {
     s: (Vec3, f64),
@@ -398,7 +422,21 @@ impl Uv {
     /// `origin` is the brush entity's own origin: its geometry is stored
     /// relative to it and so are its texture vectors, so it has to come back
     /// off before the projection is applied.
-    fn new(tex: crate::bsp::texcoord::TexCoord, transform: &Transform, origin: Vec3) -> Uv {
+    ///
+    /// `texels_per_tile` is what the material's tiles were actually cut at.
+    /// A face wanting *fewer* texels per block than that would repeat a tile
+    /// across several blocks, so on those faces the tile is resized to the
+    /// block instead; the texture then covers `grid` blocks rather than its
+    /// true span, which is the compromise a single shared set of tiles forces.
+    /// Faces wanting more are left exact — they advance by more than one tile
+    /// per block, which shows no repeat and so needs no correction.
+    fn new(
+        tex: crate::bsp::texcoord::TexCoord,
+        transform: &Transform,
+        origin: Vec3,
+        texels_per_tile: [f64; 2],
+        units_per_block: f64,
+    ) -> Uv {
         let source = |p: Vec3| transform.to_source_space(p) - origin;
         let at = Vec3::ZERO;
         let (s0, t0) = (tex.s(source(at)), tex.t(source(at)));
@@ -414,9 +452,21 @@ impl Uv {
         let (sx, tx) = axis(0);
         let (sy, ty) = axis(1);
         let (sz, tz) = axis(2);
+
+        // How many texels of this face's own projection one block covers. A
+        // degenerate texture vector leaves the material's own size in place
+        // rather than dividing by zero.
+        let per_block = tex.texels_per_unit();
+        let divisor: [f64; 2] = std::array::from_fn(|axis| {
+            let face = per_block[axis] * units_per_block;
+            let tile = texels_per_tile[axis];
+            if face > 0.0 && face.is_finite() { face.min(tile) } else { tile }
+            .max(f64::MIN_POSITIVE)
+        });
+
         Uv {
-            s: (Vec3::new(sx, sy, sz), s0),
-            t: (Vec3::new(tx, ty, tz), t0),
+            s: (Vec3::new(sx, sy, sz) / divisor[0], s0 / divisor[0]),
+            t: (Vec3::new(tx, ty, tz) / divisor[1], t0 / divisor[1]),
         }
     }
 
@@ -483,6 +533,30 @@ fn tile_sets(
         .collect()
 }
 
+/// Interpolate a per-corner value to where `p` falls on the triangle.
+///
+/// Barycentric coordinates, which also project `p` onto the triangle's plane,
+/// so a voxel centre slightly off the surface still lands somewhere sensible.
+/// A degenerate triangle falls back to the first corner rather than dividing
+/// by zero.
+fn interpolate(
+    tri: &crate::voxel::mesh::Triangle,
+    corners: &[[f64; 2]; 3],
+    p: Vec3,
+) -> [f64; 2] {
+    let (v0, v1, v2) = (tri.b - tri.a, tri.c - tri.a, p - tri.a);
+    let (d00, d01, d11) = (v0.dot(v0), v0.dot(v1), v1.dot(v1));
+    let denom = d00 * d11 - d01 * d01;
+    if denom.abs() < 1e-12 {
+        return corners[0];
+    }
+    let (d20, d21) = (v2.dot(v0), v2.dot(v1));
+    let b = (d11 * d20 - d01 * d21) / denom;
+    let c = (d00 * d21 - d01 * d20) / denom;
+    let a = 1.0 - b - c;
+    std::array::from_fn(|axis| a * corners[0][axis] + b * corners[1][axis] + c * corners[2][axis])
+}
+
 /// Voxelize a set of brushes into one grid, interning blocks into `palette`.
 fn voxelize_solids(
     solids: &[Solid],
@@ -544,7 +618,14 @@ fn voxelize_solids(
                     let set = tiles.get(map.material_index(info_index)?)?.as_ref()?;
                     let info = map.bsp.textures_info.get(info_index)?;
                     let tex = crate::bsp::texcoord::TexCoord::of(info);
-                    Some((Uv::new(tex, transform, origin), set))
+                    let uv = Uv::new(
+                        tex,
+                        transform,
+                        origin,
+                        set.texels_per_tile,
+                        transform.units_per_block(),
+                    );
+                    Some((uv, set))
                 })
                 .collect();
 
@@ -1268,7 +1349,7 @@ mod tests {
         // is 64 texels, and a 512-pixel texture split into 8 gives 64-texel
         // tiles. So one block of wall is exactly one tile.
         let tex = TexCoord { u: [4.0, 0.0, 0.0, 0.0], v: [0.0, 0.0, -4.0, 0.0] };
-        let uv = Uv::new(tex, &transform, Vec3::ZERO);
+        let uv = Uv::new(tex, &transform, Vec3::ZERO, [64.0, 64.0], 16.0);
         let set = TileSet {
             grid: [8, 8],
             texels_per_tile: [64.0, 64.0],
@@ -1296,6 +1377,77 @@ mod tests {
         assert_eq!(tile_at(Vec3::new(base.x - 1.0, base.y, base.z)), 7);
     }
 
+    /// One material is used at several scales in the same map — Highway 17's
+    /// `nature/cliffface001a` at six of them — so a tile size taken from the
+    /// material's typical scale is too wide for every face using a larger
+    /// one, and the wall comes out in 2x2 blocks of the same picture.
+    #[test]
+    fn a_face_scaled_off_its_materials_median_still_gets_one_tile_per_block() {
+        use crate::bsp::texcoord::TexCoord;
+
+        let mut config = Config::default();
+        config.transform.origin_mode = crate::config::OriginMode::MapOrigin;
+        let transform = Transform::new(&config, Aabb::new(Vec3::ZERO, Vec3::splat(4096.0)));
+
+        // Tiles cut for a material whose typical face is 4 texels per unit.
+        let set = TileSet {
+            grid: [8, 8],
+            texels_per_tile: [64.0, 64.0],
+            ids: (0..64).collect(),
+        };
+
+        // Every rate `cliffface001a` is really used at, plus the reference.
+        for rate in [0.33, 0.5, 0.67, 1.0, 1.43, 2.0, 4.0, 8.0] {
+            let tex = TexCoord {
+                u: [rate, 0.0, 0.0, 0.0],
+                v: [0.0, 0.0, -rate, 0.0],
+            };
+            let uv = Uv::new(tex, &transform, Vec3::ZERO, set.texels_per_tile, 16.0);
+
+            // Walk a straight line of blocks along the wall. No two in a row
+            // may wear the same tile.
+            let base = transform.to_block_space(Vec3::new(8.0, 0.0, -8.0));
+            let mut previous = None;
+            let mut distinct = std::collections::HashSet::new();
+            for step in 0..16 {
+                let here = Vec3::new(base.x + step as f64, base.y, base.z);
+                let (column, row) = uv.at(here);
+                let tile = set.at(column, row);
+                assert_ne!(
+                    previous,
+                    Some(tile),
+                    "at {rate} texels/unit, blocks {} and {step} share tile {tile}",
+                    step - 1,
+                );
+                previous = Some(tile);
+                distinct.insert(tile);
+            }
+            // A face scaled *finer* than the material's reference advances by
+            // more than one tile per block, so it cycles the grid faster and
+            // legitimately shows fewer distinct tiles. That shows no repeat,
+            // which is why it is left exact rather than corrected.
+            let want = if rate * 16.0 <= set.texels_per_tile[0] { 8 } else { 4 };
+            assert!(
+                distinct.len() >= want,
+                "at {rate} texels/unit only {} distinct tiles over 16 blocks",
+                distinct.len()
+            );
+        }
+    }
+
+    /// A face with a degenerate texture vector must not divide by zero; it
+    /// falls back to the material's own tile size.
+    #[test]
+    fn a_face_with_no_texture_axis_still_resolves() {
+        use crate::bsp::texcoord::TexCoord;
+        let config = Config::default();
+        let transform = Transform::new(&config, Aabb::new(Vec3::ZERO, Vec3::splat(256.0)));
+        let tex = TexCoord { u: [0.0; 4], v: [0.0; 4] };
+        let uv = Uv::new(tex, &transform, Vec3::ZERO, [64.0, 64.0], 16.0);
+        let (column, row) = uv.at(Vec3::new(3.0, 4.0, 5.0));
+        assert!(column.is_finite() && row.is_finite(), "got {column}, {row}");
+    }
+
     /// The other axis, and the one easiest to get upside down: Source's V
     /// points *down* a wall, so climbing must walk back up the tile rows.
     #[test]
@@ -1307,7 +1459,7 @@ mod tests {
         let transform = Transform::new(&config, Aabb::new(Vec3::ZERO, Vec3::splat(1024.0)));
 
         let tex = TexCoord { u: [4.0, 0.0, 0.0, 0.0], v: [0.0, 0.0, -4.0, 0.0] };
-        let uv = Uv::new(tex, &transform, Vec3::ZERO);
+        let uv = Uv::new(tex, &transform, Vec3::ZERO, [64.0, 64.0], 16.0);
         let set = TileSet {
             grid: [8, 8],
             texels_per_tile: [64.0, 64.0],
