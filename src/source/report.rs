@@ -7,11 +7,11 @@
 //! report is the one command that says why.
 
 use crate::bsp::Map;
+use crate::bsp::texcoord::material_scales;
 use crate::source::vfs::Vfs;
 use crate::source::vmt::Materials;
 use crate::source::vtf::Textures;
 use serde::Serialize;
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TextureReport {
@@ -24,8 +24,14 @@ pub struct TextureReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct Entry {
     pub material: String,
-    /// Brush sides using it.
+    /// Brush sides using it. Zero for a material only static props wear,
+    /// which is most of them in a prop-heavy map.
     pub uses: usize,
+    /// How many blocks across and down the texture is split, when it covers
+    /// more than one.
+    pub tiles: [u32; 2],
+    /// The material comes from a model rather than a brush face.
+    pub from_prop: bool,
     /// `$basetexture`, when the `.vmt` was found.
     pub texture: Option<String>,
     /// Whether the `.vtf` decoded to an image.
@@ -35,33 +41,78 @@ pub struct Entry {
 }
 
 /// Resolve every material in the map to a texture, without writing anything.
-pub fn report(map: &Map, size: u32, game_dirs: &[PathBuf]) -> TextureReport {
-    let vfs = Vfs::for_map(&map.path, game_dirs);
+pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
+    let vfs = Vfs::for_map(&map.path, &config.materials.game_dir_paths());
     let materials = Materials::new(&vfs, Some(&map.bsp.pack));
-    let mut textures = Textures::new(&vfs, size);
+    let mut textures = Textures::new(&vfs, config.materials.texture_size);
     let usage = map.material_usage();
+    let scales = material_scales(map);
 
     let mut entries: Vec<Entry> = Vec::new();
-    for (index, material) in map.materials().iter().enumerate() {
-        let uses = usage.get(index).copied().unwrap_or(0);
-        if let Some(existing) = entries.iter_mut().find(|e| e.material == material.name) {
+    let add = |entries: &mut Vec<Entry>,
+                   textures: &mut Textures,
+                   name: &str,
+                   raw: Option<&str>,
+                   uses: usize,
+                   tiles: [u32; 2],
+                   from_prop: bool| {
+        if let Some(existing) = entries.iter_mut().find(|e| e.material == name) {
             existing.uses += uses;
-            continue;
+            return;
         }
-
-        let assets = materials.assets(&material.name, Some(&material.raw_name));
+        let assets = materials.assets(name, raw);
         let resolved = assets
             .as_ref()
             .is_some_and(|a| textures.get(&a.base_texture, a.alpha_test).is_some());
-
         entries.push(Entry {
-            material: material.name.clone(),
+            material: name.to_string(),
             uses,
+            tiles,
+            from_prop,
             texture: assets.as_ref().map(|a| a.base_texture.clone()),
             resolved,
             alpha_test: assets.as_ref().is_some_and(|a| a.alpha_test),
             translucent: assets.as_ref().is_some_and(|a| a.translucent),
         });
+    };
+
+    for (index, material) in map.materials().iter().enumerate() {
+        let tiles = scales
+            .get(index)
+            .copied()
+            .flatten()
+            .filter(|_| config.materials.tile_textures)
+            .map(|scale| crate::source::extract::grid_for(scale, config))
+            .unwrap_or([1, 1]);
+        add(
+            &mut entries,
+            &mut textures,
+            &material.name,
+            Some(&material.raw_name),
+            usage.get(index).copied().unwrap_or(0),
+            tiles,
+            false,
+        );
+    }
+
+    // Static props bring their own materials, and in a prop-heavy map they are
+    // a third of everything registered. A report that left them out would say
+    // the search path is fine while every prop in the world came out grey.
+    if config.props.enabled {
+        let mut models = crate::source::mdl::Models::new(&vfs);
+        let mut seen: Vec<String> = Vec::new();
+        for prop in crate::bsp::props::extract(&map.bsp) {
+            let Some(model) = models.get(&prop.model) else { continue };
+            for part in &model.parts {
+                if seen.contains(&part.material) {
+                    continue;
+                }
+                seen.push(part.material.clone());
+                let tiles =
+                    crate::source::extract::prop_grid(&materials, &mut textures, &part.material, config);
+                add(&mut entries, &mut textures, &part.material, None, 0, tiles, true);
+            }
+        }
     }
 
     entries.sort_by(|a, b| b.uses.cmp(&a.uses).then_with(|| a.material.cmp(&b.material)));
@@ -109,7 +160,11 @@ impl TextureReport {
             .unwrap_or(8)
             .clamp(8, 46);
 
-        let _ = writeln!(s, "{:<width$}  {:>6}  {:<38}  {}", "material", "uses", "texture", "");
+        let _ = writeln!(
+            s,
+            "{:<width$}  {:>6}  {:<38}  {:>7}  {}",
+            "material", "uses", "texture", "blocks", ""
+        );
         for entry in &self.entries {
             let flags = match (entry.alpha_test, entry.translucent) {
                 (true, _) => "cutout",
@@ -118,20 +173,31 @@ impl TextureReport {
             };
             let _ = writeln!(
                 s,
-                "{:<width$}  {:>6}  {:<38}  {}{}",
+                "{:<width$}  {:>6}  {:<38}  {:>7}  {}{}{}",
                 entry.material,
                 entry.uses,
                 entry.texture.as_deref().unwrap_or("-"),
+                format!("{}x{}", entry.tiles[0], entry.tiles[1]),
                 if entry.resolved { "ok " } else { "MISSING " },
                 flags,
+                if entry.from_prop { " prop" } else { "" },
             );
         }
 
         let used = self.entries.iter().filter(|e| e.uses > 0).count();
         let used_resolved = self.entries.iter().filter(|e| e.uses > 0 && e.resolved).count();
+        // Tool materials never become blocks, so counting them here would
+        // overstate what the pack registers.
+        let blocks: usize = self
+            .entries
+            .iter()
+            .filter(|e| e.resolved && !e.material.starts_with("tools/"))
+            .map(|e| (e.tiles[0] * e.tiles[1]) as usize)
+            .sum();
         let _ = writeln!(
             s,
-            "\n{} of {} materials resolved to a texture ({} of {} that are actually used)",
+            "\n{} of {} materials resolved to a texture ({} of {} used by brush faces), \n\
+             up to {blocks} generated blocks once split across the surfaces they cover",
             self.resolved(),
             self.entries.len(),
             used_resolved,
@@ -144,6 +210,8 @@ impl TextureReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use std::path::PathBuf;
     use std::path::Path;
 
     fn sample_map(path: &str) -> Option<Map> {
@@ -158,7 +226,7 @@ mod tests {
     #[test]
     fn resolves_nearly_every_material_of_a_real_map() {
         let Some(map) = hl2() else { return };
-        let report = report(&map, 16, &[]);
+        let report = report(&map, &Config::default());
 
         assert!(!report.search_path.is_empty(), "no content sources");
         let used = report.entries.iter().filter(|e| e.uses > 0).count();
@@ -174,7 +242,7 @@ mod tests {
     #[test]
     fn alpha_tested_materials_are_flagged() {
         let Some(map) = hl2() else { return };
-        let report = report(&map, 16, &[]);
+        let report = report(&map, &Config::default());
         let grates: Vec<&Entry> = report
             .entries
             .iter()
@@ -193,13 +261,53 @@ mod tests {
     #[test]
     fn the_report_lists_every_material_once() {
         let Some(map) = hl2() else { return };
-        let report = report(&map, 16, &[]);
+        let report = report(&map, &Config::default());
         let mut names: Vec<&str> = report.entries.iter().map(|e| e.material.as_str()).collect();
         let total = names.len();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), total, "duplicate materials in the report");
         assert!(report.render().contains("material"));
+    }
+
+    /// Props bring their own materials, and in a prop-heavy map they are a
+    /// large share of everything registered. Leaving them out would let the
+    /// report say the search path is fine while every prop came out grey.
+    #[test]
+    fn the_report_covers_prop_materials() {
+        let Some(map) = hl2() else { return };
+        let report = report(&map, &Config::default());
+
+        let from_props = report.entries.iter().filter(|e| e.from_prop).count();
+        assert!(from_props > 10, "only {from_props} prop materials listed");
+        assert!(
+            report.entries.iter().filter(|e| e.from_prop && e.resolved).count() * 2
+                > from_props,
+            "most prop materials should resolve"
+        );
+    }
+
+    /// The split is what decides how many blocks get registered, so the
+    /// report has to show it.
+    #[test]
+    fn the_report_shows_how_far_each_texture_is_split() {
+        let Some(map) = hl2() else { return };
+        let report = report(&map, &Config::default());
+
+        let split = report.entries.iter().filter(|e| e.tiles != [1, 1]).count();
+        assert!(split > 10, "only {split} materials are split at all");
+        assert!(
+            report.entries.iter().all(|e| e.tiles[0] >= 1 && e.tiles[1] >= 1),
+            "a material claims fewer than one block"
+        );
+
+        let mut off = Config::default();
+        off.materials.tile_textures = false;
+        let plain = self::report(&map, &off);
+        assert!(
+            plain.entries.iter().all(|e| e.tiles == [1, 1]),
+            "tiling is off but the report still splits"
+        );
     }
 
     /// Without a search path the report must still work and say so, rather
@@ -210,7 +318,7 @@ mod tests {
         // A map path outside any `maps/` folder finds no game directory.
         let mut orphan = map;
         orphan.path = PathBuf::from("/nowhere/d1_trainstation_02.bsp");
-        let report = report(&orphan, 16, &[]);
+        let report = report(&orphan, &Config::default());
         assert!(report.search_path.is_empty());
         assert_eq!(report.resolved(), 0);
         assert!(report.render().contains("--game-dir"));
