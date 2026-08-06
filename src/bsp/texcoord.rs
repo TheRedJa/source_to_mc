@@ -89,7 +89,7 @@ impl MaterialScale {
     /// what is lost is the part of the texture that never repeats — which, for
     /// the ground and cliff blends that are the only things scaled this far, is
     /// more of the same rock.
-    pub fn split(&self, units_per_block: f64, max: u32) -> Split {
+    pub fn split(&self, units_per_block: f64, max: u32, texture_size: u32) -> Split {
         let max = max.max(1);
         let spanned = self.blocks_spanned(units_per_block);
 
@@ -97,7 +97,16 @@ impl MaterialScale {
         // own repeat, rather than drifting a fraction of a block per tile.
         let blocks: [u32; 2] =
             std::array::from_fn(|axis| (spanned[axis].round() as i64).clamp(1, i64::from(u32::MAX)) as u32);
-        let grid: [u32; 2] = std::array::from_fn(|axis| blocks[axis].min(max));
+        // And never finer than the source can feed. Below one source texel per
+        // output pixel a tile is upscaled mush: cutting a 512-pixel texture
+        // 128 ways leaves four texels to fill a 16x16 block face. Past this
+        // point splitting further invents detail rather than recovering it,
+        // and it is the reason raising the cap is safe — quality stops
+        // costing blocks exactly when it stops improving.
+        let resolution: [u32; 2] =
+            std::array::from_fn(|axis| (self.size[axis] / texture_size.max(1)).max(1));
+        let grid: [u32; 2] =
+            std::array::from_fn(|axis| blocks[axis].min(max).min(resolution[axis]));
         let texels_per_tile: [f64; 2] =
             std::array::from_fn(|axis| (self.size[axis] as f64 / blocks[axis] as f64).max(1.0));
         let window: [u32; 2] = std::array::from_fn(|axis| {
@@ -232,7 +241,7 @@ mod tests {
             ([64, 64], 16.0),     // a quarter of a block
         ] {
             let scale = MaterialScale { size, texels_per_unit: [rate, rate] };
-            let split = scale.split(16.0, 8);
+            let split = scale.split(16.0, 8, 16);
             let spanned = scale.blocks_spanned(16.0);
 
             for axis in 0..2 {
@@ -253,12 +262,54 @@ mod tests {
         }
     }
 
+    /// A tile may not be cut finer than the source can feed it. Splitting a
+    /// 512-pixel texture 128 ways leaves four texels to fill a 16x16 face,
+    /// which is upscaled mush rather than recovered detail — and it is what
+    /// makes raising the cap safe, since cost stops rising exactly where
+    /// quality stops improving.
+    #[test]
+    fn a_texture_is_never_cut_finer_than_its_own_resolution() {
+        for (size, out, most) in [
+            ([512u32, 512], 16u32, 32u32),
+            ([1024, 1024], 16, 64),
+            ([256, 256], 16, 16),
+            ([128, 128], 16, 8),
+            ([512, 512], 32, 16),
+        ] {
+            // A rate stretched far enough that the span alone would allow far
+            // more tiles than the texture has detail for.
+            let scale = MaterialScale { size, texels_per_unit: [0.05, 0.05] };
+            let split = scale.split(16.0, 1024, out);
+            assert_eq!(
+                split.grid,
+                [most, most],
+                "{size:?} at {out}px output should stop at {most} tiles"
+            );
+            // A tile always carries at least one source texel. It may still
+            // be magnified — a texture stretched over more blocks than it has
+            // `out`-sized pieces cannot do better, and neither does Source —
+            // but past this point extra tiles only re-cut the same texels.
+            for axis in 0..2 {
+                assert!(split.texels_per_tile[axis] >= 1.0);
+            }
+        }
+    }
+
+    /// The limit must not disturb the ordinary case, where the span runs out
+    /// long before the resolution does.
+    #[test]
+    fn the_resolution_limit_leaves_normal_textures_alone() {
+        let scale = MaterialScale { size: [512, 512], texels_per_unit: [4.0, 4.0] };
+        assert_eq!(scale.split(16.0, 16, 16).grid, [8, 8]);
+        assert_eq!(scale.split(16.0, 64, 16).grid, [8, 8]);
+    }
+
     /// Under the cap nothing is windowed: the whole texture is used, which is
     /// the case that already looked right and must not regress.
     #[test]
     fn a_texture_that_fits_the_cap_is_used_whole() {
         let scale = MaterialScale { size: [512, 512], texels_per_unit: [4.0, 4.0] };
-        let split = scale.split(16.0, 8);
+        let split = scale.split(16.0, 8, 16);
         assert_eq!(split.grid, [8, 8]);
         assert_eq!(split.texels_per_tile, [64.0, 64.0]);
         assert!(split.is_whole(scale.size), "window {:?}", split.window);
@@ -270,14 +321,14 @@ mod tests {
     fn a_texture_over_the_cap_uses_a_window_of_itself() {
         // 32 blocks of wall from a 512 texture: one block is 16 texels.
         let scale = MaterialScale { size: [512, 512], texels_per_unit: [1.0, 1.0] };
-        let split = scale.split(16.0, 8);
+        let split = scale.split(16.0, 8, 16);
         assert_eq!(split.grid, [8, 8]);
         assert_eq!(split.texels_per_tile, [16.0, 16.0]);
         assert_eq!(split.window, [128, 128], "only a quarter of the texture is used");
         assert!(!split.is_whole(scale.size));
 
         // Raising the cap widens the window without changing the tile size.
-        let wider = scale.split(16.0, 32);
+        let wider = scale.split(16.0, 32, 16);
         assert_eq!(wider.texels_per_tile, split.texels_per_tile);
         assert_eq!(wider.window, [512, 512]);
     }
@@ -290,7 +341,7 @@ mod tests {
         let scale = MaterialScale { size: [64, 64], texels_per_unit: [16.0, 16.0] };
         assert_eq!(scale.blocks_spanned(16.0), [0.25, 0.25]);
 
-        let split = scale.split(16.0, 8);
+        let split = scale.split(16.0, 8, 16);
         assert_eq!(split.grid, [1, 1]);
         assert!(split.texels_per_tile[0] >= 1.0);
         assert!(split.is_whole(scale.size));

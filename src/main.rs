@@ -130,6 +130,10 @@ struct ConvertOptions {
     /// Most tiles one texture may be split into along each axis.
     #[arg(long)]
     tile_max: Option<u32>,
+    /// Blocks the generated pack may register; 0 for no limit. Textures are
+    /// cut as finely as this allows and no finer.
+    #[arg(long)]
+    max_blocks: Option<usize>,
     /// Register one block per material instead of splitting each texture
     /// across the blocks it covers.
     #[arg(long)]
@@ -178,6 +182,9 @@ impl ConvertOptions {
         }
         if let Some(max) = self.tile_max {
             config.materials.tile_max = max;
+        }
+        if let Some(max) = self.max_blocks {
+            config.materials.max_blocks = max;
         }
         if self.no_tile_textures {
             config.materials.tile_textures = false;
@@ -310,8 +317,9 @@ fn convert_into(
     if config.materials.mode == src2mc::config::MaterialMode::Kubejs {
         let split = result.pack.tilings().len();
         eprintln!(
-            "  {} materials carry their own texture ({split} split across several blocks)",
-            stats.textures_resolved
+            "  {} materials carry their own texture ({split} split, up to {} tiles per axis)",
+            stats.textures_resolved,
+            stats.tile_cap,
         );
     }
 
@@ -417,6 +425,51 @@ fn batch(
             spacing as i32,
         ),
     };
+
+    // `batch` merges every map's generated blocks into one pack, so the block
+    // budget belongs to that merged pack rather than to each map on its own.
+    // Planning it here, before anything is cut, is the only way to honour it:
+    // by the time the packs are merged their textures are already sliced.
+    let mut config = config.clone();
+    if config.materials.mode == src2mc::config::MaterialMode::Kubejs
+        && config.materials.max_blocks > 0
+    {
+        let mut all: std::collections::BTreeMap<String, src2mc::source::extract::Layout> =
+            std::collections::BTreeMap::new();
+        for map in &loaded {
+            for (material, layout) in src2mc::source::extract::layouts(map, &config) {
+                // A material can be used at different scales in different
+                // maps. Keep the one that wants the most tiles, so the plan
+                // errs on the side of over-estimating the pack rather than
+                // promising a budget it then exceeds.
+                let ceiling = config.materials.tile_max;
+                all.entry(material)
+                    .and_modify(|held: &mut src2mc::source::extract::Layout| {
+                        if layout.split(&config, ceiling).tiles()
+                            > held.split(&config, ceiling).tiles()
+                        {
+                            *held = layout;
+                        }
+                    })
+                    .or_insert(layout);
+            }
+        }
+        let layouts: Vec<_> = all.into_values().collect();
+        let cap = src2mc::source::extract::cap_for(&layouts, &config);
+        let blocks = src2mc::source::extract::blocks_at(&layouts, &config, cap);
+        eprintln!(
+            "planning one pack for {} maps: {} materials, about {blocks} blocks at up to \
+             {cap} tiles per axis (budget {})",
+            loaded.len(),
+            layouts.len(),
+            config.materials.max_blocks,
+        );
+        // Pin the decision for every map, so none of them re-derives a
+        // different one from its own smaller share of the materials.
+        config.materials.tile_max = cap;
+        config.materials.max_blocks = 0;
+    }
+    let config = &config;
 
     let mut converted = Vec::with_capacity(loaded.len());
     let mut failures = Vec::new();

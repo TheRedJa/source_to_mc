@@ -7,6 +7,7 @@ fn example_config_parses() {
     assert_eq!(cfg.materials.texture_size, 16);
     assert!(cfg.props.enabled);
     assert!(cfg.materials.tile_textures);
-    assert_eq!(cfg.materials.tile_max, 16);
+    assert_eq!(cfg.materials.tile_max, 64);
+    assert_eq!(cfg.materials.max_blocks, 100_000);
     assert!(cfg.contents.skip_3d_skybox);
 }

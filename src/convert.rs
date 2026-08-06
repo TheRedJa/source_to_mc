@@ -67,6 +67,8 @@ pub struct Stats {
     pub displacements_skipped: usize,
     /// Materials that resolved to a generated textured block.
     pub textures_resolved: usize,
+    /// Tiles per axis the block budget allowed.
+    pub tile_cap: u32,
     /// Static props voxelized into the world.
     pub props_placed: usize,
     /// Props skipped: model missing, too small, or matched by a skip rule.
@@ -483,7 +485,6 @@ impl Uv {
 /// tiling a block the map will never place would be nonsense.
 fn tile_sets(
     map: &Map,
-    config: &Config,
     materials: &[crate::bsp::Material],
     resolver: &Resolver,
     pack: &crate::output::kubejs::Pack,
@@ -492,34 +493,24 @@ fn tile_sets(
     if pack.tilings().is_empty() {
         return Vec::new();
     }
-    let scales = crate::bsp::texcoord::material_scales(map);
+    let _ = map;
 
     materials
         .iter()
         .enumerate()
         .map(|(index, material)| {
-            let grid = pack.tilings().get(&material.name).copied()?;
+            // Read back exactly how the texture was cut rather than working
+            // it out again. Recomputing it is how the cut and the projection
+            // drifted apart twice, and with the cap now chosen from a budget
+            // the config alone no longer determines it.
+            let split = pack.split(&material.name)?;
+            let (grid, texels_per_tile) = (split.grid, split.texels_per_tile);
+
             // The resolver has the last word: a named rule beats the texture.
             let assigned = resolver.block_for_material(index)?;
             if assigned != pack.tile_id(&material.name, 0, 0)? {
                 return None;
             }
-
-            // How wide one tile is in texels. This must come from the
-            // material's own scale, not from dividing the texture by the grid:
-            // where the cap shortened the grid, the grid covers a window of
-            // the texture rather than all of it, and dividing the whole
-            // texture by it would stretch every tile over several blocks.
-            // That is what turned Highway 17's cliffs into flat 10x10 patches.
-            let texels_per_tile = scales
-                .get(index)
-                .copied()
-                .flatten()
-                .map(|scale| {
-                    scale.split(config.scale.units_per_block, config.materials.tile_max)
-                })
-                .map(|split| split.texels_per_tile)
-                .unwrap_or([1.0, 1.0]);
 
             let mut ids = Vec::with_capacity((grid[0] * grid[1]) as usize);
             for row in 0..grid[1] {
@@ -751,7 +742,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let skipped = std::sync::atomic::AtomicUsize::new(0);
 
     let origins = model_origins(&entity_models);
-    let tiles = tile_sets(map, config, &materials, &resolver, &assets.pack, &palette);
+    let tiles = tile_sets(map, &materials, &resolver, &assets.pack, &palette);
     let (grid, masks) = voxelize_solids(
         &solids, map, config, &resolver, &transform, &origins, &tiles, &palette, &skipped,
     );
@@ -887,6 +878,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             displacements_voxelized: surfaces.len() - displacements_skipped,
             displacements_skipped,
             textures_resolved: assets.stats.resolved,
+            tile_cap: assets.stats.tile_cap,
             props_placed: assets.stats.props_placed,
             props_skipped: assets.stats.props_skipped,
             shapes_fitted,
@@ -1495,7 +1487,7 @@ mod tests {
             let scales = crate::bsp::texcoord::material_scales(&map);
             let mut checked = 0;
             for scale in scales.into_iter().flatten() {
-                let split = scale.split(config.scale.units_per_block, max);
+                let split = scale.split(config.scale.units_per_block, max, 16);
                 for axis in 0..2 {
                     let texels_per_block =
                         scale.texels_per_unit[axis] * config.scale.units_per_block;
@@ -1526,8 +1518,8 @@ mod tests {
 
         let mut widened = 0;
         for scale in crate::bsp::texcoord::material_scales(&map).into_iter().flatten() {
-            let small = scale.split(config.scale.units_per_block, 8);
-            let large = scale.split(config.scale.units_per_block, 32);
+            let small = scale.split(config.scale.units_per_block, 8, 16);
+            let large = scale.split(config.scale.units_per_block, 32, 16);
             assert_eq!(
                 small.texels_per_tile, large.texels_per_tile,
                 "the cap changed how much texture one block shows"

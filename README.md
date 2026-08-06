@@ -277,16 +277,29 @@ texture is cut into that many pieces, one registered block apiece, and every
 voxel takes the piece that really is in front of it — so the bricks line up
 across the wall again.
 
-**One tile is always one block.** `[materials] tile_max` caps how many tiles a
-texture may have per axis, and it does that by shortening the *window* into the
-texture, never by widening the tiles. The alternative is worse than the problem
-it solves: Highway 17's cliff blend spans 77 blocks, so eight tiles stretched
-to fit would be flat ten-by-ten patches of identical stone with a hard seam
-between them, which the eye finds instantly. Past the cap only the first
-`tile_max` blocks' worth of texels is used and that window repeats — detail per
-block stays exactly right, and what is lost is the part of the texture that
-never repeats anyway. The default of 16 costs about 11k blocks a map; raise it
-for maps built around big ground and cliff blends.
+**One tile is always one block.** A cap on tiles per axis is met by shortening
+the *window* into the texture, never by widening the tiles. The alternative is
+worse than the problem it solves: Highway 17's cliff blend spans 77 blocks, so
+eight tiles stretched to fit would be flat ten-by-ten patches of identical
+stone with a hard seam between them, which the eye finds instantly. Past the
+cap only the first few blocks' worth of texels is used and that window repeats
+— detail per block stays exactly right, and what is lost is the part of the
+texture that never repeats anyway.
+
+**The cost is capped by a block budget, not by a tile count.** What splitting
+textures really costs is not disk — 100k blocks is about 60 MB of 16x16 PNGs —
+but what a KubeJS instance pays to register them at startup. So the control is
+`[materials] max_blocks`, default 100,000: textures are cut as finely as that
+allows and no finer, which makes the same setting sensible for a single room
+and for a whole campaign. `batch` plans one cap across every map before
+cutting anything, since it merges them into a single pack.
+
+Quality saturates well before the budget usually binds, because a texture is
+never cut finer than its own resolution can feed — below one source texel per
+output pixel a tile is upscaled mush rather than recovered detail. That is what
+makes a generous ceiling safe: cost stops rising exactly where quality stops
+improving. Entropy: Zero's 17 maps come to about 84k blocks with every texture
+at full resolution, so the default lets the whole campaign through untouched.
 
 **The tile size comes from the face, not the material.** One material is used
 at several scales in the same map — Highway 17's `nature/cliffface001a` at six
@@ -308,8 +321,8 @@ than a repeating texture, so it is never windowed — a prop stretched past
 
 Turn the whole thing off with `[materials] tile_textures = false`.
 
-On `d1_trainstation_02` this is 198 materials registering 11,706 blocks, about
-7 MB of 16x16 PNGs, and no measurable conversion cost.
+On `d1_trainstation_02` this is 198 materials registering about 20k blocks and
+11 MB of 16x16 PNGs, with no measurable conversion cost.
 
 ## Sub-block detail
 

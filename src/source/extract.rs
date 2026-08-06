@@ -35,6 +35,9 @@ pub struct Extracted {
     pub models_loaded: usize,
     /// Blocks registered for materials split across several of them.
     pub tiles: usize,
+    /// Tiles per axis the budget allowed, which is what the textures were
+    /// actually cut at.
+    pub tile_cap: u32,
 }
 
 /// One placed prop's triangles, ready to voxelize.
@@ -105,6 +108,11 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
         vec![None; map.materials().len()]
     };
 
+    // Nothing is cut until every material is known, because how finely each
+    // one may be cut depends on how many there are in total: the budget is on
+    // the pack, not on any one texture.
+    let mut pending: Vec<Pending> = Vec::new();
+
     // The map's own materials first, so their indices stay exactly the ones
     // `Map::material_index` hands out.
     let mut seen: Vec<&str> = Vec::new();
@@ -120,18 +128,40 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
         if !want_pack || material.name.starts_with("tools/") {
             continue;
         }
-        let split = scales
-            .get(index)
-            .copied()
-            .flatten()
-            .map(|scale| grid_for(scale, config))
-            .unwrap_or(WHOLE);
+        pending.push(Pending {
+            name: material.name.clone(),
+            raw_name: Some(material.raw_name.clone()),
+            layout: match scales.get(index).copied().flatten() {
+                Some(scale) => Layout::World(scale),
+                None => Layout::Unknown,
+            },
+        });
+    }
+
+    if want_props {
+        place_props(
+            map,
+            config,
+            &vfs,
+            &materials,
+            &mut textures,
+            want_pack.then_some(&mut pending),
+            &mut assets,
+        );
+    }
+
+    let layouts: Vec<Layout> = pending.iter().map(|p| p.layout).collect();
+    let cap = choose_cap(&layouts, config);
+    assets.stats.tile_cap = cap;
+
+    for item in &pending {
+        let split = item.layout.split(config, cap);
         let resolved = insert_block(
             &mut assets.pack,
             &materials,
             &mut textures,
-            &material.name,
-            Some(&material.raw_name),
+            &item.name,
+            item.raw_name.as_deref(),
             split,
         );
         if resolved {
@@ -140,11 +170,14 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
         }
     }
 
-    if want_props {
-        place_props(map, config, &vfs, &materials, &mut textures, want_pack, &mut assets);
-    }
-
     assets
+}
+
+/// A material waiting for the cap to be settled before its texture is cut.
+struct Pending {
+    name: String,
+    raw_name: Option<String>,
+    layout: Layout,
 }
 
 /// One block, one whole texture: what a material gets when nothing says how
@@ -152,12 +185,139 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
 pub(crate) const WHOLE: Split =
     Split { grid: [1, 1], texels_per_tile: [1.0, 1.0], window: [u32::MAX; 2] };
 
-/// How to split a material's texture. See [`MaterialScale::split`].
-pub(crate) fn grid_for(scale: MaterialScale, config: &Config) -> Split {
-    if !config.materials.tile_textures {
-        return WHOLE;
+/// What is known about how a material's texture sits on the surfaces wearing
+/// it, which is all that decides how finely it should be cut.
+#[derive(Debug, Clone, Copy)]
+pub enum Layout {
+    /// A world material: the map's own texture vectors say how it is laid out,
+    /// and the texture repeats, so the grid may cover a window of it.
+    World(MaterialScale),
+    /// A model's sheet. Its UVs are an unwrap rather than a repeat, so the
+    /// whole sheet is always used and the rate has to be measured off the
+    /// model's geometry.
+    Sheet { uv_per_unit: f64, size: [u32; 2] },
+    /// Nothing known: one block wearing the whole texture.
+    Unknown,
+}
+
+impl Layout {
+    /// How to cut this texture at a given cap on tiles per axis.
+    pub fn split(&self, config: &Config, cap: u32) -> Split {
+        if !config.materials.tile_textures {
+            return WHOLE;
+        }
+        let units = config.scale.units_per_block;
+        let out = config.materials.texture_size;
+        match *self {
+            Layout::World(scale) => scale.split(units, cap, out),
+            Layout::Sheet { uv_per_unit, size } => {
+                // How many blocks of surface one pass over the sheet covers.
+                let blocks = if uv_per_unit > 0.0 && uv_per_unit.is_finite() {
+                    1.0 / (uv_per_unit * units)
+                } else {
+                    1.0
+                };
+                let limit = |axis: usize| (size[axis] / out.max(1)).max(1);
+                let grid: [u32; 2] = std::array::from_fn(|axis| {
+                    ((blocks.round() as i64).clamp(1, i64::from(cap.max(1))) as u32)
+                        .min(limit(axis))
+                });
+                Split {
+                    grid,
+                    texels_per_tile: std::array::from_fn(|axis| {
+                        (size[axis] as f64 / grid[axis] as f64).max(1.0)
+                    }),
+                    window: size,
+                }
+            }
+            Layout::Unknown => WHOLE,
+        }
     }
-    scale.split(config.scale.units_per_block, config.materials.tile_max)
+}
+
+/// Every material one map would register, and how its texture is laid out.
+///
+/// For planning a budget across several maps before any of them is converted:
+/// `batch` merges the packs, so the ceiling belongs to the merged pack rather
+/// than to each map separately, and that total is only knowable up front.
+/// Geometry is deliberately not built here — only what decides the cut.
+pub fn layouts(map: &Map, config: &Config) -> std::collections::BTreeMap<String, Layout> {
+    let mut out = std::collections::BTreeMap::new();
+    if config.materials.mode != crate::config::MaterialMode::Kubejs {
+        return out;
+    }
+
+    let vfs = Vfs::for_map(&map.path, &config.materials.game_dir_paths());
+    let materials = Materials::new(&vfs, Some(&map.bsp.pack));
+    let mut textures = Textures::new(&vfs, config.materials.texture_size);
+
+    for (index, scale) in material_scales(map).into_iter().enumerate() {
+        let Some(material) = map.materials().get(index) else { continue };
+        if material.name.starts_with("tools/") {
+            continue;
+        }
+        out.insert(
+            material.name.clone(),
+            scale.map(Layout::World).unwrap_or(Layout::Unknown),
+        );
+    }
+
+    if config.props.enabled {
+        let skip = globset(&config.props.skip).unwrap_or_else(|_| globset(&[]).unwrap());
+        let skybox = map.skybox().filter(|_| config.contents.skip_3d_skybox);
+        let mut models = Models::new(&vfs);
+        for prop in crate::bsp::props::extract(&map.bsp) {
+            if skybox.is_some_and(|room| room.contains_point(prop.origin))
+                || skip.is_match(&prop.model)
+            {
+                continue;
+            }
+            let Some(model) = models.get(&prop.model) else { continue };
+            for part in &model.parts {
+                if out.contains_key(&part.material) {
+                    continue;
+                }
+                let layout =
+                    sheet_layout(&materials, &mut textures, &part.material, part.uv_per_unit);
+                out.insert(part.material.clone(), layout);
+            }
+        }
+    }
+    out
+}
+
+/// The cap a set of materials should be cut at, for callers that gathered
+/// them with [`layouts`].
+pub fn cap_for(layouts: &[Layout], config: &Config) -> u32 {
+    choose_cap(layouts, config)
+}
+
+/// How many blocks a set of materials would register at a given cap.
+pub fn blocks_at(layouts: &[Layout], config: &Config, cap: u32) -> usize {
+    layouts.iter().map(|l| l.split(config, cap).tiles() as usize).sum()
+}
+
+/// Pick the finest cut that stays inside the block budget.
+///
+/// Every registered block costs a KubeJS instance startup time and memory, so
+/// the honest control is a ceiling on the pack rather than on tiles per axis:
+/// the same cap means very different totals for a one-room map and a whole
+/// campaign. The count only rises with the cap, so the largest cap that fits
+/// is found by walking down from the ceiling.
+///
+/// The resolution limit in [`Layout::split`] means this usually saturates well
+/// before the ceiling — past a certain point a finer cut costs nothing because
+/// the source texture has no more detail to give.
+fn choose_cap(layouts: &[Layout], config: &Config) -> u32 {
+    let ceiling = config.materials.tile_max.max(1);
+    let budget = config.materials.max_blocks;
+    if budget == 0 || !config.materials.tile_textures {
+        return ceiling;
+    }
+    let blocks = |cap: u32| -> usize {
+        layouts.iter().map(|l| l.split(config, cap).tiles() as usize).sum()
+    };
+    (1..=ceiling).rev().find(|cap| blocks(*cap) <= budget).unwrap_or(1)
 }
 
 
@@ -177,7 +337,7 @@ fn insert_block(
         return false;
     };
     let tiles = tiles.to_vec();
-    pack.insert_tiled(name, &tiles, split.grid, &assets);
+    pack.insert_tiled(name, &tiles, split, &assets);
     true
 }
 
@@ -188,7 +348,7 @@ fn place_props(
     vfs: &Vfs,
     materials: &Materials,
     textures: &mut Textures,
-    want_pack: bool,
+    mut pending: Option<&mut Vec<Pending>>,
     assets: &mut Assets,
 ) {
     let props = crate::bsp::props::extract(&map.bsp);
@@ -241,20 +401,17 @@ fn place_props(
                     assets
                         .prop_materials
                         .push(prop_material(materials, &mut *textures, &part.material));
-                    if want_pack {
-                        let split =
-                            prop_grid(materials, textures, &part.material, config, part.uv_per_unit);
-                        if insert_block(
-                            &mut assets.pack,
-                            materials,
-                            textures,
-                            &part.material,
-                            None,
-                            split,
-                        ) {
-                            assets.stats.resolved += 1;
-                            assets.stats.tiles += split.tiles().saturating_sub(1) as usize;
-                        }
+                    if let Some(pending) = pending.as_mut() {
+                        pending.push(Pending {
+                            name: part.material.clone(),
+                            raw_name: None,
+                            layout: sheet_layout(
+                                materials,
+                                textures,
+                                &part.material,
+                                part.uv_per_unit,
+                            ),
+                        });
                     }
                     index_of.insert(part.material.clone(), index);
                     index
@@ -291,45 +448,20 @@ fn prop_material(materials: &Materials, textures: &mut Textures, name: &str) -> 
     }
 }
 
-/// How finely to split a model's texture. See [`PROP_TEXELS_PER_TILE`].
-pub(crate) fn prop_grid(
+/// What a model's material looks like, measured off the geometry that wears
+/// it. See [`Layout::Sheet`].
+pub(crate) fn sheet_layout(
     materials: &Materials,
     textures: &mut Textures,
     name: &str,
-    config: &Config,
     uv_per_unit: f64,
-) -> Split {
-    if !config.materials.tile_textures {
-        return WHOLE;
-    }
-    let Some(header) = materials
+) -> Layout {
+    match materials
         .assets(name, None)
         .and_then(|assets| textures.header(&assets.base_texture))
-    else {
-        return WHOLE;
-    };
-    // How many blocks of surface one pass over the sheet covers, measured off
-    // the model's own geometry. Guessing a fixed texels-per-block instead is
-    // wrong by a factor of several on anything large — `rockcliff02a` puts one
-    // sheet across 39 blocks of cliff — and the excess comes back as blocks of
-    // repeated texture.
-    let blocks = if uv_per_unit > 0.0 && uv_per_unit.is_finite() {
-        1.0 / (uv_per_unit * config.scale.units_per_block)
-    } else {
-        1.0
-    };
-    // A model's sheet is an unwrap, not a repeating texture, so the whole of it
-    // is always used: unlike a wall there is nothing to window into, and a
-    // sheet stretched past the cap keeps some repetition.
-    let max = config.materials.tile_max.max(1);
-    let grid: [u32; 2] =
-        std::array::from_fn(|_| (blocks.round() as i64).clamp(1, i64::from(max)) as u32);
-    Split {
-        grid,
-        texels_per_tile: std::array::from_fn(|axis| {
-            (header.size[axis] as f64 / grid[axis] as f64).max(1.0)
-        }),
-        window: header.size,
+    {
+        Some(header) => Layout::Sheet { uv_per_unit, size: header.size },
+        None => Layout::Unknown,
     }
 }
 
@@ -394,15 +526,15 @@ mod tests {
         let Some(map) = sample_map() else { return };
         let assets = extract(&map, &kubejs());
 
-        let Some((material, grid)) = assets
+        let Some((material, split)) = assets
             .pack
             .tilings()
             .iter()
-            .find(|(_, grid)| grid[0] > 2 && grid[1] > 2)
+            .find(|(_, split)| split.grid[0] > 2 && split.grid[1] > 2)
         else {
             return;
         };
-
+        let grid = split.grid;
         let mut seen: Vec<Vec<u8>> = Vec::new();
         for row in 0..grid[1] {
             for column in 0..grid[0] {
@@ -436,7 +568,8 @@ mod tests {
         let assets = extract(&map, &kubejs());
         let script = assets.pack.script();
 
-        for (material, grid) in assets.pack.tilings() {
+        for (material, split) in assets.pack.tilings() {
+            let grid = split.grid;
             for row in 0..grid[1] {
                 for column in 0..grid[0] {
                     let id = assets
@@ -454,6 +587,77 @@ mod tests {
             assert_eq!(
                 assets.pack.tile_id(material, grid[0], grid[1]),
                 assets.pack.tile_id(material, 0, 0)
+            );
+        }
+    }
+
+    /// The budget is what a KubeJS instance actually pays for, so it has to
+    /// bind: a pack asked to fit a small number of blocks must come in under
+    /// it, by cutting textures more coarsely rather than by dropping any.
+    #[test]
+    fn a_tight_budget_shrinks_the_pack_without_losing_materials() {
+        let Some(map) = sample_map() else { return };
+
+        let generous = extract(&map, &kubejs());
+        if generous.pack.is_empty() {
+            return;
+        }
+
+        let mut tight = kubejs();
+        tight.materials.max_blocks = 2_000;
+        let tight = extract(&map, &tight);
+
+        assert!(
+            tight.pack.registered() <= 2_000,
+            "budget of 2000 gave {} blocks",
+            tight.pack.registered()
+        );
+        assert!(tight.pack.registered() < generous.pack.registered());
+        // Coarser, not smaller: every material still gets a block.
+        assert_eq!(tight.stats.resolved, generous.stats.resolved);
+        assert!(tight.stats.tile_cap < generous.stats.tile_cap);
+    }
+
+    /// With no budget the cap is the ceiling, and the pack saturates: past the
+    /// point where every texture is at its own resolution, raising the ceiling
+    /// buys nothing and costs nothing.
+    #[test]
+    fn quality_saturates_once_every_texture_is_at_full_resolution() {
+        let Some(map) = sample_map() else { return };
+        let mut config = kubejs();
+        config.materials.max_blocks = 0;
+
+        config.materials.tile_max = 64;
+        let a = extract(&map, &config);
+        if a.pack.is_empty() {
+            return;
+        }
+        config.materials.tile_max = 256;
+        let b = extract(&map, &config);
+        assert_eq!(
+            a.pack.registered(),
+            b.pack.registered(),
+            "raising the ceiling past saturation changed the pack"
+        );
+    }
+
+    /// The budget must never be met by registering fewer materials.
+    #[test]
+    fn a_budget_never_drops_a_material() {
+        let Some(map) = sample_map() else { return };
+        for budget in [0, 500, 5_000, 100_000] {
+            let mut config = kubejs();
+            config.materials.max_blocks = budget;
+            let assets = extract(&map, &config);
+            if assets.pack.is_empty() {
+                return;
+            }
+            let ids = assets.pack.ids();
+            assert!(
+                ids.len() >= assets.stats.resolved,
+                "budget {budget} lost materials: {} ids for {} resolved",
+                ids.len(),
+                assets.stats.resolved
             );
         }
     }

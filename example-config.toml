@@ -62,12 +62,21 @@ texture_size = 16
 # one face it is a smear, cut into eight it reads as brick again and the
 # pattern lines up across the wall. Costs one registered block per tile.
 tile_textures = true
-# Most tiles a texture may be split into along one axis. A tile is always one
-# block; past this cap only the first tile_max blocks' worth of the texture is
-# used and that window repeats, so this sets how often the pattern comes round,
-# not how detailed it is. 16 costs about 11k blocks a map. Raise it for maps
-# built around big cliff and ground blends -- Highway 17's span 77 blocks.
-tile_max = 16
+# Blocks the generated pack may register, or 0 for no limit. The real cost of
+# splitting textures is not disk -- 100k blocks is about 60 MB of 16x16 PNGs --
+# but what KubeJS pays to register them at startup, so the control is a ceiling
+# on the pack. Textures are cut as finely as this allows and no finer, which
+# means the same setting suits a single room and a whole campaign. `batch`
+# plans one cap across every map, since it merges them into one pack.
+#
+# Entropy: Zero's 17 maps come to about 84k blocks with every texture at full
+# resolution, so the default lets that through untouched.
+max_blocks = 100000
+
+# Hard ceiling on tiles per axis, whatever the budget allows. Rarely binding: a
+# texture is never cut finer than its own resolution can feed, so most
+# materials stop well short of this and the budget decides the rest.
+tile_max = 64
 
 # Extra game directories to search for .vmt/.vtf content. The map's own game
 # directory and everything its gameinfo.txt mounts are searched automatically.
