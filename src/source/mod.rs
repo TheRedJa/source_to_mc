@@ -5,6 +5,7 @@
 //! what turns that into the real texture.
 
 pub mod extract;
+pub mod mdl;
 pub mod report;
 pub mod vfs;
 pub mod vmt;

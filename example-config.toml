@@ -25,6 +25,12 @@ offset = [0, 0, 0]
 skip_sky = true
 # Skip brushes made entirely of nodraw/skip/hint/clip tool textures.
 skip_tool_brushes = true
+# Leave out the 3D skybox room: the sealed miniature of the horizon that the
+# engine renders scaled up and far away. Converted literally it is a second,
+# wrongly-sized map in a corner of the first, and the void between the two is
+# most of the schematic's volume. For d1_trainstation_02 it is the difference
+# between needing a custom dimension and fitting in a vanilla world.
+skip_3d_skybox = true
 
 # What to do with each brush contents flag. Either "skip", "solid" (let the
 # material decide), or a forced block.
@@ -103,6 +109,28 @@ enabled = true
 # a shell you fall through. The direction is the surface's own inward normal,
 # so cliffs and ceilings are thickened the right way rather than downwards.
 solidify = 2
+
+[props]
+# Voxelize prop_static models: the fences, railings, catwalks, crates, signs
+# and lamps that fill a map's rooms. None of it is in any brush lump, so
+# without this a converted map is an accurate but empty shell. Needs the game's
+# content on the search path, since a map stores only the path to each model.
+enabled = true
+# Ignore props whose longest dimension is under this many Source units. At 16
+# units per block anything smaller cannot be more than a stray cube, and maps
+# are full of pebbles, cans and tufts of grass.
+min_size = 12.0
+# Ignore props over this many units; 0 keeps every size. The lever for backdrop
+# scenery: distant architecture is placed as ordinary props thousands of units
+# across, and one of them can be tens of thousands of blocks of a single dark
+# material. Off by default, because that scenery really is there.
+max_size = 0.0
+# Model paths to leave out. Foliage is alpha-tested cards that voxelize into
+# solid slabs, and an outdoor map has thousands of them.
+skip = ["*props_foliage*", "*/foliage/*"]
+# Voxels of backing driven along each triangle's inward normal. Props are
+# usually closed shells already, so a fence stays one block thick.
+solidify = 0
 
 [entities]
 # Write entities.json alongside the schematics.

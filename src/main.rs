@@ -116,6 +116,9 @@ struct ConvertOptions {
     /// Leave out displacement terrain.
     #[arg(long)]
     no_displacements: bool,
+    /// Leave out `prop_static` models: fences, railings, catwalks, crates.
+    #[arg(long)]
+    no_props: bool,
     /// Also write a datapack defining a dimension tall enough for the map.
     #[arg(long)]
     emit_dimension: bool,
@@ -149,6 +152,9 @@ impl ConvertOptions {
         }
         if self.no_displacements {
             config.displacement.enabled = false;
+        }
+        if self.no_props {
+            config.props.enabled = false;
         }
         if self.emit_dimension {
             config.output.emit_dimension = true;
@@ -265,6 +271,12 @@ fn convert_into(
         stats.displacements_voxelized,
         stats.displacements_skipped,
     );
+    if stats.props_placed > 0 || stats.props_skipped > 0 {
+        eprintln!(
+            "  {} static props placed ({} skipped)",
+            stats.props_placed, stats.props_skipped,
+        );
+    }
     eprintln!(
         "  {} blocks after hollowing (from {})",
         stats.blocks, stats.blocks_before_hollow,

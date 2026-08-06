@@ -67,6 +67,10 @@ pub struct Stats {
     pub displacements_skipped: usize,
     /// Materials that resolved to a generated textured block.
     pub textures_resolved: usize,
+    /// Static props voxelized into the world.
+    pub props_placed: usize,
+    /// Props skipped: model missing, too small, or matched by a skip rule.
+    pub props_skipped: usize,
     /// Voxels emitted as a slab or stair instead of a full cube.
     pub shapes_fitted: usize,
     pub blocks_before_hollow: usize,
@@ -120,9 +124,8 @@ struct EntityModel {
 
 /// Match every brush entity to its model and the mode configured for its
 /// classname.
-fn entity_models(map: &Map, config: &Config) -> Vec<EntityModel> {
-    let transform = Transform::new(config, map.bounds());
-    crate::bsp::entities::extract(map, &transform)
+fn entity_models(map: &Map, config: &Config, transform: &Transform) -> Vec<EntityModel> {
+    crate::bsp::entities::extract(map, transform)
         .into_iter()
         .filter_map(|record| {
             let model = record.brush_model?;
@@ -273,6 +276,50 @@ fn voxelize_displacement(
     grid
 }
 
+/// Voxelize one static prop's triangles.
+///
+/// A model is a surface, not a solid, so this is the displacement treatment:
+/// rasterize the triangles and, if asked, drive `solidify` more voxels along
+/// each one's inward normal. Props are usually closed shells already — a crate
+/// really is a box — so the default is none, and a fence stays one block
+/// thick instead of becoming a wall.
+fn voxelize_prop(
+    surface: &crate::source::extract::PropSurface,
+    transform: &Transform,
+    solidify: u32,
+    block: BlockId,
+) -> VoxelGrid {
+    use crate::voxel::mesh::{Triangle, voxelize_triangle};
+
+    let mut grid = VoxelGrid::new();
+    for tri in &surface.triangles {
+        let mapped = Triangle::new(
+            transform.to_block_space(tri[0]),
+            transform.to_block_space(tri[1]),
+            transform.to_block_space(tri[2]),
+        );
+        if mapped.is_degenerate() {
+            continue;
+        }
+        let inward = -mapped.normal();
+        voxelize_triangle(&mapped, |pos| {
+            grid.set(pos, block);
+            for step in 1..=solidify {
+                let offset = inward * step as f64;
+                grid.set(
+                    [
+                        pos[0] + offset.x.round() as i32,
+                        pos[1] + offset.y.round() as i32,
+                        pos[2] + offset.z.round() as i32,
+                    ],
+                    block,
+                );
+            }
+        });
+    }
+    grid
+}
+
 /// Voxelize a set of brushes into one grid, interning blocks into `palette`.
 fn voxelize_solids(
     solids: &[Solid],
@@ -403,22 +450,25 @@ fn fit_shapes(
 }
 
 pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
-    let transform = Transform::new(config, map.bounds());
+    // Bounds of what will be kept, which is not the same as worldspawn's own
+    // box once the 3D skybox room is left out of it.
+    let skybox = map.skybox().filter(|_| config.contents.skip_3d_skybox);
+    let transform = Transform::new(config, map.converted_bounds(config.contents.skip_3d_skybox));
 
-    // Extracting the map's real textures is opt-in; without it the palette
-    // works exactly as before, from rules and average colour.
-    let (pack, extracted) = match config.materials.mode {
-        crate::config::MaterialMode::Kubejs => crate::source::extract::extract(map, config),
-        crate::config::MaterialMode::Vanilla => Default::default(),
-    };
-    let resolver = Resolver::with_textures(config, map.materials(), &pack.ids())?;
+    // Reading the game's own content is best-effort: without it there are no
+    // generated textures and no props, and the palette works exactly as it
+    // did before, from rules and the compiler's average colour.
+    let assets = crate::source::extract::extract(map, config);
+    let materials = assets.materials(map);
+    let resolver = Resolver::with_textures(config, &materials, &assets.pack.ids())?;
 
-    let entity_models = entity_models(map, config);
+    let entity_models = entity_models(map, config, &transform);
 
     // Gather every brush first so the voxelization itself parallelizes cleanly.
     let solids: Vec<Solid> = models_to_convert(map, config, &entity_models)
         .into_iter()
         .flat_map(|model| map.solids(model))
+        .filter(|solid| !skybox.is_some_and(|room| room.contains(&solid.bounds)))
         .collect();
 
     // The palette is shared and rarely written to after the first few brushes.
@@ -493,6 +543,30 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     }
     let displacements_skipped = displacements_skipped.into_inner();
 
+    // Static props: everything a map puts *in* its rooms. Fences, railings,
+    // catwalks, crates, signs and lamps are all models, none of which is in
+    // any brush lump, which is why a map converted from brushes alone is an
+    // accurate but empty shell.
+    if !assets.props.is_empty() {
+        let props = assets
+            .props
+            .par_iter()
+            .fold(VoxelGrid::new, |mut grid, surface| {
+                let block = resolver
+                    .block_for_material(surface.material)
+                    .map(|name| palette.lock().unwrap().intern(name));
+                if let Some(block) = block {
+                    grid.merge(voxelize_prop(surface, &transform, config.props.solidify, block));
+                }
+                grid
+            })
+            .reduce(VoxelGrid::new, |mut a, b| {
+                a.merge(b);
+                a
+            });
+        grid.merge(props);
+    }
+
     let blocks_before_hollow = grid.count();
     let mut shapes_fitted = 0;
     let grid = match config.fill.mode {
@@ -508,7 +582,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     // brushes precisely so this can happen here, on the voxels that survived.
     let mut palette = palette.into_inner().unwrap();
     let grid = if config.shapes.enabled && !masks.is_empty() {
-        let (fitted, count) = fit_shapes(&grid, &masks, &mut palette, &pack);
+        let (fitted, count) = fit_shapes(&grid, &masks, &mut palette, &assets.pack);
         shapes_fitted = count;
         fitted
     } else {
@@ -528,7 +602,9 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             solids_skipped: skipped,
             displacements_voxelized: surfaces.len() - displacements_skipped,
             displacements_skipped,
-            textures_resolved: extracted.resolved,
+            textures_resolved: assets.stats.resolved,
+            props_placed: assets.stats.props_placed,
+            props_skipped: assets.stats.props_skipped,
             shapes_fitted,
             blocks_before_hollow,
             blocks: grid.count(),
@@ -538,13 +614,13 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         palette,
         transform,
         separate,
-        pack,
+        pack: assets.pack,
     })
 }
 
 /// Bounds of the map in block space, for reporting.
 pub fn block_bounds(map: &Map, transform: &Transform) -> Aabb {
-    let bounds = map.bounds();
+    let bounds = map.converted_bounds(true);
     if bounds.is_empty() {
         return Aabb::new(Vec3::ZERO, Vec3::ZERO);
     }
@@ -701,13 +777,20 @@ mod tests {
         );
     }
 
-    /// No single block should dominate a converted map. Before materials
-    /// landed, fog volumes flagged `WINDOW` made glass 86% of some Entropy:
-    /// Zero maps; a regression there would show up here first.
+    /// No single block should dominate the *brushwork* of a converted map.
+    /// Before materials landed, fog volumes flagged `WINDOW` made glass 86% of
+    /// some Entropy: Zero maps; a regression there would show up here first.
+    ///
+    /// Props are left out deliberately. Entropy: Zero's backdrop architecture
+    /// is one enormous, genuinely near-black Combine wall, so with props on a
+    /// single block legitimately owns three quarters of `az_c4_4` and this
+    /// test would only ever be measuring that.
     #[test]
     fn no_single_block_swamps_a_converted_map() {
         let Some(map) = sample_map() else { return };
-        let result = convert(&map, &Config::default()).unwrap();
+        let mut config = Config::default();
+        config.props.enabled = false;
+        let result = convert(&map, &config).unwrap();
         let total = result.stats.blocks;
         let (block, count) = result
             .stats
@@ -736,7 +819,7 @@ mod tests {
         let config = Config::default();
         let transform = Transform::new(&config, map.bounds());
         let resolver = Resolver::new(&config, map.materials()).unwrap();
-        let origins = model_origins(&entity_models(&map, &config));
+        let origins = model_origins(&entity_models(&map, &config, &transform));
 
         let _ = &resolver;
         let mut checked = 0;
@@ -772,7 +855,7 @@ mod tests {
         let Some(map) = sample_map() else { return };
         let config = Config::default();
         let transform = Transform::new(&config, map.bounds());
-        let origins = model_origins(&entity_models(&map, &config));
+        let origins = model_origins(&entity_models(&map, &config, &transform));
 
         let (mut with_total, mut without_total, mut count) = (0.0, 0.0, 0);
         for (model, origin) in &origins {
@@ -935,14 +1018,19 @@ mod tests {
         assert!(max[1] as f64 <= bounds.max.y + 1.0, "{max:?} vs {bounds:?}");
     }
 
+    /// Hollowing is about brush interiors, so props — which are surfaces
+    /// already and have no interior to remove — are left out of the
+    /// comparison rather than diluting it.
     #[test]
     fn hollow_mode_produces_far_fewer_blocks_than_solid() {
         let Some(map) = sample_map() else { return };
 
-        let mut solid_config = Config::default();
+        let mut hollow_config = Config::default();
+        hollow_config.props.enabled = false;
+        let mut solid_config = hollow_config.clone();
         solid_config.fill.mode = FillMode::Solid;
         let solid = convert(&map, &solid_config).unwrap();
-        let hollow = convert(&map, &Config::default()).unwrap();
+        let hollow = convert(&map, &hollow_config).unwrap();
 
         assert!(
             hollow.stats.blocks * 2 < solid.stats.blocks,
@@ -950,6 +1038,78 @@ mod tests {
             hollow.stats.blocks,
             solid.stats.blocks
         );
+    }
+
+    /// The gap this closes: fences, railings, catwalks, crates and signs are
+    /// all models, so a map converted from brushes alone is an accurate but
+    /// empty shell.
+    #[test]
+    fn static_props_add_geometry_and_can_be_turned_off() {
+        let Some(map) = sample_map() else { return };
+        let mut without = Config::default();
+        without.props.enabled = false;
+
+        let without = convert(&map, &without).unwrap();
+        let with = convert(&map, &Config::default()).unwrap();
+        if with.stats.props_placed == 0 {
+            return; // no game install to read models from
+        }
+
+        assert_eq!(without.stats.props_placed, 0);
+        assert!(
+            with.stats.blocks > without.stats.blocks,
+            "props added nothing: {} vs {}",
+            with.stats.blocks,
+            without.stats.blocks
+        );
+    }
+
+    /// The 3D skybox is a scale model of the horizon in a sealed room off in a
+    /// corner. Converting it gives a second, wrongly-sized map, and the void
+    /// between the two is most of the schematic's volume.
+    #[test]
+    fn leaving_out_the_3d_skybox_shrinks_the_map() {
+        let Some(map) = terrain_map() else { return };
+        if map.skybox().is_none() {
+            return;
+        }
+
+        let mut with = Config::default();
+        with.contents.skip_3d_skybox = false;
+        let with = convert(&map, &with).unwrap();
+        let without = convert(&map, &Config::default()).unwrap();
+
+        let (a, b) = (with.grid.bounds().unwrap(), without.grid.bounds().unwrap());
+        let volume = |(min, max): ([i32; 3], [i32; 3])| {
+            (0..3).map(|i| (max[i] - min[i] + 1) as i64).product::<i64>()
+        };
+        assert!(
+            volume(b) < volume(a),
+            "excluding the skybox did not shrink the map: {} vs {}",
+            volume(b),
+            volume(a)
+        );
+        assert!(without.stats.blocks < with.stats.blocks);
+    }
+
+    /// Whatever the detector finds, the playable map has to survive it. This
+    /// is the failure that would be worst and quietest: a converted map with
+    /// its middle missing.
+    #[test]
+    fn the_skybox_never_eats_the_playable_map() {
+        for map in [sample_map(), terrain_map()].into_iter().flatten() {
+            let mut with = Config::default();
+            with.contents.skip_3d_skybox = false;
+            let with = convert(&map, &with).unwrap();
+            let without = convert(&map, &Config::default()).unwrap();
+            assert!(
+                without.stats.blocks * 2 > with.stats.blocks,
+                "{}: excluding the skybox removed more than half the map, {} of {}",
+                map.name,
+                with.stats.blocks - without.stats.blocks,
+                with.stats.blocks
+            );
+        }
     }
 
     #[test]

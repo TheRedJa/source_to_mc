@@ -18,6 +18,7 @@ pub struct Config {
     pub fill: Fill,
     pub shapes: Shapes,
     pub displacement: Displacement,
+    pub props: Props,
     pub entities: Entities,
     pub output: Output,
     pub performance: Performance,
@@ -132,6 +133,11 @@ pub struct Contents {
     pub skip_sky: bool,
     /// Skip brushes whose sides are all nodraw/skip/hint tool textures.
     pub skip_tool_brushes: bool,
+    /// Leave out the 3D skybox room: the sealed miniature of the horizon that
+    /// the engine renders scaled up and far away. Converted literally it is a
+    /// second, wrongly-sized map sitting in a corner of the first, and most of
+    /// the empty volume between them.
+    pub skip_3d_skybox: bool,
 }
 
 impl Default for Contents {
@@ -151,6 +157,7 @@ impl Default for Contents {
             actions,
             skip_sky: true,
             skip_tool_brushes: true,
+            skip_3d_skybox: true,
         }
     }
 }
@@ -303,6 +310,51 @@ pub struct Displacement {
 impl Default for Displacement {
     fn default() -> Self {
         Displacement { enabled: true, solidify: 2 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Props {
+    /// Voxelize `prop_static` models into the world.
+    ///
+    /// Needs the game's content on the search path, since a map stores only
+    /// the path to each model. Without it this quietly does nothing, exactly
+    /// as texture extraction does.
+    pub enabled: bool,
+    /// Ignore props whose longest dimension is under this many Source units.
+    /// At 16 units per block anything smaller cannot be more than a stray
+    /// cube, and maps are full of pebbles, cans and tufts of grass.
+    pub min_size: f64,
+    /// Ignore props whose longest dimension is over this many Source units;
+    /// 0 keeps every size.
+    ///
+    /// The lever for backdrop scenery. Distant architecture — Half-Life 2's
+    /// Citadel, Entropy: Zero's Combine walls — is placed as ordinary props
+    /// thousands of units across, and converting one is tens of thousands of
+    /// blocks of a single dark material. Off by default, because that scenery
+    /// is really there and dropping it silently is the worse surprise.
+    pub max_size: f64,
+    /// Glob patterns matched against the model path; a prop matching any of
+    /// them is skipped.
+    pub skip: Vec<String>,
+    /// Give thin props this many extra voxels of backing along the surface
+    /// normal, as displacements get. Props are usually closed shells already,
+    /// so the default is none.
+    pub solidify: u32,
+}
+
+impl Default for Props {
+    fn default() -> Self {
+        Props {
+            enabled: true,
+            min_size: 12.0,
+            max_size: 0.0,
+            // Foliage is alpha-tested cards that voxelize into solid slabs,
+            // and there are thousands of them in an outdoor map.
+            skip: vec!["*props_foliage*".into(), "*/foliage/*".into()],
+            solidify: 0,
+        }
     }
 }
 
