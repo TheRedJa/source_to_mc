@@ -124,8 +124,16 @@ struct ConvertOptions {
     emit_dimension: bool,
     /// Where surface blocks come from. `kubejs` generates a block per material
     /// carrying its real Source texture, plus a KubeJS pack registering them.
-    #[arg(long, value_enum, default_value_t = Textures::Vanilla)]
-    textures: Textures,
+    /// Defaults to `vanilla` unless the config file says otherwise.
+    #[arg(long, value_enum)]
+    textures: Option<Textures>,
+    /// Most tiles one texture may be split into along each axis.
+    #[arg(long)]
+    tile_max: Option<u32>,
+    /// Register one block per material instead of splitting each texture
+    /// across the blocks it covers.
+    #[arg(long)]
+    no_tile_textures: bool,
 }
 
 /// Where a surface's block comes from.
@@ -159,10 +167,21 @@ impl ConvertOptions {
         if self.emit_dimension {
             config.output.emit_dimension = true;
         }
-        config.materials.mode = match self.textures {
-            Textures::Vanilla => src2mc::config::MaterialMode::Vanilla,
-            Textures::Kubejs => src2mc::config::MaterialMode::Kubejs,
-        };
+        // Only when actually passed: otherwise a `mode` in the config file
+        // could never take effect, since the flag would overwrite it on every
+        // run with its own default.
+        if let Some(textures) = self.textures {
+            config.materials.mode = match textures {
+                Textures::Vanilla => src2mc::config::MaterialMode::Vanilla,
+                Textures::Kubejs => src2mc::config::MaterialMode::Kubejs,
+            };
+        }
+        if let Some(max) = self.tile_max {
+            config.materials.tile_max = max;
+        }
+        if self.no_tile_textures {
+            config.materials.tile_textures = false;
+        }
     }
 }
 

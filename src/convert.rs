@@ -433,6 +433,7 @@ impl Uv {
 /// tiling a block the map will never place would be nonsense.
 fn tile_sets(
     map: &Map,
+    config: &Config,
     materials: &[crate::bsp::Material],
     resolver: &Resolver,
     pack: &crate::output::kubejs::Pack,
@@ -454,15 +455,21 @@ fn tile_sets(
                 return None;
             }
 
-            // Tiles divide the texture, so the texel size of one is the
-            // texture's own size over the grid — whatever scale the faces
-            // using it happen to be at.
-            let size = scales
+            // How wide one tile is in texels. This must come from the
+            // material's own scale, not from dividing the texture by the grid:
+            // where the cap shortened the grid, the grid covers a window of
+            // the texture rather than all of it, and dividing the whole
+            // texture by it would stretch every tile over several blocks.
+            // That is what turned Highway 17's cliffs into flat 10x10 patches.
+            let texels_per_tile = scales
                 .get(index)
                 .copied()
                 .flatten()
-                .map(|scale| scale.size)
-                .unwrap_or([grid[0], grid[1]]);
+                .map(|scale| {
+                    scale.split(config.scale.units_per_block, config.materials.tile_max)
+                })
+                .map(|split| split.texels_per_tile)
+                .unwrap_or([1.0, 1.0]);
 
             let mut ids = Vec::with_capacity((grid[0] * grid[1]) as usize);
             for row in 0..grid[1] {
@@ -471,13 +478,7 @@ fn tile_sets(
                     ids.push(palette.lock().unwrap().intern(&id));
                 }
             }
-            Some(TileSet {
-                grid,
-                texels_per_tile: std::array::from_fn(|axis| {
-                    (size[axis] as f64 / grid[axis] as f64).max(1.0)
-                }),
-                ids,
-            })
+            Some(TileSet { grid, texels_per_tile, ids })
         })
         .collect()
 }
@@ -669,7 +670,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let skipped = std::sync::atomic::AtomicUsize::new(0);
 
     let origins = model_origins(&entity_models);
-    let tiles = tile_sets(map, &materials, &resolver, &assets.pack, &palette);
+    let tiles = tile_sets(map, config, &materials, &resolver, &assets.pack, &palette);
     let (grid, masks) = voxelize_solids(
         &solids, map, config, &resolver, &transform, &origins, &tiles, &palette, &skipped,
     );
@@ -1150,6 +1151,15 @@ mod tests {
         }
     }
 
+    /// Highway 17: cliffs and ground built from blend textures stretched over
+    /// dozens of blocks, which is where the tiling cap actually bites.
+    fn coast_map() -> Option<Map> {
+        let path = Path::new(
+            "/mnt/games/SteamLibrary/steamapps/common/Half-Life 2/hl2/maps/d2_coast_03.bsp",
+        );
+        path.exists().then(|| Map::load(path).unwrap())
+    }
+
     /// A map with terrain in it, since `az_c4_4` is nearly all interiors.
     fn terrain_map() -> Option<Map> {
         let path = Path::new(
@@ -1316,6 +1326,67 @@ mod tests {
             below,
             "going up a block should move one tile row towards the top of the texture"
         );
+    }
+
+    /// The regression that produced flat 10x10 patches of identical stone on
+    /// Highway 17's cliffs: a cap on the tile count that stretched each tile
+    /// over several blocks instead of shortening the window into the texture.
+    /// Every tile must cover exactly one block, at any cap, on every material
+    /// a real map uses.
+    #[test]
+    fn a_tile_never_covers_more_than_one_block_on_a_real_map() {
+        let Some(map) = coast_map() else { return };
+        let mut config = Config::default();
+
+        for max in [4, 8, 16, 64] {
+            config.materials.tile_max = max;
+            let scales = crate::bsp::texcoord::material_scales(&map);
+            let mut checked = 0;
+            for scale in scales.into_iter().flatten() {
+                let split = scale.split(config.scale.units_per_block, max);
+                for axis in 0..2 {
+                    let texels_per_block =
+                        scale.texels_per_unit[axis] * config.scale.units_per_block;
+                    if texels_per_block <= 0.0 {
+                        continue;
+                    }
+                    let blocks = split.texels_per_tile[axis] / texels_per_block;
+                    assert!(
+                        blocks < 1.5,
+                        "tile_max {max}: a {:?} texture at {:.2} texels/unit gives \
+                         tiles {blocks:.1} blocks wide",
+                        scale.size,
+                        scale.texels_per_unit[axis],
+                    );
+                    checked += 1;
+                }
+            }
+            assert!(checked > 50, "only {checked} materials checked at tile_max {max}");
+        }
+    }
+
+    /// Raising the cap must buy a longer run before the pattern repeats, not
+    /// change how much of the texture one block shows.
+    #[test]
+    fn raising_the_cap_widens_the_window_and_nothing_else() {
+        let Some(map) = coast_map() else { return };
+        let config = Config::default();
+
+        let mut widened = 0;
+        for scale in crate::bsp::texcoord::material_scales(&map).into_iter().flatten() {
+            let small = scale.split(config.scale.units_per_block, 8);
+            let large = scale.split(config.scale.units_per_block, 32);
+            assert_eq!(
+                small.texels_per_tile, large.texels_per_tile,
+                "the cap changed how much texture one block shows"
+            );
+            assert!(large.grid[0] >= small.grid[0] && large.grid[1] >= small.grid[1]);
+            if large.grid != small.grid {
+                assert!(large.window[0] >= small.window[0]);
+                widened += 1;
+            }
+        }
+        assert!(widened > 0, "no material on this map is over the cap");
     }
 
     /// A whole map's worth: no tile may dominate, or the projection is not

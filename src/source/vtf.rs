@@ -34,7 +34,7 @@ const ALPHA_CUTOFF: u8 = 128;
 /// choosing the cutoff that best preserves how much of the original was
 /// see-through.
 pub fn decode(data: &[u8], size: u32, alpha_test: bool) -> Result<RgbaImage> {
-    Ok(decode_tiles(data, size, alpha_test, [1, 1])?.remove(0))
+    Ok(decode_tiles(data, size, alpha_test, [1, 1], [u32::MAX; 2])?.remove(0))
 }
 
 /// Decode a VTF and cut it into a `grid` of `size` x `size` tiles, row by row.
@@ -51,6 +51,7 @@ pub fn decode_tiles(
     size: u32,
     alpha_test: bool,
     grid: [u32; 2],
+    window: [u32; 2],
 ) -> Result<Vec<RgbaImage>> {
     let vtf = vtf::from_bytes(data).map_err(|e| anyhow::anyhow!("{e}"))?;
     let image: DynamicImage = vtf
@@ -72,18 +73,27 @@ pub fn decode_tiles(
     });
 
     let (columns, rows) = (grid[0].max(1), grid[1].max(1));
+    // The grid may cover only part of the texture: see `MaterialScale::split`.
+    // Clamped to the real image, which need not match the size the compiler
+    // recorded in the BSP.
+    let used = [
+        window[0].clamp(1, image.width().max(1)),
+        window[1].clamp(1, image.height().max(1)),
+    ];
+    let whole = used == [image.width(), image.height()];
+
     let mut tiles = Vec::with_capacity((columns * rows) as usize);
     for row in 0..rows {
         for column in 0..columns {
             // Boundaries are computed from the edges rather than by
             // multiplying a tile width, so a texture whose size does not
             // divide evenly still tiles it completely and without gaps.
-            let x0 = image.width() * column / columns;
-            let x1 = (image.width() * (column + 1) / columns).max(x0 + 1);
-            let y0 = image.height() * row / rows;
-            let y1 = (image.height() * (row + 1) / rows).max(y0 + 1);
+            let x0 = used[0] * column / columns;
+            let x1 = (used[0] * (column + 1) / columns).max(x0 + 1);
+            let y0 = used[1] * row / rows;
+            let y1 = (used[1] * (row + 1) / rows).max(y0 + 1);
 
-            let cropped = if columns == 1 && rows == 1 {
+            let cropped = if columns == 1 && rows == 1 && whole {
                 image.clone()
             } else {
                 image.crop_imm(x0, y0, x1 - x0, y1 - y0)
@@ -153,8 +163,19 @@ pub struct Textures<'a> {
     size: u32,
     /// `None` records a texture we already failed to find, so a missing file
     /// is not searched for once per material that references it.
-    cache: HashMap<(String, bool, u32, u32), Option<Vec<RgbaImage>>>,
+    cache: HashMap<Key, Option<Vec<RgbaImage>>>,
     headers: HashMap<String, Option<Header>>,
+}
+
+/// What identifies a decoded set of tiles. The layout is part of it as much as
+/// the file is: the same texture can legitimately be wanted at two layouts,
+/// and neither answer is a substitute for the other.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Key {
+    texture: String,
+    alpha_test: bool,
+    grid: [u32; 2],
+    window: [u32; 2],
 }
 
 impl<'a> Textures<'a> {
@@ -168,36 +189,40 @@ impl<'a> Textures<'a> {
     /// texture is downsampled, so the same file can legitimately be wanted
     /// both ways.
     pub fn get(&mut self, base_texture: &str, alpha_test: bool) -> Option<&RgbaImage> {
-        self.tiles(base_texture, alpha_test, [1, 1])?.first()
+        self.tiles(base_texture, alpha_test, [1, 1], [u32::MAX; 2])?.first()
     }
 
-    /// Load a texture cut into a `grid` of tiles, row by row.
-    ///
-    /// The grid is part of the key, as the alpha-test flag is: the same file
-    /// can legitimately be wanted at two layouts, and neither answer is a
-    /// substitute for the other.
+    /// Load a texture cut into a `grid` of tiles, row by row, using the first
+    /// `window` texels of it. Pass `[u32::MAX; 2]` for the whole texture.
     pub fn tiles(
         &mut self,
         base_texture: &str,
         alpha_test: bool,
         grid: [u32; 2],
+        window: [u32; 2],
     ) -> Option<&[RgbaImage]> {
-        let key = (
-            base_texture.to_ascii_lowercase().replace('\\', "/"),
+        let key = Key {
+            texture: base_texture.to_ascii_lowercase().replace('\\', "/"),
             alpha_test,
-            grid[0].max(1),
-            grid[1].max(1),
-        );
+            grid: [grid[0].max(1), grid[1].max(1)],
+            window,
+        };
         if !self.cache.contains_key(&key) {
-            let decoded = self.load(&key.0, alpha_test, [key.2, key.3]);
+            let decoded = self.load(&key.texture, alpha_test, key.grid, window);
             self.cache.insert(key.clone(), decoded);
         }
         self.cache.get(&key)?.as_deref()
     }
 
-    fn load(&self, key: &str, alpha_test: bool, grid: [u32; 2]) -> Option<Vec<RgbaImage>> {
+    fn load(
+        &self,
+        key: &str,
+        alpha_test: bool,
+        grid: [u32; 2],
+        window: [u32; 2],
+    ) -> Option<Vec<RgbaImage>> {
         let data = self.vfs.open(&path_of(key))?;
-        decode_tiles(&data, self.size, alpha_test, grid).ok()
+        decode_tiles(&data, self.size, alpha_test, grid, window).ok()
     }
 
     /// How many distinct textures have been decoded successfully.
@@ -286,7 +311,7 @@ mod tests {
             .expect("texture should be in the VPKs");
 
         let grid = [4u32, 4u32];
-        let tiles = decode_tiles(&data, 16, false, grid).unwrap();
+        let tiles = decode_tiles(&data, 16, false, grid, [u32::MAX; 2]).unwrap();
         assert_eq!(tiles.len(), 16);
 
         // Lay the tiles back out, and compare against downsampling the whole
@@ -325,7 +350,7 @@ mod tests {
         let Some(vfs) = vfs() else { return };
         let Some(data) = vfs.open("materials/brick/brickwall017a.vtf") else { return };
 
-        let tiles = decode_tiles(&data, 16, false, [4, 4]).unwrap();
+        let tiles = decode_tiles(&data, 16, false, [4, 4], [u32::MAX; 2]).unwrap();
         let mut raw: Vec<&Vec<u8>> = tiles.iter().map(|t| t.as_raw()).collect();
         raw.sort();
         raw.dedup();
@@ -337,7 +362,7 @@ mod tests {
     fn a_single_tile_is_the_whole_texture() {
         let Some(vfs) = vfs() else { return };
         let Some(data) = vfs.open("materials/concrete/concretewall001a.vtf") else { return };
-        let tiles = decode_tiles(&data, 16, false, [1, 1]).unwrap();
+        let tiles = decode_tiles(&data, 16, false, [1, 1], [u32::MAX; 2]).unwrap();
         assert_eq!(tiles.len(), 1);
         assert_eq!(tiles[0].as_raw(), decode(&data, 16, false).unwrap().as_raw());
     }

@@ -71,6 +71,65 @@ impl MaterialScale {
             }
         })
     }
+
+    /// How to cut this material's texture up, given a cap on the tiles it may
+    /// have along each axis.
+    ///
+    /// The rule that matters is that **one tile is one block**, always. It is
+    /// tempting to meet the cap by letting each tile cover several blocks
+    /// instead, and that is exactly wrong: a cliff blend texture spanning 77
+    /// blocks then becomes eight tiles of nearly ten blocks each, and the
+    /// wall comes out as flat 10x10 patches of identical stone with a hard
+    /// seam between them. That reads far worse than the smear it replaced,
+    /// because the eye finds the grid instantly.
+    ///
+    /// So the cap shrinks the *window* into the texture rather than the
+    /// resolution: past it, only the first `max` blocks' worth of texels is
+    /// used, and that window repeats. Detail per block stays exactly right and
+    /// what is lost is the part of the texture that never repeats — which, for
+    /// the ground and cliff blends that are the only things scaled this far, is
+    /// more of the same rock.
+    pub fn split(&self, units_per_block: f64, max: u32) -> Split {
+        let max = max.max(1);
+        let spanned = self.blocks_spanned(units_per_block);
+
+        // Round to whole blocks so the tile grid lines up with the texture's
+        // own repeat, rather than drifting a fraction of a block per tile.
+        let blocks: [u32; 2] =
+            std::array::from_fn(|axis| (spanned[axis].round() as i64).clamp(1, i64::from(u32::MAX)) as u32);
+        let grid: [u32; 2] = std::array::from_fn(|axis| blocks[axis].min(max));
+        let texels_per_tile: [f64; 2] =
+            std::array::from_fn(|axis| (self.size[axis] as f64 / blocks[axis] as f64).max(1.0));
+        let window: [u32; 2] = std::array::from_fn(|axis| {
+            ((texels_per_tile[axis] * grid[axis] as f64).round() as u32)
+                .clamp(1, self.size[axis].max(1))
+        });
+
+        Split { grid, texels_per_tile, window }
+    }
+}
+
+/// How a material's texture is cut into blocks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Split {
+    /// Tiles across and down, and so blocks before the pattern repeats.
+    pub grid: [u32; 2],
+    /// Texels one tile covers, which is one Minecraft block of surface.
+    pub texels_per_tile: [f64; 2],
+    /// Texels of the texture the whole grid uses. Equal to the texture size
+    /// unless the cap cut the window short.
+    pub window: [u32; 2],
+}
+
+impl Split {
+    pub fn tiles(&self) -> u32 {
+        self.grid[0] * self.grid[1]
+    }
+
+    /// Whether the texture is used whole, or only a window into it.
+    pub fn is_whole(&self, size: [u32; 2]) -> bool {
+        self.window == size
+    }
 }
 
 /// The typical scale of every material in the map, indexed as
@@ -155,6 +214,86 @@ mod tests {
         assert_eq!(scale.blocks_spanned(16.0), [8.0, 8.0]);
         // Half the units per block, twice the blocks.
         assert_eq!(scale.blocks_spanned(8.0), [16.0, 16.0]);
+    }
+
+    /// The bug this exists to prevent. A cliff blend texture spans 77 blocks;
+    /// capped at 8 tiles, each tile used to cover nearly ten blocks, and the
+    /// wall came out as flat 10x10 patches of identical stone. A tile is one
+    /// block, always — the cap shortens the window into the texture instead.
+    #[test]
+    fn a_tile_is_never_more_than_one_block() {
+        for (size, rate) in [
+            ([1024, 1024], 0.83), // nature/blendrockdirt008a: 77 blocks
+            ([256, 256], 0.33),   // nature/water_coast01: 48 blocks
+            ([512, 512], 1.0),    // 32 blocks
+            ([512, 512], 2.0),    // 16 blocks
+            ([512, 512], 4.0),    // 8 blocks, inside the cap
+            ([2048, 512], 4.0),   // wider than tall
+            ([64, 64], 16.0),     // a quarter of a block
+        ] {
+            let scale = MaterialScale { size, texels_per_unit: [rate, rate] };
+            let split = scale.split(16.0, 8);
+            let spanned = scale.blocks_spanned(16.0);
+
+            for axis in 0..2 {
+                let blocks_per_tile =
+                    split.texels_per_tile[axis] / (rate * 16.0);
+                assert!(
+                    blocks_per_tile < 1.5,
+                    "{size:?} at {rate} texels/unit: one tile covers                      {blocks_per_tile:.1} blocks",
+                );
+                assert!(split.grid[axis] >= 1 && split.grid[axis] <= 8);
+                assert!(split.window[axis] <= size[axis]);
+                // The window is exactly the tiles it holds.
+                let expected =
+                    (split.texels_per_tile[axis] * split.grid[axis] as f64).round() as u32;
+                assert_eq!(split.window[axis], expected.min(size[axis]));
+            }
+            let _ = spanned;
+        }
+    }
+
+    /// Under the cap nothing is windowed: the whole texture is used, which is
+    /// the case that already looked right and must not regress.
+    #[test]
+    fn a_texture_that_fits_the_cap_is_used_whole() {
+        let scale = MaterialScale { size: [512, 512], texels_per_unit: [4.0, 4.0] };
+        let split = scale.split(16.0, 8);
+        assert_eq!(split.grid, [8, 8]);
+        assert_eq!(split.texels_per_tile, [64.0, 64.0]);
+        assert!(split.is_whole(scale.size), "window {:?}", split.window);
+    }
+
+    /// Over the cap the window shrinks in proportion, so the pattern repeats
+    /// every `max` blocks instead of stretching.
+    #[test]
+    fn a_texture_over_the_cap_uses_a_window_of_itself() {
+        // 32 blocks of wall from a 512 texture: one block is 16 texels.
+        let scale = MaterialScale { size: [512, 512], texels_per_unit: [1.0, 1.0] };
+        let split = scale.split(16.0, 8);
+        assert_eq!(split.grid, [8, 8]);
+        assert_eq!(split.texels_per_tile, [16.0, 16.0]);
+        assert_eq!(split.window, [128, 128], "only a quarter of the texture is used");
+        assert!(!split.is_whole(scale.size));
+
+        // Raising the cap widens the window without changing the tile size.
+        let wider = scale.split(16.0, 32);
+        assert_eq!(wider.texels_per_tile, split.texels_per_tile);
+        assert_eq!(wider.window, [512, 512]);
+    }
+
+    /// A texture smaller than a block repeats several times within one, and
+    /// must not ask for a fraction of a tile.
+    #[test]
+    fn a_texture_smaller_than_a_block_is_a_single_tile() {
+        // A quarter of a block: rounding the span would give zero tiles.
+        let scale = MaterialScale { size: [64, 64], texels_per_unit: [16.0, 16.0] };
+        assert_eq!(scale.blocks_spanned(16.0), [0.25, 0.25]);
+
+        let split = scale.split(16.0, 8);
+        assert_eq!(split.grid, [1, 1]);
+        assert!(split.texels_per_tile[0] >= 1.0);
+        assert!(split.is_whole(scale.size));
     }
 
     #[test]

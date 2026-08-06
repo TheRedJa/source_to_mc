@@ -54,7 +54,7 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
                    name: &str,
                    raw: Option<&str>,
                    uses: usize,
-                   tiles: [u32; 2],
+                   split: crate::bsp::texcoord::Split,
                    from_prop: bool| {
         if let Some(existing) = entries.iter_mut().find(|e| e.material == name) {
             existing.uses += uses;
@@ -67,7 +67,7 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
         entries.push(Entry {
             material: name.to_string(),
             uses,
-            tiles,
+            tiles: split.grid,
             from_prop,
             texture: assets.as_ref().map(|a| a.base_texture.clone()),
             resolved,
@@ -77,20 +77,20 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
     };
 
     for (index, material) in map.materials().iter().enumerate() {
-        let tiles = scales
+        let split = scales
             .get(index)
             .copied()
             .flatten()
             .filter(|_| config.materials.tile_textures)
             .map(|scale| crate::source::extract::grid_for(scale, config))
-            .unwrap_or([1, 1]);
+            .unwrap_or(crate::source::extract::WHOLE);
         add(
             &mut entries,
             &mut textures,
             &material.name,
             Some(&material.raw_name),
             usage.get(index).copied().unwrap_or(0),
-            tiles,
+            split,
             false,
         );
     }
@@ -108,9 +108,13 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
                     continue;
                 }
                 seen.push(part.material.clone());
-                let tiles =
-                    crate::source::extract::prop_grid(&materials, &mut textures, &part.material, config);
-                add(&mut entries, &mut textures, &part.material, None, 0, tiles, true);
+                let split = crate::source::extract::prop_grid(
+                    &materials,
+                    &mut textures,
+                    &part.material,
+                    config,
+                );
+                add(&mut entries, &mut textures, &part.material, None, 0, split, true);
             }
         }
     }

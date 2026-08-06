@@ -10,7 +10,7 @@
 //! props are placed, and the conversion falls back to what the BSP alone can
 //! tell it.
 
-use crate::bsp::texcoord::{MaterialScale, material_scales};
+use crate::bsp::texcoord::{MaterialScale, Split, material_scales};
 use crate::bsp::{Map, Material};
 use crate::config::Config;
 use crate::geom::Vec3;
@@ -119,23 +119,23 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
         if !want_pack || material.name.starts_with("tools/") {
             continue;
         }
-        let grid = scales
+        let split = scales
             .get(index)
             .copied()
             .flatten()
             .map(|scale| grid_for(scale, config))
-            .unwrap_or([1, 1]);
+            .unwrap_or(WHOLE);
         let resolved = insert_block(
             &mut assets.pack,
             &materials,
             &mut textures,
             &material.name,
             Some(&material.raw_name),
-            grid,
+            split,
         );
         if resolved {
             assets.stats.resolved += 1;
-            assets.stats.tiles += (grid[0] * grid[1]).saturating_sub(1) as usize;
+            assets.stats.tiles += split.tiles().saturating_sub(1) as usize;
         }
     }
 
@@ -146,17 +146,17 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
     assets
 }
 
-/// How many blocks across and down to split a material's texture.
-///
-/// The natural answer is however many blocks of surface one repeat of the
-/// texture covers, which is what `blocks_spanned` computes. Past the cap a
-/// tile simply covers more than one block: the texture still lines up with
-/// itself, at coarser resolution, which is a far better failure than
-/// registering a thousand blocks for one sign.
-pub(crate) fn grid_for(scale: MaterialScale, config: &Config) -> [u32; 2] {
-    let max = config.materials.tile_max.max(1);
-    let spanned = scale.blocks_spanned(config.scale.units_per_block);
-    std::array::from_fn(|axis| (spanned[axis].round() as i64).clamp(1, max as i64) as u32)
+/// One block, one whole texture: what a material gets when nothing says how
+/// its texture is laid out.
+pub(crate) const WHOLE: Split =
+    Split { grid: [1, 1], texels_per_tile: [1.0, 1.0], window: [u32::MAX; 2] };
+
+/// How to split a material's texture. See [`MaterialScale::split`].
+pub(crate) fn grid_for(scale: MaterialScale, config: &Config) -> Split {
+    if !config.materials.tile_textures {
+        return WHOLE;
+    }
+    scale.split(config.scale.units_per_block, config.materials.tile_max)
 }
 
 /// Texels of a model's texture taken to be worth one block.
@@ -175,14 +175,16 @@ fn insert_block(
     textures: &mut Textures,
     name: &str,
     raw_name: Option<&str>,
-    grid: [u32; 2],
+    split: Split,
 ) -> bool {
     let Some(assets) = materials.assets(name, raw_name) else { return false };
-    let Some(tiles) = textures.tiles(&assets.base_texture, assets.alpha_test, grid) else {
+    let Some(tiles) =
+        textures.tiles(&assets.base_texture, assets.alpha_test, split.grid, split.window)
+    else {
         return false;
     };
     let tiles = tiles.to_vec();
-    pack.insert_tiled(name, &tiles, grid, &assets);
+    pack.insert_tiled(name, &tiles, split.grid, &assets);
     true
 }
 
@@ -247,17 +249,17 @@ fn place_props(
                         .prop_materials
                         .push(prop_material(materials, &mut *textures, &part.material));
                     if want_pack {
-                        let grid = prop_grid(materials, textures, &part.material, config);
+                        let split = prop_grid(materials, textures, &part.material, config);
                         if insert_block(
                             &mut assets.pack,
                             materials,
                             textures,
                             &part.material,
                             None,
-                            grid,
+                            split,
                         ) {
                             assets.stats.resolved += 1;
-                            assets.stats.tiles += (grid[0] * grid[1]).saturating_sub(1) as usize;
+                            assets.stats.tiles += split.tiles().saturating_sub(1) as usize;
                         }
                     }
                     index_of.insert(part.material.clone(), index);
@@ -301,18 +303,28 @@ pub(crate) fn prop_grid(
     textures: &mut Textures,
     name: &str,
     config: &Config,
-) -> [u32; 2] {
+) -> Split {
     if !config.materials.tile_textures {
-        return [1, 1];
+        return WHOLE;
     }
     let Some(header) = materials
         .assets(name, None)
         .and_then(|assets| textures.header(&assets.base_texture))
     else {
-        return [1, 1];
+        return WHOLE;
     };
+    // A model's sheet is an unwrap, so the whole of it is always used: unlike
+    // a wall, there is no repeat to window into.
     let max = config.materials.tile_max.max(1);
-    std::array::from_fn(|axis| (header.size[axis] / PROP_TEXELS_PER_TILE).clamp(1, max))
+    let grid: [u32; 2] =
+        std::array::from_fn(|axis| (header.size[axis] / PROP_TEXELS_PER_TILE).clamp(1, max));
+    Split {
+        grid,
+        texels_per_tile: std::array::from_fn(|axis| {
+            (header.size[axis] as f64 / grid[axis] as f64).max(1.0)
+        }),
+        window: header.size,
+    }
 }
 
 fn globset(patterns: &[String]) -> Result<globset::GlobSet, globset::Error> {
