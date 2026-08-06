@@ -278,16 +278,16 @@ impl Default for Voxelize {
 #[serde(default, deny_unknown_fields)]
 pub struct Shapes {
     /// Emit slabs and stairs where the geometry is half-height or stepped.
+    ///
+    /// Vanilla blocks only. KubeJS 2101 exposes exactly two block builders,
+    /// `basic` and `detector`, so a generated textured block cannot be a slab
+    /// or a stair and keeps its full cube.
     pub enabled: bool,
-    /// Also register slab and stair variants of generated textured blocks.
-    /// Off by default: it triples the block count and the pack size, and
-    /// KubeJS has to register every one of them at startup.
-    pub kubejs_variants: bool,
 }
 
 impl Default for Shapes {
     fn default() -> Self {
-        Shapes { enabled: true, kubejs_variants: false }
+        Shapes { enabled: true }
     }
 }
 

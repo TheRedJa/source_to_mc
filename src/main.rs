@@ -316,16 +316,7 @@ fn convert_into(
         manifest.generated_blocks = result
             .pack
             .blocks()
-            .flat_map(|b| {
-                let base = b.block_id();
-                let variants = result.pack.has_variants();
-                std::iter::once(base.clone()).chain(
-                    variants
-                        .then(|| [format!("{base}_slab"), format!("{base}_stairs")])
-                        .into_iter()
-                        .flatten(),
-                )
-            })
+            .map(|b| b.block_id())
             .collect();
     }
 
