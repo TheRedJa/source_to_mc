@@ -531,11 +531,7 @@ fn main() -> Result<()> {
         Command::Textures { map, common, missing, json } => {
             let config = common.resolve()?;
             let map = load(&map)?;
-            let mut report = src2mc::source::report::report(
-                &map,
-                config.materials.texture_size,
-                &config.materials.game_dir_paths(),
-            );
+            let mut report = src2mc::source::report::report(&map, &config);
             if missing {
                 report.entries.retain(|e| !e.resolved && e.uses > 0);
             }

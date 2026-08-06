@@ -151,7 +151,8 @@ with a cap on how much of the map that island may be, and a check that no player
 start is inside it, because dropping the level would be the worse failure. On
 `d1_trainstation_02` leaving it out takes the bounding volume from 349M blocks
 to 149M, halves the number of schematic tiles, and brings the map inside a
-vanilla world's height. Turn it off with `[contents] skip_3d_skybox = false`.
+vanilla world's height. 123 of the 216 stock maps have one. Turn it off with
+`[contents] skip_3d_skybox = false`.
 
 **Moving brush entities** get their own schematic each, under `entities/`. A
 `func_door` pasted into the world is a slab sealing the doorway it should open,
@@ -249,9 +250,11 @@ The textures are not in the maps. A BSP's pakfile holds mostly the cubemap
 while the real textures live in the game's VPKs and a mod's loose `materials/`
 folder. The search path is rebuilt from the map's own `gameinfo.txt`, so
 Entropy: Zero 2's chain through `ez2/`, `mapbase/` and `hl2/` resolves without
-configuration. `src2mc textures <map>` shows what was found and where; across
-all 170 stock maps it resolves 98.3% of materials in use, the rest being render
-targets like `_rt_Camera` and water shaders that have no `$basetexture` at all.
+configuration. `src2mc textures <map>` shows what was found and where — for
+brush materials and for the ones static props bring with them, with how far
+each texture will be split — and it resolves nearly every material in use, the
+rest being render targets like `_rt_Camera` and water shaders that have no
+`$basetexture` at all.
 
 Rules still win where the *kind* of block matters: a grate stays `iron_bars`
 rather than becoming an opaque cube with a grate painted on it. Alpha-tested

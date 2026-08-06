@@ -153,7 +153,7 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
 /// tile simply covers more than one block: the texture still lines up with
 /// itself, at coarser resolution, which is a far better failure than
 /// registering a thousand blocks for one sign.
-fn grid_for(scale: MaterialScale, config: &Config) -> [u32; 2] {
+pub(crate) fn grid_for(scale: MaterialScale, config: &Config) -> [u32; 2] {
     let max = config.materials.tile_max.max(1);
     let spanned = scale.blocks_spanned(config.scale.units_per_block);
     std::array::from_fn(|axis| (spanned[axis].round() as i64).clamp(1, max as i64) as u32)
@@ -296,7 +296,7 @@ fn prop_material(materials: &Materials, textures: &mut Textures, name: &str) -> 
 }
 
 /// How finely to split a model's texture. See [`PROP_TEXELS_PER_TILE`].
-fn prop_grid(
+pub(crate) fn prop_grid(
     materials: &Materials,
     textures: &mut Textures,
     name: &str,
