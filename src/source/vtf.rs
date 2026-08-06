@@ -135,6 +135,20 @@ impl<'a> Textures<'a> {
     pub fn decoded(&self) -> usize {
         self.cache.values().filter(|v| v.is_some()).count()
     }
+
+    /// The average colour a texture declares, in linear light, without
+    /// decoding its pixels.
+    ///
+    /// This is the same quantity the map compiler copies into the BSP for
+    /// world materials, so a model's material can be colour-matched on exactly
+    /// the same footing as a wall's — and reading a header is far cheaper than
+    /// decompressing a 1024x1024 DXT image to average it ourselves.
+    pub fn reflectivity(&self, base_texture: &str) -> Option<[f64; 3]> {
+        let key = base_texture.to_ascii_lowercase().replace('\\', "/");
+        let data = self.vfs.open(&format!("materials/{}.vtf", key.trim_end_matches(".vtf")))?;
+        let header = vtf::from_bytes(&data).ok()?.header.reflectivity;
+        Some(header.map(f64::from))
+    }
 }
 
 /// Encode an image as PNG bytes.

@@ -5,4 +5,6 @@ fn example_config_parses() {
     assert_eq!(cfg.scale.units_per_block, 16.0);
     assert!(cfg.shapes.enabled);
     assert_eq!(cfg.materials.texture_size, 16);
+    assert!(cfg.props.enabled);
+    assert!(cfg.contents.skip_3d_skybox);
 }

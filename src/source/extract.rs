@@ -1,12 +1,20 @@
-//! Turning a map's materials into generated Minecraft blocks.
+//! Reading everything the conversion wants out of the game's own content.
 //!
-//! Ties the search path, material resolution and texture decoding together:
-//! given a map, produce a [`Pack`] holding one block per material whose
-//! texture could be found.
+//! Two things need the search path, and both need it at the same moment: the
+//! real texture behind each material, and the models the map places as static
+//! props. They also overlap — a prop's material is a material like any other,
+//! and wants the same `.vmt` lookup, the same texture and the same block — so
+//! they are gathered together, over one `Vfs` and one set of caches.
+//!
+//! All of it is best-effort. Without a game install the pack is empty and no
+//! props are placed, and the conversion falls back to what the BSP alone can
+//! tell it.
 
-use crate::bsp::Map;
+use crate::bsp::{Map, Material};
 use crate::config::Config;
+use crate::geom::Vec3;
 use crate::output::kubejs::Pack;
+use crate::source::mdl::Models;
 use crate::source::vfs::Vfs;
 use crate::source::vmt::Materials;
 use crate::source::vtf::Textures;
@@ -18,51 +26,225 @@ pub struct Extracted {
     pub resolved: usize,
     /// Content sources searched, in order.
     pub search_path: Vec<String>,
+    /// Static props placed into the world.
+    pub props_placed: usize,
+    /// Props whose model could not be read, or that a rule skipped.
+    pub props_skipped: usize,
+    /// Distinct models read successfully.
+    pub models_loaded: usize,
 }
 
-/// Build a pack of generated blocks for every material of `map` that has a
-/// texture behind it.
+/// One placed prop's triangles, ready to voxelize.
+#[derive(Debug, Clone)]
+pub struct PropSurface {
+    /// Triangles in Source world space.
+    pub triangles: Vec<[Vec3; 3]>,
+    /// Index into the material list [`Assets::materials`] returns.
+    pub material: usize,
+}
+
+/// Everything read off the search path for one map.
+#[derive(Default)]
+pub struct Assets {
+    /// Generated blocks carrying the map's own textures. Empty outside
+    /// `kubejs` mode.
+    pub pack: Pack,
+    /// Materials that only props use, to be appended after the map's own.
+    pub prop_materials: Vec<Material>,
+    pub props: Vec<PropSurface>,
+    pub stats: Extracted,
+}
+
+impl Assets {
+    /// The map's materials followed by the prop-only ones, which is the list
+    /// every material index in this struct refers to.
+    ///
+    /// Appending rather than merging is what keeps `Map::material_index`
+    /// valid: a brush side's material index still means what the BSP said.
+    pub fn materials(&self, map: &Map) -> Vec<Material> {
+        let mut all = map.materials().to_vec();
+        all.extend(self.prop_materials.iter().cloned());
+        all
+    }
+}
+
+/// Read the search path for `map`: textures, and static prop geometry.
 ///
-/// Materials without one are simply absent, and the palette falls back to
-/// rules and colour matching for those — so a missing game install degrades
-/// the output rather than failing the conversion.
-pub fn extract(map: &Map, config: &Config) -> (Pack, Extracted) {
+/// Materials without a texture behind them are simply absent from the pack,
+/// and the palette falls back to rules and colour matching for those.
+pub fn extract(map: &Map, config: &Config) -> Assets {
+    let want_pack = config.materials.mode == crate::config::MaterialMode::Kubejs;
+    let want_props = config.props.enabled && !map.bsp.static_props.props.props.is_empty();
+    if !want_pack && !want_props {
+        return Assets::default();
+    }
+
     let vfs = Vfs::for_map(&map.path, &config.materials.game_dir_paths());
     let materials = Materials::new(&vfs, Some(&map.bsp.pack));
     let mut textures = Textures::new(&vfs, config.materials.texture_size);
 
-    let mut pack = Pack::default();
-    let mut stats = Extracted {
-        search_path: vfs.describe(),
-        ..Extracted::default()
+    let mut assets = Assets {
+        stats: Extracted {
+            search_path: vfs.describe(),
+            ..Extracted::default()
+        },
+        ..Assets::default()
     };
 
+    // The map's own materials first, so their indices stay exactly the ones
+    // `Map::material_index` hands out.
     let mut seen: Vec<&str> = Vec::new();
     for material in map.materials() {
         if seen.contains(&material.name.as_str()) {
             continue;
         }
         seen.push(&material.name);
-        stats.materials += 1;
+        assets.stats.materials += 1;
 
         // Tool textures are dropped before any of this matters, and nodraw is
         // the single most-used material in every map.
-        if material.name.starts_with("tools/") {
+        if !want_pack || material.name.starts_with("tools/") {
+            continue;
+        }
+        let resolved = insert_block(
+            &mut assets.pack,
+            &materials,
+            &mut textures,
+            &material.name,
+            Some(&material.raw_name),
+        );
+        if resolved {
+            assets.stats.resolved += 1;
+        }
+    }
+
+    if want_props {
+        place_props(map, config, &vfs, &materials, &mut textures, want_pack, &mut assets);
+    }
+
+    assets
+}
+
+/// Resolve one material to a generated block and add it to the pack.
+fn insert_block(
+    pack: &mut Pack,
+    materials: &Materials,
+    textures: &mut Textures,
+    name: &str,
+    raw_name: Option<&str>,
+) -> bool {
+    let Some(assets) = materials.assets(name, raw_name) else { return false };
+    let Some(image) = textures.get(&assets.base_texture, assets.alpha_test) else {
+        return false;
+    };
+    pack.insert(name, image.clone(), &assets);
+    true
+}
+
+/// Load every static prop's model and place its triangles in world space.
+fn place_props(
+    map: &Map,
+    config: &Config,
+    vfs: &Vfs,
+    materials: &Materials,
+    textures: &mut Textures,
+    want_pack: bool,
+    assets: &mut Assets,
+) {
+    let props = crate::bsp::props::extract(&map.bsp);
+    // A malformed pattern must not take the conversion down with it; the
+    // config loader already reports one, so here it simply skips nothing.
+    let skip = globset(&config.props.skip).unwrap_or_else(|_| globset(&[]).unwrap());
+    // The 3D skybox is full of props, and they are the worst ones to keep:
+    // the miniature horizon is modelled at a scale the map is not, so
+    // `d1_trainstation_02`'s distant Citadel converts into a 7000-unit tower
+    // standing in the middle of the station.
+    let skybox = map.skybox().filter(|_| config.contents.skip_3d_skybox);
+
+    let mut models = Models::new(vfs);
+    // Material name to its index in the combined list. The map's own
+    // materials come first and keep the indices the BSP gave them.
+    let mut index_of: std::collections::HashMap<String, usize> = map
+        .materials()
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.name.clone(), i))
+        .collect();
+    let base = map.materials().len();
+
+    for prop in &props {
+        if skybox.is_some_and(|room| room.contains_point(prop.origin)) {
+            assets.stats.props_skipped += 1;
+            continue;
+        }
+        if skip.is_match(&prop.model) {
+            assets.stats.props_skipped += 1;
+            continue;
+        }
+        let Some(model) = models.get(&prop.model) else {
+            assets.stats.props_skipped += 1;
+            continue;
+        };
+        let size = model.bounds.size() * prop.scale;
+        let longest = size.x.max(size.y).max(size.z);
+        let too_big = config.props.max_size > 0.0 && longest > config.props.max_size;
+        if longest < config.props.min_size || too_big {
+            assets.stats.props_skipped += 1;
             continue;
         }
 
-        let Some(assets) = materials.assets(&material.name, Some(&material.raw_name)) else {
-            continue;
-        };
-        let Some(image) = textures.get(&assets.base_texture, assets.alpha_test) else {
-            continue;
-        };
+        for part in &model.parts {
+            let material = match index_of.get(&part.material) {
+                Some(index) => *index,
+                None => {
+                    let index = base + assets.prop_materials.len();
+                    assets
+                        .prop_materials
+                        .push(prop_material(materials, textures, &part.material));
+                    if want_pack
+                        && insert_block(&mut assets.pack, materials, textures, &part.material, None)
+                    {
+                        assets.stats.resolved += 1;
+                    }
+                    index_of.insert(part.material.clone(), index);
+                    index
+                }
+            };
 
-        pack.insert(&material.name, image.clone(), &assets);
-        stats.resolved += 1;
+            assets.props.push(PropSurface {
+                triangles: part.triangles.iter().map(|tri| tri.map(|v| prop.place(v))).collect(),
+                material,
+            });
+        }
+        assets.stats.props_placed += 1;
     }
 
-    (pack, stats)
+    assets.stats.models_loaded = models.stats().1;
+}
+
+/// Describe a prop's material the way the BSP describes a wall's, so both go
+/// through the same rules and the same colour matching.
+///
+/// The average colour comes from the `.vtf` header, which is where the map
+/// compiler reads it from too when it bakes `reflectivity` into the BSP.
+fn prop_material(materials: &Materials, textures: &Textures, name: &str) -> Material {
+    let reflectivity = materials
+        .assets(name, None)
+        .and_then(|assets| textures.reflectivity(&assets.base_texture))
+        .unwrap_or([0.0; 3]);
+    Material {
+        name: name.to_string(),
+        raw_name: name.to_string(),
+        reflectivity,
+    }
+}
+
+fn globset(patterns: &[String]) -> Result<globset::GlobSet, globset::Error> {
+    let mut builder = globset::GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(globset::Glob::new(pattern)?);
+    }
+    builder.build()
 }
 
 #[cfg(test)]
@@ -78,19 +260,27 @@ mod tests {
         path.exists().then(|| Map::load(path).unwrap())
     }
 
+    fn kubejs() -> Config {
+        let mut config = Config::default();
+        config.materials.mode = MaterialMode::Kubejs;
+        config
+    }
+
     #[test]
     fn extracts_a_block_per_resolvable_material() {
         let Some(map) = sample_map() else { return };
-        let mut config = Config::default();
-        config.materials.mode = MaterialMode::Kubejs;
+        let assets = extract(&map, &kubejs());
 
-        let (pack, stats) = extract(&map, &config);
-        assert!(!stats.search_path.is_empty());
-        assert!(stats.resolved > 100, "only {} materials resolved", stats.resolved);
-        assert_eq!(pack.len(), stats.resolved);
+        assert!(!assets.stats.search_path.is_empty());
+        assert!(
+            assets.stats.resolved > 100,
+            "only {} materials resolved",
+            assets.stats.resolved
+        );
+        assert_eq!(assets.pack.len(), assets.stats.resolved);
 
         // Every generated block must carry a texture of the configured size.
-        for block in pack.blocks() {
+        for block in assets.pack.blocks() {
             assert_eq!(block.texture.dimensions(), (16, 16), "{}", block.id);
             assert!(!block.id.is_empty());
         }
@@ -101,9 +291,9 @@ mod tests {
     #[test]
     fn tool_textures_are_not_registered() {
         let Some(map) = sample_map() else { return };
-        let (pack, _) = extract(&map, &Config::default());
+        let assets = extract(&map, &kubejs());
         assert!(
-            pack.blocks().all(|b| !b.material.starts_with("tools/")),
+            assets.pack.blocks().all(|b| !b.material.starts_with("tools/")),
             "a tool texture was registered"
         );
     }
@@ -112,10 +302,10 @@ mod tests {
     #[test]
     fn every_id_the_palette_would_use_is_registered() {
         let Some(map) = sample_map() else { return };
-        let (pack, _) = extract(&map, &Config::default());
+        let assets = extract(&map, &kubejs());
 
-        let script = pack.script();
-        for (material, id) in pack.ids() {
+        let script = assets.pack.script();
+        for (material, id) in assets.pack.ids() {
             assert!(
                 script.contains(&format!("event.create('{id}')")),
                 "{material} resolves to {id}, which the script does not register"
@@ -128,9 +318,102 @@ mod tests {
         let Some(map) = sample_map() else { return };
         let mut orphan = map;
         orphan.path = std::path::PathBuf::from("/nowhere/x.bsp");
-        let (pack, stats) = extract(&orphan, &Config::default());
-        assert!(pack.is_empty());
-        assert_eq!(stats.resolved, 0);
-        assert!(stats.materials > 0, "materials should still be counted");
+        let assets = extract(&orphan, &kubejs());
+        assert!(assets.pack.is_empty());
+        assert_eq!(assets.stats.resolved, 0);
+        assert!(assets.stats.materials > 0, "materials should still be counted");
+        assert_eq!(assets.stats.props_placed, 0);
+    }
+
+    /// The point of the prop half of the module: a map's props have to come
+    /// back as geometry, in world space, wearing materials the palette can
+    /// resolve.
+    #[test]
+    fn static_props_come_back_as_world_space_triangles() {
+        let Some(map) = sample_map() else { return };
+        let assets = extract(&map, &Config::default());
+
+        assert!(assets.stats.props_placed > 100, "{} props placed", assets.stats.props_placed);
+        assert!(!assets.props.is_empty());
+
+        let all = assets.materials(&map);
+        let bounds = map.bounds();
+        for surface in &assets.props {
+            assert!(surface.material < all.len());
+            for v in surface.triangles.iter().flatten() {
+                assert!(v.is_finite());
+                for axis in 0..3 {
+                    assert!(
+                        v.axis(axis) >= bounds.min.axis(axis) - 512.0
+                            && v.axis(axis) <= bounds.max.axis(axis) + 512.0,
+                        "prop vertex {v:?} is outside the map"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Prop materials must carry a real average colour, or every prop in
+    /// vanilla mode falls back to the same grey.
+    #[test]
+    fn prop_materials_get_a_colour_from_their_texture() {
+        let Some(map) = sample_map() else { return };
+        let assets = extract(&map, &Config::default());
+        if assets.prop_materials.is_empty() {
+            return;
+        }
+        let coloured = assets
+            .prop_materials
+            .iter()
+            .filter(|m| m.reflectivity.iter().any(|c| *c > 0.0))
+            .count();
+        assert!(
+            coloured * 2 > assets.prop_materials.len(),
+            "only {coloured} of {} prop materials have a colour",
+            assets.prop_materials.len()
+        );
+    }
+
+    #[test]
+    fn props_can_be_turned_off() {
+        let Some(map) = sample_map() else { return };
+        let mut config = Config::default();
+        config.props.enabled = false;
+        let assets = extract(&map, &config);
+        assert!(assets.props.is_empty());
+        assert_eq!(assets.stats.props_placed, 0);
+    }
+
+    /// A skip pattern has to actually keep the model out.
+    #[test]
+    fn skip_patterns_drop_matching_models() {
+        let Some(map) = sample_map() else { return };
+        let mut config = Config::default();
+        config.props.skip = vec!["*".into()];
+        let assets = extract(&map, &config);
+        assert_eq!(assets.stats.props_placed, 0);
+        assert!(assets.stats.props_skipped > 0);
+    }
+
+    /// In `kubejs` mode a prop's material has to be registered too, or every
+    /// prop pastes as a hole.
+    #[test]
+    fn prop_materials_are_registered_in_the_pack() {
+        let Some(map) = sample_map() else { return };
+        let assets = extract(&map, &kubejs());
+        if assets.pack.is_empty() || assets.prop_materials.is_empty() {
+            return;
+        }
+        let ids = assets.pack.ids();
+        let registered = assets
+            .prop_materials
+            .iter()
+            .filter(|m| ids.contains_key(&m.name))
+            .count();
+        assert!(
+            registered * 2 > assets.prop_materials.len(),
+            "only {registered} of {} prop materials are in the pack",
+            assets.prop_materials.len()
+        );
     }
 }

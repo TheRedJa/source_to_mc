@@ -21,6 +21,9 @@ pub struct Report {
     pub brush_entity_models: usize,
     pub displacements: usize,
     pub static_props: usize,
+    /// Size of the 3D skybox room in Source units, when the map has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skybox_room: Option<[f64; 3]>,
     pub materials: usize,
     pub entities: usize,
 
@@ -93,7 +96,10 @@ pub fn y_range(bounds_blocks: Aabb) -> YRangeReport {
 }
 
 pub fn report(map: &Map, config: &Config) -> Report {
-    let bounds_source = map.bounds();
+    // What conversion will keep, which excludes the 3D skybox room. Reporting
+    // worldspawn's own box instead would overstate the size of every map that
+    // has one, often severalfold.
+    let bounds_source = map.converted_bounds(config.contents.skip_3d_skybox);
     let transform = Transform::new(config, bounds_source);
     let bounds_blocks = transform.transform_bounds(bounds_source);
 
@@ -144,6 +150,10 @@ pub fn report(map: &Map, config: &Config) -> Report {
         brush_entity_models: map.bsp.models.len().saturating_sub(1),
         displacements: map.bsp.displacements.len(),
         static_props: map.bsp.static_props().count(),
+        skybox_room: map.skybox().map(|room| {
+            let size = room.bounds.size();
+            [size.x, size.y, size.z]
+        }),
         materials: map.material_names().len(),
         entities: entity_records.len(),
         bounding_volume_blocks,
@@ -191,6 +201,13 @@ impl Report {
         let _ = writeln!(s, "  brush entities   {}", self.brush_entity_models);
         let _ = writeln!(s, "  displacements    {}", self.displacements);
         let _ = writeln!(s, "  static props     {}", self.static_props);
+        if let Some(size) = &self.skybox_room {
+            let _ = writeln!(
+                s,
+                "  3D skybox room   {:.0} x {:.0} x {:.0} units, left out",
+                size[0], size[1], size[2]
+            );
+        }
         let _ = writeln!(s, "  materials        {}", self.materials);
         let _ = writeln!(s, "  entities         {}", self.entities);
 

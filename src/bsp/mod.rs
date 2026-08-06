@@ -6,7 +6,9 @@
 pub mod displacement;
 pub mod entities;
 pub mod lumps;
+pub mod props;
 pub mod rawleaves;
+pub mod skybox;
 
 use crate::geom::{Aabb, Plane, Vec3};
 use anyhow::{Context, Result};
@@ -124,6 +126,8 @@ pub struct Map {
     materials: Vec<Material>,
     /// Bytes repaired in the entity lump because they were not valid UTF-8.
     pub repaired_bytes: usize,
+    /// The 3D skybox room, found on first use.
+    skybox: std::sync::OnceLock<Option<skybox::Skybox>>,
 }
 
 impl Map {
@@ -165,7 +169,33 @@ impl Map {
             leaf_brushes,
             materials,
             repaired_bytes,
+            skybox: std::sync::OnceLock::new(),
         })
+    }
+
+    /// The 3D skybox room, if the map has one.
+    ///
+    /// Detection walks every worldspawn brush, so the answer is kept.
+    pub fn skybox(&self) -> Option<&skybox::Skybox> {
+        self.skybox.get_or_init(|| skybox::detect(self)).as_ref()
+    }
+
+    /// World bounds of the geometry conversion will actually keep.
+    ///
+    /// Worldspawn's declared box covers the 3D skybox room as well, which for
+    /// `d1_trainstation_02` is most of it: leaving the room in makes the
+    /// schematic several times the volume of the map you can walk around.
+    pub fn converted_bounds(&self, skip_skybox: bool) -> Aabb {
+        let Some(room) = self.skybox().filter(|_| skip_skybox) else {
+            return self.bounds();
+        };
+        let mut bounds = Aabb::empty();
+        for solid in self.solids(0) {
+            if !room.contains(&solid.bounds) {
+                bounds = bounds.union(&solid.bounds);
+            }
+        }
+        if bounds.is_empty() { self.bounds() } else { bounds }
     }
 
     /// Overall world bounds, taken from worldspawn's model.
