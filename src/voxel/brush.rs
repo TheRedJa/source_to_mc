@@ -107,6 +107,48 @@ fn occupancy(solid: &BlockSolid, pos: IVec3, config: &Voxelize) -> f64 {
     }
 }
 
+/// Whether the brush is under a block thick in some direction.
+///
+/// The bounding box answers this for a wall or a floor, but not for a ramp or
+/// an angled catwalk: a 8-unit plate turned 45 degrees has a bounding box a
+/// block and a half deep, so it reads as solid and then voxelizes into a
+/// dotted line of the cells where enough of it happened to fall inside. You
+/// walk onto it and drop through.
+///
+/// So the thickness is measured against the brush's own faces instead: how far
+/// behind each plane the furthest corner of the brush lies. The smallest of
+/// those is how thin the brush really is, whatever angle it sits at.
+fn is_thin(solid: &BlockSolid) -> bool {
+    // The cheap test first, which is right for the great majority of brushes
+    // and skips building the corner list for them.
+    let size = solid.bounds.size();
+    if (0..3).any(|axis| size.axis(axis) < 1.0) {
+        return true;
+    }
+    // A brush with a huge bounding box cannot be thin in a way that matters,
+    // and is the expensive case to measure.
+    if size.x.min(size.y).min(size.z) > 1.0 && solid.planes.len() > 16 {
+        return false;
+    }
+
+    let corners = crate::geom::polyhedron_vertices(&solid.planes, THIN_EPSILON);
+    if corners.len() < 4 {
+        return false;
+    }
+    solid.planes.iter().any(|plane| {
+        let deepest = corners
+            .iter()
+            .map(|c| plane.distance_to(*c))
+            .fold(f64::INFINITY, f64::min);
+        -deepest < 1.0
+    })
+}
+
+/// Slack for deciding a corner lies on a plane while measuring thickness, in
+/// block space. Looser than [`EXACT_EPSILON`] because it only has to find
+/// corners, not compute a volume from them.
+const THIN_EPSILON: f64 = 1e-6;
+
 /// Signed distance from `point` to the nearest bounding plane. Negative inside,
 /// and the closer to zero the nearer the surface.
 fn depth(solid: &BlockSolid, point: Vec3) -> f64 {
@@ -192,13 +234,8 @@ pub fn voxelize_with_shape(
     ];
 
     // Brushes thinner than a block would vanish under a plain threshold test.
-    // Detect that per axis so those voxels can be kept on a lower bar.
-    let thin_axis = if config.preserve_thin {
-        let size = solid.bounds.size();
-        (0..3).find(|axis| size.axis(*axis) < 1.0)
-    } else {
-        None
-    };
+    // Detect that so those voxels can be kept on a lower bar.
+    let thin = config.preserve_thin && is_thin(solid);
 
     for x in min[0]..=max[0] {
         for y in min[1]..=max[1] {
@@ -211,7 +248,7 @@ pub fn voxelize_with_shape(
                 } else {
                     // A sliver of a thin brush still counts: without this,
                     // E:Z's 4- and 8-unit trim disappears at 16 units/block.
-                    thin_axis.is_some() && fraction > 0.0
+                    thin && fraction > 0.0
                 };
 
                 if filled {
@@ -426,6 +463,52 @@ mod tests {
         let full = block_box(Vec3::ZERO, Vec3::splat(1.0));
         assert_eq!(octant_mask(&full, [0, 0, 0]), u8::MAX);
         assert_eq!(octant_mask(&full, [5, 5, 5]), 0);
+    }
+
+    /// The case the bounding box cannot see: a thin plate at an angle. Its
+    /// box is more than a block deep on every axis, so a box-based test calls
+    /// it solid and the threshold then punches holes through it.
+    #[test]
+    fn an_angled_plate_is_recognised_as_thin() {
+        // A half-block-thick slab, tilted 45 degrees about the Z axis.
+        let n = 1.0 / 2f64.sqrt();
+        let planes = vec![
+            Plane::new(Vec3::new(n, n, 0.0), 0.25),
+            Plane::new(Vec3::new(-n, -n, 0.0), 0.25),
+            Plane::new(Vec3::new(n, -n, 0.0), 4.0),
+            Plane::new(Vec3::new(-n, n, 0.0), 4.0),
+            Plane::new(Vec3::new(0.0, 0.0, 1.0), 4.0),
+            Plane::new(Vec3::new(0.0, 0.0, -1.0), 4.0),
+        ];
+        let solid = BlockSolid {
+            side_of_plane: (0..planes.len()).collect(),
+            planes,
+            bounds: Aabb::new(Vec3::new(-6.0, -6.0, -4.0), Vec3::new(6.0, 6.0, 4.0)),
+        };
+        assert!(solid.bounds.size().axis(0) > 1.0, "the box is not thin on any axis");
+        assert!(is_thin(&solid), "a tilted half-block plate is thin");
+
+        // And it has to come out as a continuous surface rather than a dotted
+        // line of the cells that happened to be half full.
+        let config = Voxelize { preserve_thin: true, ..Voxelize::default() };
+        let kept = voxels(&solid, &config).len();
+        let dropped =
+            voxels(&solid, &Voxelize { preserve_thin: false, ..config }).len();
+        assert!(
+            kept > dropped * 2,
+            "angled plate kept {kept} voxels against {dropped} without preservation"
+        );
+    }
+
+    /// A solid block is not thin, however many faces it has, or every brush in
+    /// the map would be preserved on the lower bar and grow a skin.
+    #[test]
+    fn a_chunky_brush_is_not_thin() {
+        let solid = block_box(Vec3::ZERO, Vec3::new(6.0, 6.0, 6.0));
+        assert!(!is_thin(&solid));
+
+        // A cube one block on a side is exactly the boundary, and counts.
+        assert!(is_thin(&block_box(Vec3::ZERO, Vec3::splat(0.9))));
     }
 
     /// The whole-cube shortcut in `octant_mask` skips sampling entirely for
