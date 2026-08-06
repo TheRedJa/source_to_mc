@@ -274,6 +274,74 @@ mod tests {
         assert!((60..200).contains(&mean), "mean red channel {mean} is not a grey");
     }
 
+    /// Reassembling the tiles has to give back the picture. This is the test
+    /// that catches the mistakes that would be invisible in a diff and
+    /// obvious on a wall: tiles emitted column-major, rows counted from the
+    /// bottom, or a crop off by one tile.
+    #[test]
+    fn tiles_reassemble_into_the_original_texture() {
+        let Some(vfs) = vfs() else { return };
+        let data = vfs
+            .open("materials/concrete/concretewall001a.vtf")
+            .expect("texture should be in the VPKs");
+
+        let grid = [4u32, 4u32];
+        let tiles = decode_tiles(&data, 16, false, grid).unwrap();
+        assert_eq!(tiles.len(), 16);
+
+        // Lay the tiles back out, and compare against downsampling the whole
+        // texture to the same size in one step.
+        let (w, h) = (16 * grid[0], 16 * grid[1]);
+        let mut assembled = RgbaImage::new(w, h);
+        for (index, tile) in tiles.iter().enumerate() {
+            let (column, row) = (index as u32 % grid[0], index as u32 / grid[0]);
+            for (x, y, pixel) in tile.enumerate_pixels() {
+                assembled.put_pixel(column * 16 + x, row * 16 + y, *pixel);
+            }
+        }
+
+        let whole = vtf::from_bytes(&data).unwrap().highres_image.decode(0).unwrap();
+        let reference = whole.resize_exact(w, h, FilterType::Lanczos3).to_rgba8();
+
+        let error: f64 = assembled
+            .pixels()
+            .zip(reference.pixels())
+            .map(|(a, b)| {
+                (0..3).map(|c| (a.0[c] as f64 - b.0[c] as f64).abs()).sum::<f64>() / 3.0
+            })
+            .sum::<f64>()
+            / (w * h) as f64;
+
+        // Filtering differs a little at the tile seams, so this is not exact;
+        // any ordering or orientation mistake is worth tens of levels, not
+        // ones.
+        assert!(error < 8.0, "reassembled tiles differ from the whole by {error:.1}/255");
+    }
+
+    /// The tiles have to be different from each other, or splitting bought
+    /// nothing but registrations.
+    #[test]
+    fn tiles_of_a_detailed_texture_differ() {
+        let Some(vfs) = vfs() else { return };
+        let Some(data) = vfs.open("materials/brick/brickwall017a.vtf") else { return };
+
+        let tiles = decode_tiles(&data, 16, false, [4, 4]).unwrap();
+        let mut raw: Vec<&Vec<u8>> = tiles.iter().map(|t| t.as_raw()).collect();
+        raw.sort();
+        raw.dedup();
+        assert!(raw.len() > 8, "only {} of 16 tiles are distinct", raw.len());
+    }
+
+    /// A 1x1 grid is the whole texture, so it has to match [`decode`] exactly.
+    #[test]
+    fn a_single_tile_is_the_whole_texture() {
+        let Some(vfs) = vfs() else { return };
+        let Some(data) = vfs.open("materials/concrete/concretewall001a.vtf") else { return };
+        let tiles = decode_tiles(&data, 16, false, [1, 1]).unwrap();
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].as_raw(), decode(&data, 16, false).unwrap().as_raw());
+    }
+
     /// A grate is a third see-through at full resolution. Averaging alpha on
     /// the way down to 16x16 loses that entirely, so the cutout is restored
     /// and its coverage should still be in the right ballpark.
