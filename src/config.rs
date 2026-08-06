@@ -195,10 +195,15 @@ pub struct Materials {
     pub tile_textures: bool,
     /// Largest number of tiles a texture may be split into along one axis.
     ///
-    /// The cap on how many blocks the pack registers. 8 covers the common
-    /// case exactly — a 512 texture at scale 0.25 — and past that a tile
-    /// spans several blocks rather than being dropped, so raising it buys
-    /// resolution on the largest textures and nothing else.
+    /// The cap on how many blocks the pack registers. A tile is always one
+    /// block; past the cap only the first `tile_max` blocks' worth of the
+    /// texture is used and that window repeats, so this sets how often the
+    /// pattern comes round rather than how detailed it is.
+    ///
+    /// 16 covers all but the most stretched materials outright, and costs
+    /// about 11k blocks a map. Raise it for maps built around big cliff and
+    /// ground blends — Highway 17's span 77 blocks — at roughly quadratic
+    /// cost in the materials that need it.
     pub tile_max: u32,
     /// The rules named by `rules`, filled in by [`Config::load`].
     #[serde(skip)]
@@ -224,7 +229,7 @@ impl Default for Materials {
             game_dirs: Vec::new(),
             texture_size: 16,
             tile_textures: true,
-            tile_max: 8,
+            tile_max: 16,
             loaded_rules: Default::default(),
         }
     }

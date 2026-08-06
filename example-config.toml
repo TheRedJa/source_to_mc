@@ -62,10 +62,12 @@ texture_size = 16
 # one face it is a smear, cut into eight it reads as brick again and the
 # pattern lines up across the wall. Costs one registered block per tile.
 tile_textures = true
-# Most tiles a texture may be split into along one axis. Past this a tile
-# covers several blocks rather than being dropped, so the texture still lines
-# up with itself, just more coarsely. 8 covers the common case exactly.
-tile_max = 8
+# Most tiles a texture may be split into along one axis. A tile is always one
+# block; past this cap only the first tile_max blocks' worth of the texture is
+# used and that window repeats, so this sets how often the pattern comes round,
+# not how detailed it is. 16 costs about 11k blocks a map. Raise it for maps
+# built around big cliff and ground blends -- Highway 17's span 77 blocks.
+tile_max = 16
 
 # Extra game directories to search for .vmt/.vtf content. The map's own game
 # directory and everything its gameinfo.txt mounts are searched automatically.

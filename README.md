@@ -275,15 +275,24 @@ straight into texel coordinates, and the length of each is texels per unit. So
 the map itself says how many blocks one repeat of a texture covers. Each
 texture is cut into that many pieces, one registered block apiece, and every
 voxel takes the piece that really is in front of it — so the bricks line up
-across the wall again. `[materials] tile_max` caps it at 8 per axis, which is
-exactly the common case; past that a tile spans several blocks rather than
-being dropped, so the pattern still lines up, just more coarsely.
+across the wall again.
+
+**One tile is always one block.** `[materials] tile_max` caps how many tiles a
+texture may have per axis, and it does that by shortening the *window* into the
+texture, never by widening the tiles. The alternative is worse than the problem
+it solves: Highway 17's cliff blend spans 77 blocks, so eight tiles stretched
+to fit would be flat ten-by-ten patches of identical stone with a hard seam
+between them, which the eye finds instantly. Past the cap only the first
+`tile_max` blocks' worth of texels is used and that window repeats — detail per
+block stays exactly right, and what is lost is the part of the texture that
+never repeats anyway. The default of 16 costs about 11k blocks a map; raise it
+for maps built around big ground and cliff blends.
 
 Models have no texture scale to read — their UVs are an unwrap of the whole
 sheet — so a prop's tile comes from the triangle's own texture coordinate
 instead. Turn the whole thing off with `[materials] tile_textures = false`.
 
-On `d1_trainstation_02` this is 198 materials registering 9088 blocks, about
+On `d1_trainstation_02` this is 198 materials registering 10,923 blocks, about
 6 MB of 16x16 PNGs, and no measurable conversion cost.
 
 ## Sub-block detail
