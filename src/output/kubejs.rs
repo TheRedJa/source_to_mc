@@ -130,10 +130,6 @@ impl Block {
 #[derive(Debug, Default)]
 pub struct Pack {
     blocks: BTreeMap<String, Block>,
-    /// Register a slab and a stair alongside each block, so sub-block shape
-    /// fitting has something to fit to. Triples the number of registrations,
-    /// which is why it is off unless asked for.
-    variants: bool,
 }
 
 /// Turn a Source material path into a Minecraft resource id.
@@ -161,31 +157,20 @@ impl Pack {
         self.blocks.is_empty()
     }
 
-    /// Register slab and stair variants alongside each block.
-    pub fn with_variants(mut self, variants: bool) -> Pack {
-        self.variants = variants;
-        self
-    }
-
-    pub fn has_variants(&self) -> bool {
-        self.variants
-    }
-
-    /// The id for a shape of a generated block, or `None` if this pack does
-    /// not register that variant — in which case the caller must keep a full
-    /// cube rather than name a block that will not exist.
+    /// The id for a shape of a generated block.
+    ///
+    /// Only ever the full cube. KubeJS 2101 registers blocks through exactly
+    /// two builders, `basic` and `detector` — there is no slab or stairs type
+    /// — so a generated block cannot take a sub-block shape, and claiming one
+    /// would name a block that never gets registered. Shape fitting therefore
+    /// applies to the vanilla blocks in a conversion and not to these.
     pub fn shaped(&self, block_id: &str, variant: crate::voxel::shapes::Variant) -> Option<String> {
         use crate::voxel::shapes::Variant;
         let id = block_id.strip_prefix(&format!("{NAMESPACE}:"))?;
-        if !self.blocks.contains_key(id) {
+        if !self.blocks.contains_key(id) || variant != Variant::Full {
             return None;
         }
-        match variant {
-            Variant::Full => Some(block_id.to_string()),
-            _ if !self.variants => None,
-            Variant::Slab => Some(format!("{NAMESPACE}:{id}_slab")),
-            Variant::Stairs => Some(format!("{NAMESPACE}:{id}_stairs")),
-        }
+        Some(block_id.to_string())
     }
 
     pub fn len(&self) -> usize {
@@ -229,7 +214,6 @@ impl Pack {
 
     /// Merge another pack in; existing entries win.
     pub fn merge(&mut self, other: Pack) {
-        self.variants |= other.variants;
         for (id, block) in other.blocks {
             self.blocks.entry(id).or_insert(block);
         }
@@ -273,56 +257,32 @@ impl Pack {
              //\n\
              // Install: copy the `kubejs` folder into your instance, next to `mods`.\n\n",
         );
-        let _ = writeln!(
-            s,
-            "// {} blocks{}\n",
-            self.blocks.len(),
-            if self.variants { ", each with a slab and a stair" } else { "" }
-        );
+        let _ = writeln!(s, "// {} blocks\n", self.blocks.len());
         s.push_str("StartupEvents.registry('block', event => {\n");
 
         for block in self.blocks.values() {
-            let _ = writeln!(s, "  // {}", block.material);
-
-            // The full cube, then optionally the slab and stair that
-            // sub-block shape fitting needs. KubeJS's block types build the
-            // right model and collision box from the same texture.
-            let mut forms = vec![(block.block_id(), "cube_all", block.display_name())];
-            if self.variants {
-                forms.push((
-                    format!("{}_slab", block.block_id()),
-                    "slab",
-                    format!("{} Slab", block.display_name()),
-                ));
-                forms.push((
-                    format!("{}_stairs", block.block_id()),
-                    "stairs",
-                    format!("{} Stairs", block.display_name()),
-                ));
+            let mut chain = vec![
+                format!("event.create('{}')", block.block_id()),
+                format!("  .displayName('{}')", escape(&block.display_name())),
+                // `texture`, not `textureAll`: the latter is the pre-2101 name
+                // and fails at startup with "Cannot find function textureAll".
+                format!("  .texture('{NAMESPACE}:block/{}')", block.id),
+                // A string here is resolved by KubeJS's SoundTypeWrapper,
+                // which keys the lowercased static fields of `SoundType`.
+                format!("  .soundType('{}')", block.sound_type()),
+                // Source surfaces are not minable in any meaningful sense;
+                // these just keep the blocks from behaving like bedrock.
+                "  .hardness(1.5)".to_string(),
+                "  .resistance(6.0)".to_string(),
+            ];
+            if block.render_type != RenderType::Solid {
+                chain.push(format!("  .renderType('{}')", block.render_type.name()));
             }
 
-            for (id, kind, name) in forms {
-                let mut chain = vec![
-                    if kind == "cube_all" {
-                        format!("event.create('{id}')")
-                    } else {
-                        format!("event.create('{id}', '{kind}')")
-                    },
-                    format!("  .displayName('{}')", escape(&name)),
-                    format!("  .textureAll('{NAMESPACE}:block/{}')", block.id),
-                    format!("  .soundType('{}')", block.sound_type()),
-                    // Source surfaces are not minable in any meaningful sense;
-                    // these just keep the blocks from behaving like bedrock.
-                    "  .hardness(1.5)".to_string(),
-                    "  .resistance(6.0)".to_string(),
-                ];
-                if block.render_type != RenderType::Solid {
-                    chain.push(format!("  .renderType('{}')", block.render_type.name()));
-                }
-                for (i, line) in chain.iter().enumerate() {
-                    let last = i + 1 == chain.len();
-                    let _ = writeln!(s, "  {line}{}", if last { ";" } else { "" });
-                }
+            let _ = writeln!(s, "  // {}", block.material);
+            for (i, line) in chain.iter().enumerate() {
+                let last = i + 1 == chain.len();
+                let _ = writeln!(s, "  {line}{}", if last { ";" } else { "" });
             }
             s.push('\n');
         }
@@ -461,10 +421,12 @@ mod tests {
         assert!(!script.contains(".renderType('solid')"));
     }
 
-    /// Without variants, asking for a slab must come back empty rather than
-    /// naming a block the script never registers.
+
+    /// KubeJS 2101 has no slab or stairs block builder, so a generated block
+    /// must never claim a sub-block shape — the id would never be registered
+    /// and the paste would fail on it.
     #[test]
-    fn shapes_are_refused_unless_variants_were_registered() {
+    fn generated_blocks_never_claim_a_sub_block_shape() {
         use crate::voxel::shapes::Variant;
         let mut pack = Pack::default();
         let id = pack.insert("concrete/wall001a", texture(), &assets(false, false, None));
@@ -473,37 +435,30 @@ mod tests {
         assert_eq!(pack.shaped(&id, Variant::Slab), None);
         assert_eq!(pack.shaped(&id, Variant::Stairs), None);
         assert!(!pack.script().contains("_slab"));
+        assert!(!pack.script().contains("_stairs"));
+
+        // Blocks from elsewhere are not claimed at all.
+        assert_eq!(pack.shaped("minecraft:stone", Variant::Full), None);
+        assert_eq!(pack.shaped("kubejs:never_registered", Variant::Full), None);
     }
 
+    /// Every method the generated script calls must be one KubeJS 2101
+    /// actually has. `textureAll` is the pre-2101 name and fails at startup
+    /// with "Cannot find function textureAll in object BasicKubeBlock$Builder".
     #[test]
-    fn variants_register_a_slab_and_a_stair_per_block() {
-        use crate::voxel::shapes::Variant;
-        let mut pack = Pack::default().with_variants(true);
-        let id = pack.insert("concrete/wall001a", texture(), &assets(false, false, None));
-
-        assert_eq!(
-            pack.shaped(&id, Variant::Slab),
-            Some("kubejs:concrete_wall001a_slab".into())
-        );
-
+    fn the_script_only_calls_methods_that_exist() {
+        let mut pack = Pack::default();
+        pack.insert("metal/grate011a", texture(), &assets(true, false, Some("metalgrate")));
         let script = pack.script();
-        for form in ["", "_slab", "_stairs"] {
-            let full = format!("kubejs:concrete_wall001a{form}");
-            assert!(
-                script.contains(&format!("event.create('{full}'")),
-                "{full} not registered"
-            );
-        }
-        assert!(script.contains("'slab'") && script.contains("'stairs'"));
-    }
 
-    /// A block from another pack, or a vanilla one, must not be claimed.
-    #[test]
-    fn unknown_ids_are_not_claimed() {
-        use crate::voxel::shapes::Variant;
-        let pack = Pack::default().with_variants(true);
-        assert_eq!(pack.shaped("minecraft:stone", Variant::Slab), None);
-        assert_eq!(pack.shaped("kubejs:never_registered", Variant::Slab), None);
+        assert!(script.contains(".texture('kubejs:block/metal_grate011a')"));
+        assert!(!script.contains(".textureAll("), "textureAll does not exist in KubeJS 2101");
+        // Only `basic` blocks exist, so `create` is never given a type.
+        assert!(!script.contains("event.create('kubejs:metal_grate011a',"));
+
+        for method in [".displayName(", ".texture(", ".soundType(", ".hardness(", ".resistance("] {
+            assert!(script.contains(method), "{method} missing");
+        }
     }
 
     #[test]

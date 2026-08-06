@@ -91,11 +91,10 @@ interior_block = "minecraft:stone"
 # Fit half-height and stepped geometry to slabs and stairs, doubling the
 # effective vertical resolution. Vanilla blocks only, and only for the block
 # families that have slab and stair variants; anything else stays a full cube.
+# Vanilla blocks only: KubeJS 2101 exposes just two block builders, `basic`
+# and `detector`, so a generated textured block cannot become a slab or stair
+# and keeps its full cube.
 enabled = true
-# Also register slab and stair variants of every generated textured block, so
-# shape fitting works in "kubejs" mode too. Off by default: it triples the
-# number of blocks KubeJS registers at startup and the size of the pack.
-kubejs_variants = false
 
 [displacement]
 # Voxelize displacement surfaces: Source's terrain, cliffs and road surfaces.

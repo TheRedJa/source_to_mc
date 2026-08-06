@@ -4,7 +4,7 @@ use crate::bsp::{Map, Solid};
 use crate::config::{Config, FillMode};
 use crate::geom::{Aabb, Vec3};
 use crate::palette::{Decision, Resolver};
-use crate::voxel::brush::{BlockSolid, voxelize};
+use crate::voxel::brush::BlockSolid;
 use crate::voxel::grid::{BlockId, Palette, VoxelGrid};
 use crate::voxel::shell;
 use crate::voxel::transform::Transform;

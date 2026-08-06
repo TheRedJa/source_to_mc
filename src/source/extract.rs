@@ -31,9 +31,7 @@ pub fn extract(map: &Map, config: &Config) -> (Pack, Extracted) {
     let materials = Materials::new(&vfs, Some(&map.bsp.pack));
     let mut textures = Textures::new(&vfs, config.materials.texture_size);
 
-    let mut pack = Pack::default().with_variants(
-        config.shapes.enabled && config.shapes.kubejs_variants,
-    );
+    let mut pack = Pack::default();
     let mut stats = Extracted {
         search_path: vfs.describe(),
         ..Extracted::default()
