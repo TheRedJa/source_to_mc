@@ -288,12 +288,28 @@ block stays exactly right, and what is lost is the part of the texture that
 never repeats anyway. The default of 16 costs about 11k blocks a map; raise it
 for maps built around big ground and cliff blends.
 
-Models have no texture scale to read — their UVs are an unwrap of the whole
-sheet — so a prop's tile comes from the triangle's own texture coordinate
-instead. Turn the whole thing off with `[materials] tile_textures = false`.
+**The tile size comes from the face, not the material.** One material is used
+at several scales in the same map — Highway 17's `nature/cliffface001a` at six
+of them, from a third of a texel per unit to two — so sizing tiles from the
+material's typical scale leaves them too wide for every face using a larger
+one, and that face comes out in 2x2 blocks of the same picture. Faces wanting
+fewer texels per block than the tiles were cut at get the tile resized to the
+block; faces wanting more are left exact, since advancing by more than one tile
+per block shows no repeat.
 
-On `d1_trainstation_02` this is 198 materials registering 10,923 blocks, about
-6 MB of 16x16 PNGs, and no measurable conversion cost.
+Models have no texture scale to read — their UVs are an unwrap of the whole
+sheet — so a prop's tile is interpolated across the triangle from its corner
+coordinates, and how finely the sheet is cut is measured off the model's own
+geometry rather than assumed. That matters more than it sounds:
+`props_wasteland/rockcliff02a` stretches one sheet over 39 blocks of cliff, so
+a fixed guess is out by a factor of several. A model's sheet is an atlas rather
+than a repeating texture, so it is never windowed — a prop stretched past
+`tile_max` keeps some repetition, which is what raising the cap buys.
+
+Turn the whole thing off with `[materials] tile_textures = false`.
+
+On `d1_trainstation_02` this is 198 materials registering 11,706 blocks, about
+7 MB of 16x16 PNGs, and no measurable conversion cost.
 
 ## Sub-block detail
 

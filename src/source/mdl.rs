@@ -22,16 +22,26 @@ use std::sync::Arc;
 pub struct Part {
     /// Triangles in model space, in Source units.
     pub triangles: Vec<[Vec3; 3]>,
-    /// Each triangle's centroid in texture space, so a model shows the piece
-    /// of its sheet that really belongs there rather than one corner of it.
+    /// Each corner's position in texture space, parallel to `triangles`.
     ///
-    /// The centroid, not the corners: a triangle covers a range of the sheet
-    /// but a Minecraft block wears one texture, and at a metre per block the
-    /// triangles are small enough that the middle is the honest answer.
-    pub uvs: Vec<[f64; 2]>,
+    /// Per corner, not one value per triangle: a model's triangles are not
+    /// block-sized. A cliff prop is a handful of huge ones, and giving every
+    /// voxel of a triangle the same tile paints the whole face in repeated
+    /// patches. Interpolating across the triangle gives each block the piece
+    /// of the sheet that is really in front of it.
+    pub uvs: Vec<[[f64; 2]; 3]>,
     /// Material path as it would be written in a `.vmt` lookup, lowercased and
     /// without the `materials/` prefix or extension.
     pub material: String,
+    /// Texture coordinates covered per Source unit of surface, typical across
+    /// this part's triangles.
+    ///
+    /// The only thing that relates a model's sheet to world size, and there is
+    /// nothing in the `.mdl` header that states it — it has to be measured off
+    /// the geometry. Assuming a fixed rate instead is wrong by a factor of
+    /// several on anything large: `props_wasteland/rockcliff02a` stretches one
+    /// sheet over 39 blocks of cliff.
+    pub uv_per_unit: f64,
 }
 
 /// A studio model flattened to what voxelization needs.
@@ -46,6 +56,32 @@ impl Model {
     pub fn triangle_count(&self) -> usize {
         self.parts.iter().map(|p| p.triangles.len()).sum()
     }
+}
+
+/// How much of the texture sheet a unit of surface covers.
+///
+/// The only thing relating a model's sheet to world size, and nothing in the
+/// `.mdl` header states it — it has to be measured off the geometry. Taken
+/// from the ratio of areas rather than edge lengths, so it does not depend on
+/// how each triangle happens to be shaped, and as the median across triangles
+/// so a few degenerate slivers cannot skew it.
+fn uv_rate(triangles: &[[Vec3; 3]], uvs: &[[[f64; 2]; 3]]) -> f64 {
+    let mut rates: Vec<f64> = triangles
+        .iter()
+        .zip(uvs)
+        .filter_map(|(tri, uv)| {
+            let world = (tri[1] - tri[0]).cross(tri[2] - tri[0]).length();
+            let du = [uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]];
+            let dv = [uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]];
+            let sheet = (du[0] * dv[1] - du[1] * dv[0]).abs();
+            (world > 1e-6 && sheet > 1e-12).then(|| (sheet / world).sqrt())
+        })
+        .collect();
+    if rates.is_empty() {
+        return 0.0;
+    }
+    rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    rates[rates.len() / 2]
 }
 
 /// The index buffer has several possible names; Source picks by renderer, and
@@ -112,7 +148,7 @@ impl<'a> Models<'a> {
             Vec3::new(t.x as f64, t.y as f64, t.z as f64)
         };
 
-        let mut parts: HashMap<String, (Vec<[Vec3; 3]>, Vec<[f64; 2]>)> = HashMap::new();
+        let mut parts: HashMap<String, (Vec<[Vec3; 3]>, Vec<[[f64; 2]; 3]>)> = HashMap::new();
         let vertices = model.vertices();
 
         for mesh in model.meshes() {
@@ -124,11 +160,8 @@ impl<'a> Models<'a> {
                     let corners = [tri[0], tri[1], tri[2]].map(|i| vertices.get(i));
                     let [Some(a), Some(b), Some(c)] = corners else { continue };
                     triangles.push([place(a.position), place(b.position), place(c.position)]);
-                    uvs.push(std::array::from_fn(|axis| {
-                        let sum = a.texture_coordinates[axis]
-                            + b.texture_coordinates[axis]
-                            + c.texture_coordinates[axis];
-                        f64::from(sum) / 3.0
+                    uvs.push([a, b, c].map(|v| -> [f64; 2] {
+                        std::array::from_fn(|axis| f64::from(v.texture_coordinates[axis]))
                     }));
                 }
             }
@@ -143,7 +176,12 @@ impl<'a> Models<'a> {
         Model {
             parts: parts
                 .into_iter()
-                .map(|(material, (triangles, uvs))| Part { triangles, uvs, material })
+                .map(|(material, (triangles, uvs))| Part {
+                    uv_per_unit: uv_rate(&triangles, &uvs),
+                    triangles,
+                    uvs,
+                    material,
+                })
                 .collect(),
             bounds,
         }
@@ -212,11 +250,12 @@ mod tests {
             for tri in &part.triangles {
                 assert!(tri.iter().all(|v| v.is_finite()));
             }
-            // An unwrap covers the sheet, so the centroids have to spread over
-            // it rather than all landing in one corner.
+            // An unwrap covers the sheet, so the coordinates have to spread
+            // over it rather than all landing in one corner.
             let spread = |axis: usize| {
-                let lo = part.uvs.iter().map(|uv| uv[axis]).fold(f64::MAX, f64::min);
-                let hi = part.uvs.iter().map(|uv| uv[axis]).fold(f64::MIN, f64::max);
+                let all = || part.uvs.iter().flatten().map(|uv| uv[axis]);
+                let lo = all().fold(f64::MAX, f64::min);
+                let hi = all().fold(f64::MIN, f64::max);
                 hi - lo
             };
             assert!(
@@ -254,6 +293,55 @@ mod tests {
                 model.bounds.max
             );
         }
+    }
+
+    /// The rate that relates a model's sheet to world size. Nothing in the
+    /// file states it, so it is measured — and getting it wrong by a factor
+    /// of several is what paints a big prop in repeated patches.
+    #[test]
+    fn models_report_a_plausible_uv_rate() {
+        let Some(vfs) = vfs() else { return };
+        let mut models = Models::new(&vfs);
+        let Some(model) = models.get("models/props_c17/fence01a.mdl") else { return };
+
+        for part in &model.parts {
+            assert!(part.uv_per_unit > 0.0, "{} has no UV rate", part.material);
+            // One pass over the sheet should cover somewhere between a
+            // fraction of a block and a few hundred; outside that the
+            // measurement is wrong, not the model.
+            let blocks = 1.0 / (part.uv_per_unit * 16.0);
+            assert!(
+                (0.1..=512.0).contains(&blocks),
+                "{} covers {blocks} blocks per sheet",
+                part.material
+            );
+        }
+    }
+
+    /// The rate has to track the model's real size: a cliff that stretches one
+    /// sheet across tens of blocks must report a far lower rate than a fence.
+    #[test]
+    fn a_stretched_model_reports_a_lower_uv_rate() {
+        let Some(vfs) = vfs() else { return };
+        let mut models = Models::new(&vfs);
+        let (Some(fence), Some(cliff)) = (
+            models.get("models/props_c17/fence01a.mdl"),
+            models.get("models/props_wasteland/rockcliff02a.mdl"),
+        ) else {
+            return;
+        };
+        let rate = |m: &Arc<Model>| {
+            m.parts
+                .iter()
+                .map(|p| p.uv_per_unit)
+                .fold(0.0f64, f64::max)
+        };
+        assert!(
+            rate(&cliff) < rate(&fence),
+            "cliff {} should stretch further than fence {}",
+            rate(&cliff),
+            rate(&fence)
+        );
     }
 
     /// A prop's materials have to resolve to something the VMT reader can find,

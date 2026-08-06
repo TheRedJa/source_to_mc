@@ -113,6 +113,7 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
                     &mut textures,
                     &part.material,
                     config,
+                    part.uv_per_unit,
                 );
                 add(&mut entries, &mut textures, &part.material, None, 0, split, true);
             }
