@@ -289,8 +289,9 @@ fn convert_into(
         );
     }
     if config.materials.mode == src2mc::config::MaterialMode::Kubejs {
+        let split = result.pack.tilings().len();
         eprintln!(
-            "  {} materials carry their own texture",
+            "  {} materials carry their own texture ({split} split across several blocks)",
             stats.textures_resolved
         );
     }

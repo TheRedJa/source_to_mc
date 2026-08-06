@@ -9,6 +9,7 @@ pub mod lumps;
 pub mod props;
 pub mod rawleaves;
 pub mod skybox;
+pub mod texcoord;
 
 use crate::geom::{Aabb, Plane, Vec3};
 use anyhow::{Context, Result};

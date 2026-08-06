@@ -185,6 +185,21 @@ pub struct Materials {
     pub game_dirs: Vec<String>,
     /// Edge length of generated block textures, in pixels. 16 matches vanilla.
     pub texture_size: u32,
+    /// Split each texture across as many blocks as it really covers in the
+    /// map, instead of squeezing all of it onto every block face.
+    ///
+    /// A 512-pixel wall texture at Hammer's default scale covers eight blocks
+    /// of wall. Shrunk onto one block face it is a smear; cut into the pieces
+    /// that are really in front of each block, the detail comes back and the
+    /// pattern lines up across the wall. Costs one registered block per tile.
+    pub tile_textures: bool,
+    /// Largest number of tiles a texture may be split into along one axis.
+    ///
+    /// The cap on how many blocks the pack registers. 8 covers the common
+    /// case exactly — a 512 texture at scale 0.25 — and past that a tile
+    /// spans several blocks rather than being dropped, so raising it buys
+    /// resolution on the largest textures and nothing else.
+    pub tile_max: u32,
     /// The rules named by `rules`, filled in by [`Config::load`].
     #[serde(skip)]
     pub loaded_rules: crate::palette::rules::Rules,
@@ -208,6 +223,8 @@ impl Default for Materials {
             fallback_block: "minecraft:stone".into(),
             game_dirs: Vec::new(),
             texture_size: 16,
+            tile_textures: true,
+            tile_max: 8,
             loaded_rules: Default::default(),
         }
     }
