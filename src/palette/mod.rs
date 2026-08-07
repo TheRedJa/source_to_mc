@@ -18,7 +18,7 @@ pub mod report;
 pub mod rules;
 
 use crate::bsp::Material;
-use crate::config::{ContentAction, Config};
+use crate::config::{Config, ContentAction};
 use anyhow::{Context, Result};
 use rules::{Action, Rules};
 use std::collections::BTreeMap;
@@ -361,7 +361,10 @@ mod tests {
     #[test]
     fn specific_contents_beat_solid() {
         let r = resolver();
-        assert_eq!(r.decide(BrushFlags::PLAYERCLIP | BrushFlags::SOLID), Decision::Skip);
+        assert_eq!(
+            r.decide(BrushFlags::PLAYERCLIP | BrushFlags::SOLID),
+            Decision::Skip
+        );
         assert_eq!(
             r.decide(BrushFlags::WATER | BrushFlags::SOLID),
             Decision::Force("minecraft:water".into())
@@ -395,10 +398,10 @@ mod tests {
     #[test]
     fn configured_actions_override_defaults() {
         let mut config = Config::default();
-        config
-            .contents
-            .actions
-            .insert("water".into(), ContentAction::Block("minecraft:lava".into()));
+        config.contents.actions.insert(
+            "water".into(),
+            ContentAction::Block("minecraft:lava".into()),
+        );
         let r = resolver_with(&config, &[]);
         assert_eq!(
             r.decide(BrushFlags::WATER),

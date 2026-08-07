@@ -78,11 +78,11 @@ pub fn parse(text: &str) -> Vmt {
 
     // The first token is the shader, unless the file opens straight into a
     // block, which some hand-written materials do.
-    if let Some(first) = tokens.peek() {
-        if first != "{" {
-            vmt.shader = first.to_ascii_lowercase();
-            tokens.next();
-        }
+    if let Some(first) = tokens.peek()
+        && first != "{"
+    {
+        vmt.shader = first.to_ascii_lowercase();
+        tokens.next();
     }
 
     while let Some(token) = tokens.next() {
@@ -179,9 +179,11 @@ impl<'a> Materials<'a> {
     /// material is the pakfile stub; it is only consulted if the authored
     /// path is missing, since the stub adds a cubemap and nothing else.
     pub fn assets(&self, name: &str, raw_name: Option<&str>) -> Option<MaterialAssets> {
-        let vmt = self
-            .load(name, 0)
-            .or_else(|| raw_name.filter(|r| *r != name).and_then(|r| self.load(r, 0)))?;
+        let vmt = self.load(name, 0).or_else(|| {
+            raw_name
+                .filter(|r| *r != name)
+                .and_then(|r| self.load(r, 0))
+        })?;
 
         let base_texture = vmt
             .get("$basetexture")
@@ -195,7 +197,9 @@ impl<'a> Materials<'a> {
             base_texture,
             alpha_test: vmt.flag("$alphatest"),
             translucent: vmt.flag("$translucent"),
-            surface_prop: vmt.get("$surfaceprop").map(|v| v.trim_matches('"').to_string()),
+            surface_prop: vmt
+                .get("$surfaceprop")
+                .map(|v| v.trim_matches('"').to_string()),
         })
     }
 
@@ -274,7 +278,8 @@ mod tests {
     /// `[$X360]` style conditionals must not be mistaken for values.
     #[test]
     fn platform_conditionals_are_dropped() {
-        let vmt = parse(r#""LightmappedGeneric" { "$basetexture" "a/b" [!$X360] "$alphatest" "1" }"#);
+        let vmt =
+            parse(r#""LightmappedGeneric" { "$basetexture" "a/b" [!$X360] "$alphatest" "1" }"#);
         assert_eq!(vmt.get("$basetexture"), Some("a/b"));
         assert!(vmt.flag("$alphatest"));
     }
@@ -348,7 +353,9 @@ mod tests {
 
     #[test]
     fn resolves_real_half_life_2_materials() {
-        let Some((vfs, _)) = real_materials() else { return };
+        let Some((vfs, _)) = real_materials() else {
+            return;
+        };
         let materials = Materials::new(&vfs, None);
 
         let concrete = materials.assets("concrete/concretewall001a", None).unwrap();
@@ -361,13 +368,17 @@ mod tests {
         assert!(grate.alpha_test, "metalgrate011a should be alpha tested");
 
         // Blend materials name two textures; the first is enough.
-        let blend = materials.assets("nature/blendgrassgravel001a", None).unwrap();
+        let blend = materials
+            .assets("nature/blendgrassgravel001a", None)
+            .unwrap();
         assert_eq!(blend.base_texture, "nature/dirtfloor006a");
     }
 
     #[test]
     fn a_missing_material_resolves_to_nothing() {
-        let Some((vfs, _)) = real_materials() else { return };
+        let Some((vfs, _)) = real_materials() else {
+            return;
+        };
         let materials = Materials::new(&vfs, None);
         assert!(materials.assets("nothing/at/all", None).is_none());
     }

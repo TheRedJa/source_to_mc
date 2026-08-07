@@ -117,7 +117,10 @@ impl PropAsset {
         // cell — so the shading it derives is banding that follows the grid
         // rather than the mesh.
         json.push_str("  \"ambientocclusion\": false,\n");
-        json.push_str(&format!("  \"textures\": {{\n{}\n  }}\n}}\n", textures.join(",\n")));
+        json.push_str(&format!(
+            "  \"textures\": {{\n{}\n  }}\n}}\n",
+            textures.join(",\n")
+        ));
         json
     }
 
@@ -220,7 +223,11 @@ impl PropMesh {
     /// Grouping is by triangle centre, so the pieces tile the prop without
     /// gaps or overlap: every triangle is drawn exactly once.
     pub fn split(&self, basis: [Vec3; 3], scale: f64, reach: f64) -> Vec<Group> {
-        let place = Place { basis, scale, translation: Vec3::ZERO };
+        let place = Place {
+            basis,
+            scale,
+            translation: Vec3::ZERO,
+        };
         let placed = |v: Vec3| place.apply(v);
 
         // The common case first, and without touching the grid: if the whole
@@ -243,7 +250,11 @@ impl PropMesh {
                 .enumerate()
                 .flat_map(|(part, p)| (0..p.triangles.len()).map(move |t| (part, t)))
                 .collect();
-            return vec![Group { members, centre: Vec3::ZERO, bounds: whole }];
+            return vec![Group {
+                members,
+                centre: Vec3::ZERO,
+                bounds: whole,
+            }];
         }
 
         // A triangle is filed by its centre, so its corners hang over its
@@ -372,9 +383,10 @@ impl PropMesh {
         let mut written = 0usize;
 
         for (index, part) in self.parts.iter().enumerate() {
-            if kept.as_ref().is_some_and(|kept| {
-                !(0..part.triangles.len()).any(|t| kept.contains(&(index, t)))
-            }) {
+            if kept
+                .as_ref()
+                .is_some_and(|kept| !(0..part.triangles.len()).any(|t| kept.contains(&(index, t))))
+            {
                 continue;
             }
             faces.push_str(&format!("usemtl {}\n", part.material));
@@ -479,8 +491,11 @@ impl Repeat {
             }
         }
 
-        let mut repeat =
-            Repeat { origin: [0, 0], count: [1, 1], capped: false };
+        let mut repeat = Repeat {
+            origin: [0, 0],
+            count: [1, 1],
+            capped: false,
+        };
         let mut spans = [1.0f64; 2];
         for axis in 0..2 {
             if lo[axis] > hi[axis] {
@@ -607,7 +622,11 @@ pub fn build(
     let units = config.scale.units_per_block.max(f64::MIN_POSITIVE);
     // No triangle may be wider than a piece of a split prop is allowed to be,
     // or it cannot be put in one: see [`subdivide`].
-    let limit = if config.props.bake { config.props.bake_reach * 0.5 } else { 0.0 };
+    let limit = if config.props.bake {
+        config.props.bake_reach * 0.5
+    } else {
+        0.0
+    };
     let mut mesh_parts: Vec<MeshPart> = Vec::new();
     let mut mtl = String::new();
     let mut slots: BTreeMap<String, String> = BTreeMap::new();
@@ -622,7 +641,9 @@ pub fn build(
         if part.triangles.is_empty() {
             continue;
         }
-        let Some(assets) = materials.assets(&part.material, None) else { continue };
+        let Some(assets) = materials.assets(&part.material, None) else {
+            continue;
+        };
         let repeat = Repeat::of(part.uvs.iter(), config.props.texture_repeat_max);
         let name = format!(
             "{TEXTURE_DIR}/{}_{}",
@@ -639,7 +660,10 @@ pub fn build(
                     continue;
                 };
                 let image = tile_image(base, repeat.count);
-                emitted.push(PropTexture { name: name.clone(), image });
+                emitted.push(PropTexture {
+                    name: name.clone(),
+                    image,
+                });
 
                 let slot = format!("texture{}", slots.len());
                 let material_name = format!("mat{}", slots.len());
@@ -658,8 +682,11 @@ pub fn build(
         }
         surface_prop = surface_prop.or_else(|| assets.surface_prop.clone());
 
-        let mut mesh_part =
-            MeshPart { material: material_name, triangles: Vec::new(), uvs: Vec::new() };
+        let mut mesh_part = MeshPart {
+            material: material_name,
+            triangles: Vec::new(),
+            uvs: Vec::new(),
+        };
         for (triangle, uv) in part.triangles.iter().zip(&part.uvs) {
             let corners = triangle.map(|v| to_model_space(v, units));
             // Texture coordinates written as they are. Both conventions run V
@@ -717,13 +744,7 @@ pub fn build(
 /// run linearly across a triangle, so the midpoint's are the average of the
 /// edge's. Depth is capped because a limit of zero would otherwise never be
 /// reached.
-fn subdivide(
-    corners: [Vec3; 3],
-    uvs: [[f64; 2]; 3],
-    limit: f64,
-    out: &mut MeshPart,
-    depth: u32,
-) {
+fn subdivide(corners: [Vec3; 3], uvs: [[f64; 2]; 3], limit: f64, out: &mut MeshPart, depth: u32) {
     const MAX_DEPTH: u32 = 8;
     let edges = [(0, 1), (1, 2), (2, 0)];
     let longest = edges
@@ -731,7 +752,9 @@ fn subdivide(
         .enumerate()
         .max_by(|a, b| {
             let length = |e: &(usize, usize)| (corners[e.0] - corners[e.1]).length();
-            length(a.1).partial_cmp(&length(b.1)).unwrap_or(std::cmp::Ordering::Equal)
+            length(a.1)
+                .partial_cmp(&length(b.1))
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|(index, _)| index)
         .unwrap_or(0);
@@ -748,8 +771,20 @@ fn subdivide(
     let middle_uv = [(uvs[a][0] + uvs[b][0]) * 0.5, (uvs[a][1] + uvs[b][1]) * 0.5];
     // Both halves keep the winding of the original, so the faces still point
     // the way the model meant them to.
-    subdivide([corners[a], middle, corners[c]], [uvs[a], middle_uv, uvs[c]], limit, out, depth + 1);
-    subdivide([middle, corners[b], corners[c]], [middle_uv, uvs[b], uvs[c]], limit, out, depth + 1);
+    subdivide(
+        [corners[a], middle, corners[c]],
+        [uvs[a], middle_uv, uvs[c]],
+        limit,
+        out,
+        depth + 1,
+    );
+    subdivide(
+        [middle, corners[b], corners[c]],
+        [middle_uv, uvs[b], uvs[c]],
+        limit,
+        out,
+        depth + 1,
+    );
 }
 
 /// Source model space to Minecraft model space, in blocks.
@@ -758,7 +793,11 @@ fn subdivide(
 /// Z up, Y mirrored — but without translation or the map's yaw, because a
 /// model's orientation is carried by the entity that places it.
 fn to_model_space(v: Vec3, units_per_block: f64) -> Vec3 {
-    Vec3::new(v.x / units_per_block, v.z / units_per_block, -v.y / units_per_block)
+    Vec3::new(
+        v.x / units_per_block,
+        v.z / units_per_block,
+        -v.y / units_per_block,
+    )
 }
 
 #[cfg(test)]
@@ -771,10 +810,16 @@ mod tests {
 
     #[test]
     fn model_ids_are_legal_and_distinct_from_material_ids() {
-        assert_eq!(prop_id("models/props_c17/fence01a.mdl"), "prop_props_c17_fence01a");
+        assert_eq!(
+            prop_id("models/props_c17/fence01a.mdl"),
+            "prop_props_c17_fence01a"
+        );
         assert_eq!(prop_id("models/Props/Barrel.mdl"), "prop_props_barrel");
         // A model and a material of the same name must not collide.
-        assert_ne!(prop_id("models/concrete/wall.mdl"), block_id("concrete/wall"));
+        assert_ne!(
+            prop_id("models/concrete/wall.mdl"),
+            block_id("concrete/wall")
+        );
         assert!(
             prop_id("models/a b/c!.mdl")
                 .chars()
@@ -931,7 +976,10 @@ mod tests {
             "the OBJ path is relative to the namespace root: {json}"
         );
         assert!(json.contains("\"texture0\": \"kubejs:props/y_1x1\""));
-        assert!(json.contains("\"particle\""), "a missing particle logs warnings");
+        assert!(
+            json.contains("\"particle\""),
+            "a missing particle logs warnings"
+        );
         assert!(asset.blockstate_json().contains("kubejs:block/prop_x"));
         // Valid JSON, not just a string that looks like it.
         let _: serde_json::Value = serde_json::from_str(&json).expect("model json");

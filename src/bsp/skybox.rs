@@ -46,8 +46,7 @@ impl Skybox {
 
     pub fn contains_point(&self, p: Vec3) -> bool {
         (0..3).all(|axis| {
-            p.axis(axis) >= self.bounds.min.axis(axis)
-                && p.axis(axis) <= self.bounds.max.axis(axis)
+            p.axis(axis) >= self.bounds.min.axis(axis) && p.axis(axis) <= self.bounds.max.axis(axis)
         })
     }
 }
@@ -94,7 +93,11 @@ pub fn detect(map: &crate::bsp::Map) -> Option<Skybox> {
         return None;
     }
 
-    Some(Skybox { bounds, camera, brushes: inside })
+    Some(Skybox {
+        bounds,
+        camera,
+        brushes: inside,
+    })
 }
 
 /// Where the map's `sky_camera` stands.
@@ -125,7 +128,9 @@ fn entity_origins<'a>(
 }
 
 fn parse_origin(value: &str) -> Option<Vec3> {
-    let mut parts = value.split_whitespace().filter_map(|p| p.parse::<f64>().ok());
+    let mut parts = value
+        .split_whitespace()
+        .filter_map(|p| p.parse::<f64>().ok());
     let (x, y, z) = (parts.next()?, parts.next()?, parts.next()?);
     Some(Vec3::new(x, y, z))
 }
@@ -147,9 +152,10 @@ fn enclosing_component(solids: &[Solid], point: Vec3) -> Option<Component> {
         std::collections::HashMap::new();
     for (index, solid) in solids.iter().enumerate() {
         let root = find(&parents, index);
-        let entry = components
-            .entry(root)
-            .or_insert_with(|| Component { bounds: Aabb::empty(), count: 0 });
+        let entry = components.entry(root).or_insert_with(|| Component {
+            bounds: Aabb::empty(),
+            count: 0,
+        });
         entry.bounds = entry.bounds.union(&solid.bounds);
         entry.count += 1;
     }
@@ -225,15 +231,13 @@ fn union(parents: &[std::cell::Cell<usize>], a: usize, b: usize) {
 
 fn overlaps(a: &Aabb, b: &Aabb) -> bool {
     (0..3).all(|axis| {
-        a.min.axis(axis) <= b.max.axis(axis) + TOUCH
-            && b.min.axis(axis) <= a.max.axis(axis) + TOUCH
+        a.min.axis(axis) <= b.max.axis(axis) + TOUCH && b.min.axis(axis) <= a.max.axis(axis) + TOUCH
     })
 }
 
 fn within(outer: &Aabb, inner: &Aabb) -> bool {
     (0..3).all(|axis| {
-        inner.min.axis(axis) >= outer.min.axis(axis)
-            && inner.max.axis(axis) <= outer.max.axis(axis)
+        inner.min.axis(axis) >= outer.min.axis(axis) && inner.max.axis(axis) <= outer.max.axis(axis)
     })
 }
 
@@ -253,11 +257,18 @@ mod tests {
     use std::path::Path;
 
     fn aabb(min: [f64; 3], max: [f64; 3]) -> Aabb {
-        Aabb::new(Vec3::new(min[0], min[1], min[2]), Vec3::new(max[0], max[1], max[2]))
+        Aabb::new(
+            Vec3::new(min[0], min[1], min[2]),
+            Vec3::new(max[0], max[1], max[2]),
+        )
     }
 
     fn skybox(bounds: Aabb) -> Skybox {
-        Skybox { bounds, camera: bounds.center(), brushes: 0 }
+        Skybox {
+            bounds,
+            camera: bounds.center(),
+            brushes: 0,
+        }
     }
 
     #[test]
@@ -270,17 +281,22 @@ mod tests {
     }
 
     fn hl2(name: &str) -> Option<Map> {
-        let path = format!(
-            "/mnt/games/SteamLibrary/steamapps/common/Half-Life 2/hl2/maps/{name}.bsp"
-        );
-        Path::new(&path).exists().then(|| Map::load(Path::new(&path)).unwrap())
+        let path =
+            format!("/mnt/games/SteamLibrary/steamapps/common/Half-Life 2/hl2/maps/{name}.bsp");
+        Path::new(&path)
+            .exists()
+            .then(|| Map::load(Path::new(&path)).unwrap())
     }
 
     /// The room has to come out far smaller than the map and hold the camera.
     #[test]
     fn finds_the_skybox_room_of_a_stock_map() {
-        let Some(map) = hl2("d1_trainstation_02") else { return };
-        let Some(room) = detect(&map) else { panic!("d1_trainstation_02 has a 3D skybox") };
+        let Some(map) = hl2("d1_trainstation_02") else {
+            return;
+        };
+        let Some(room) = detect(&map) else {
+            panic!("d1_trainstation_02 has a 3D skybox")
+        };
 
         assert!(room.contains_point(room.camera));
         let world = map.bounds().size();

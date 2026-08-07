@@ -78,7 +78,11 @@ pub fn offset(grid: &VoxelGrid, bounds: Aabb, max_shift: f64) -> f64 {
     // Lifting a prop out of the floor must not drive its head into the
     // ceiling. Under a low beam there may be less headroom than the floor is
     // asking for, and half in the ground beats half in the roof.
-    if shift > 0.0 { shift.min(headroom(grid, bounds, shift)) } else { shift }
+    if shift > 0.0 {
+        shift.min(headroom(grid, bounds, shift))
+    } else {
+        shift
+    }
 }
 
 /// How far the top of `bounds` can rise before it meets something solid.
@@ -222,7 +226,10 @@ mod tests {
             grid.set([0, 1, z], stone);
         }
         let shift = offset(&grid, crate_at(0.9), 1.5);
-        assert!((shift - 0.1).abs() < 1e-9, "shifted by {shift}, expected 0.1");
+        assert!(
+            (shift - 0.1).abs() < 1e-9,
+            "shifted by {shift}, expected 0.1"
+        );
     }
 
     /// Under a low ceiling there may be less headroom than the floor asks
@@ -248,7 +255,11 @@ mod tests {
                 tight.set([x, 2, z], stone);
             }
         }
-        assert_eq!(offset(&tight, crate_at(0.4), 1.5), 0.0, "pushed into the ceiling");
+        assert_eq!(
+            offset(&tight, crate_at(0.4), 1.5),
+            0.0,
+            "pushed into the ceiling"
+        );
     }
 
     /// Dropping a prop is never blocked by a ceiling it is moving away from.

@@ -61,6 +61,8 @@ impl Key {
     ///
     /// `origin` is the prop's origin in block space, `anchor` the cell the
     /// block goes in.
+    // The placement and the rounding it is keyed at, which is all a key is.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         model: &str,
         rotation: [f64; 4],
@@ -164,12 +166,7 @@ pub fn anchor(grid: &VoxelGrid, bounds: Aabb, taken: &HashSet<IVec3>) -> Option<
 const REACH_OUT: i32 = 3;
 
 /// The free cell of `search` nearest the centre of `bounds`.
-fn free(
-    grid: &VoxelGrid,
-    search: Aabb,
-    bounds: Aabb,
-    taken: &HashSet<IVec3>,
-) -> Option<IVec3> {
+fn free(grid: &VoxelGrid, search: Aabb, bounds: Aabb, taken: &HashSet<IVec3>) -> Option<IVec3> {
     let centre = (bounds.min + bounds.max) * 0.5;
     let bounds = search;
 
@@ -191,10 +188,14 @@ fn free(
         d.dot(d)
     };
     cells.sort_by(|a, b| {
-        distance(a).partial_cmp(&distance(b)).unwrap_or(std::cmp::Ordering::Equal)
+        distance(a)
+            .partial_cmp(&distance(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    cells.into_iter().find(|cell| grid.get(*cell) == AIR && !taken.contains(cell))
+    cells
+        .into_iter()
+        .find(|cell| grid.get(*cell) == AIR && !taken.contains(cell))
 }
 
 /// How many candidate cells one axis of a footprint offers.
@@ -212,7 +213,9 @@ fn axis(lo: f64, hi: f64) -> Vec<i32> {
         return (lo..=hi).collect();
     }
     // Evenly spaced across the span, ends included.
-    (0..SPAN).map(|i| lo + (i * (count - 1)) / (SPAN - 1)).collect()
+    (0..SPAN)
+        .map(|i| lo + (i * (count - 1)) / (SPAN - 1))
+        .collect()
 }
 
 #[cfg(test)]
@@ -221,7 +224,10 @@ mod tests {
     use crate::voxel::grid::Palette;
 
     fn bounds(min: [f64; 3], max: [f64; 3]) -> Aabb {
-        Aabb::new(Vec3::new(min[0], min[1], min[2]), Vec3::new(max[0], max[1], max[2]))
+        Aabb::new(
+            Vec3::new(min[0], min[1], min[2]),
+            Vec3::new(max[0], max[1], max[2]),
+        )
     }
 
     fn key(rotation: [f64; 4], origin: Vec3, anchor: IVec3) -> Key {
@@ -232,7 +238,11 @@ mod tests {
     /// register two blocks.
     #[test]
     fn identical_placements_share_one_variant() {
-        let a = key([0.0, 0.0, 0.0, 1.0], Vec3::new(10.5, 4.25, -3.0), [10, 4, -3]);
+        let a = key(
+            [0.0, 0.0, 0.0, 1.0],
+            Vec3::new(10.5, 4.25, -3.0),
+            [10, 4, -3],
+        );
         let b = key([0.0, 0.0, 0.0, 1.0], Vec3::new(20.5, 8.25, 5.0), [20, 8, 5]);
         assert_eq!(a, b, "same model, same angle, same offset in the block");
         assert_eq!(a.id(), b.id());
@@ -242,9 +252,26 @@ mod tests {
     /// prop in a map ends up wearing the first one's mesh.
     #[test]
     fn a_different_angle_or_offset_is_a_different_variant() {
-        let base = key([0.0, 0.0, 0.0, 1.0], Vec3::new(10.5, 4.25, -3.0), [10, 4, -3]);
-        let turned = key([0.0, std::f64::consts::FRAC_1_SQRT_2, 0.0, std::f64::consts::FRAC_1_SQRT_2], Vec3::new(10.5, 4.25, -3.0), [10, 4, -3]);
-        let moved = key([0.0, 0.0, 0.0, 1.0], Vec3::new(10.75, 4.25, -3.0), [10, 4, -3]);
+        let base = key(
+            [0.0, 0.0, 0.0, 1.0],
+            Vec3::new(10.5, 4.25, -3.0),
+            [10, 4, -3],
+        );
+        let turned = key(
+            [
+                0.0,
+                std::f64::consts::FRAC_1_SQRT_2,
+                0.0,
+                std::f64::consts::FRAC_1_SQRT_2,
+            ],
+            Vec3::new(10.5, 4.25, -3.0),
+            [10, 4, -3],
+        );
+        let moved = key(
+            [0.0, 0.0, 0.0, 1.0],
+            Vec3::new(10.75, 4.25, -3.0),
+            [10, 4, -3],
+        );
         assert_ne!(base, turned);
         assert_ne!(base, moved);
         assert_ne!(base.id(), turned.id());
@@ -277,7 +304,11 @@ mod tests {
     /// the mesh drawn is not the mesh the id promises.
     #[test]
     fn the_place_a_key_gives_matches_the_key() {
-        let key = key([0.0, 0.0, 0.0, 1.0], Vec3::new(10.25, 4.5, -3.75), [10, 4, -4]);
+        let key = key(
+            [0.0, 0.0, 0.0, 1.0],
+            Vec3::new(10.25, 4.5, -3.75),
+            [10, 4, -4],
+        );
         let place = key.place(16);
         assert!((place.translation.x - 0.25).abs() < 1e-9);
         assert!((place.translation.y - 0.5).abs() < 1e-9);
@@ -295,7 +326,10 @@ mod tests {
             let origin = Vec3::new(10.0 + offset, 0.0, 0.0);
             let place = key([0.0, 0.0, 0.0, 1.0], origin, [10, 0, 0]).place(16);
             let error = (place.translation.x - offset).abs();
-            assert!(error <= 0.5 / 16.0 + 1e-9, "offset {offset} moved by {error}");
+            assert!(
+                error <= 0.5 / 16.0 + 1e-9,
+                "offset {offset} moved by {error}"
+            );
         }
     }
 
@@ -328,7 +362,11 @@ mod tests {
                 classname: "prop_static".into(),
             };
             let origin = transform.to_block_space(prop.origin);
-            let cell = [origin.x.floor() as i32, origin.y.floor() as i32, origin.z.floor() as i32];
+            let cell = [
+                origin.x.floor() as i32,
+                origin.y.floor() as i32,
+                origin.z.floor() as i32,
+            ];
             let key = Key::new(
                 "prop_x",
                 crate::output::display::rotation(&prop, &transform),
@@ -351,17 +389,12 @@ mod tests {
                 let mesh = Vec3::new(v.x / units, v.z / units, -v.y / units);
                 // Where the block's model puts it, in the world.
                 let baked = place.apply(mesh)
-                    + Vec3::new(
-                        f64::from(cell[0]),
-                        f64::from(cell[1]),
-                        f64::from(cell[2]),
-                    );
+                    + Vec3::new(f64::from(cell[0]), f64::from(cell[1]), f64::from(cell[2]));
                 let want = transform.to_block_space(prop.place(v));
                 // What the rounding is allowed to cost: half a step of the
                 // offset grid, plus what rounding the rotation swings a vertex
                 // this far from the pivot.
-                let tolerance =
-                    0.5 / grid as f64 + mesh.length() * 2.0 / steps as f64 + 1e-9;
+                let tolerance = 0.5 / grid as f64 + mesh.length() * 2.0 / steps as f64 + 1e-9;
                 assert!(
                     (baked - want).length() < tolerance,
                     "{angles:?}: {v:?} baked at {baked:?}, the map wants {want:?}"
@@ -384,10 +417,16 @@ mod tests {
                 crate::output::display::quantize(q, 64),
             ));
             for column in basis {
-                assert!((column.length() - 1.0).abs() < 1e-9, "{column:?} is not unit");
+                assert!(
+                    (column.length() - 1.0).abs() < 1e-9,
+                    "{column:?} is not unit"
+                );
             }
             for (a, b) in [(0, 1), (1, 2), (2, 0)] {
-                assert!(basis[a].dot(basis[b]).abs() < 1e-9, "columns {a} and {b} are not square");
+                assert!(
+                    basis[a].dot(basis[b]).abs() < 1e-9,
+                    "columns {a} and {b} are not square"
+                );
             }
         }
     }
@@ -412,7 +451,10 @@ mod tests {
         let cell = anchor(&grid, bounds([0.0, 1.0, 0.0], [2.0, 3.0, 2.0]), &taken)
             .expect("a crate on the floor has room in it");
         assert_eq!(grid.get(cell), AIR);
-        assert!((1..=3).contains(&cell[1]), "{cell:?} is not inside the crate");
+        assert!(
+            (1..=3).contains(&cell[1]),
+            "{cell:?} is not inside the crate"
+        );
     }
 
     /// Taking one of the map's own blocks is the failure that shows up as a
@@ -431,7 +473,14 @@ mod tests {
                 }
             }
         }
-        assert_eq!(anchor(&grid, bounds([0.5, 0.5, 0.5], [3.5, 3.5, 3.5]), &HashSet::new()), None);
+        assert_eq!(
+            anchor(
+                &grid,
+                bounds([0.5, 0.5, 0.5], [3.5, 3.5, 3.5]),
+                &HashSet::new()
+            ),
+            None
+        );
     }
 
     /// A sign on a wall or a railing in a floor is thin enough that every cell
@@ -448,8 +497,12 @@ mod tests {
             }
         }
         // A sign filling the wall's own cell and nothing else.
-        let cell = anchor(&grid, bounds([0.1, 0.1, 0.1], [0.9, 1.9, 1.9]), &HashSet::new())
-            .expect("a sign on a wall still gets a block");
+        let cell = anchor(
+            &grid,
+            bounds([0.1, 0.1, 0.1], [0.9, 1.9, 1.9]),
+            &HashSet::new(),
+        )
+        .expect("a sign on a wall still gets a block");
         assert_eq!(grid.get(cell), AIR);
         assert_eq!(cell[0], -1, "{cell:?} is not next to the wall");
     }
@@ -480,6 +533,9 @@ mod tests {
 
     #[test]
     fn an_empty_footprint_has_no_anchor() {
-        assert_eq!(anchor(&VoxelGrid::new(), Aabb::empty(), &HashSet::new()), None);
+        assert_eq!(
+            anchor(&VoxelGrid::new(), Aabb::empty(), &HashSet::new()),
+            None
+        );
     }
 }

@@ -136,7 +136,11 @@ fn sanitize(name: &str) -> String {
             _ => '_',
         })
         .collect();
-    if cleaned.is_empty() { "map".into() } else { cleaned }
+    if cleaned.is_empty() {
+        "map".into()
+    } else {
+        cleaned
+    }
 }
 
 #[cfg(test)]
@@ -176,7 +180,7 @@ mod tests {
         let min = type_json["min_y"].as_i64().unwrap();
         let height = type_json["height"].as_i64().unwrap();
         assert!(min <= y.min_y as i64);
-        assert!(min + height - 1 >= y.max_y as i64);
+        assert!(min + height > y.max_y as i64);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -189,8 +193,18 @@ mod tests {
         for height in [100.0, 500.0, 1213.0, 2000.0] {
             let y = y_range_for(height);
             let emitted = write(&dir, "m", &y).unwrap();
-            assert_eq!(emitted.min_y % 16, 0, "min_y {} is not a multiple of 16", emitted.min_y);
-            assert_eq!(emitted.height % 16, 0, "height {} is not a multiple of 16", emitted.height);
+            assert_eq!(
+                emitted.min_y % 16,
+                0,
+                "min_y {} is not a multiple of 16",
+                emitted.min_y
+            );
+            assert_eq!(
+                emitted.height % 16,
+                0,
+                "height {} is not a multiple of 16",
+                emitted.height
+            );
             assert!((crate::DIMENSION_MIN_Y..=crate::DIMENSION_MAX_Y).contains(&emitted.min_y));
             assert!((16..=crate::DIMENSION_MAX_HEIGHT).contains(&emitted.height));
             assert!(emitted.min_y + emitted.height - 1 <= crate::DIMENSION_MAX_Y);
@@ -207,7 +221,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(dimension["type"], "src2mc:d1_town_01");
-        assert_eq!(dimension["generator"]["settings"]["biome"], "minecraft:the_void");
+        assert_eq!(
+            dimension["generator"]["settings"]["biome"],
+            "minecraft:the_void"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

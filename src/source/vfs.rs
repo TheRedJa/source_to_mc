@@ -13,16 +13,22 @@
 //! rather than as a sibling directory, so those names are also probed against
 //! the Half-Life 2 install in the same Steam library.
 
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// One place content can be read from.
 enum Source {
     /// A loose directory, indexed case-insensitively.
-    Dir { root: PathBuf, files: HashMap<String, PathBuf> },
+    Dir {
+        root: PathBuf,
+        files: HashMap<String, PathBuf>,
+    },
     /// A VPK archive, keyed case-insensitively.
-    Vpk { path: PathBuf, archive: vpk::VPK, keys: HashMap<String, String> },
+    Vpk {
+        path: PathBuf,
+        archive: vpk::VPK,
+        keys: HashMap<String, String>,
+    },
 }
 
 impl Source {
@@ -97,7 +103,10 @@ impl Vfs {
         let mut files = HashMap::new();
         index_dir(&materials, root, &mut files);
         if !files.is_empty() {
-            self.sources.push(Source::Dir { root: root.to_path_buf(), files });
+            self.sources.push(Source::Dir {
+                root: root.to_path_buf(),
+                files,
+            });
         }
     }
 
@@ -107,18 +116,24 @@ impl Vfs {
     /// files; only the directory half is an index, so opening `name_000.vpk`
     /// would find nothing.
     pub fn add_vpks(&mut self, root: &Path) {
-        let Ok(entries) = std::fs::read_dir(root) else { return };
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
         let mut paths: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("vpk")))
             .filter(|p| {
-                let stem = p.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
+                let stem = p
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_lowercase();
                 // Keep `x_dir.vpk`, and standalone `x.vpk`, but never `x_000.vpk`.
                 stem.ends_with("_dir")
-                    || !stem
-                        .rsplit_once('_')
-                        .is_some_and(|(_, tail)| tail.len() == 3 && tail.bytes().all(|b| b.is_ascii_digit()))
+                    || !stem.rsplit_once('_').is_some_and(|(_, tail)| {
+                        tail.len() == 3 && tail.bytes().all(|b| b.is_ascii_digit())
+                    })
             })
             .collect();
         paths.sort();
@@ -129,12 +144,20 @@ impl Vfs {
 
     /// Mount one VPK archive.
     pub fn add_vpk(&mut self, path: &Path) {
-        if self.sources.iter().any(|s| matches!(s, Source::Vpk { path: p, .. } if p == path)) {
+        if self
+            .sources
+            .iter()
+            .any(|s| matches!(s, Source::Vpk { path: p, .. } if p == path))
+        {
             return;
         }
         if let Ok(archive) = vpk::from_path(path) {
             let keys = archive.tree.keys().map(|k| (key(k), k.clone())).collect();
-            self.sources.push(Source::Vpk { path: path.to_path_buf(), archive, keys });
+            self.sources.push(Source::Vpk {
+                path: path.to_path_buf(),
+                archive,
+                keys,
+            });
         }
     }
 
@@ -159,7 +182,9 @@ impl Vfs {
 
 /// Walk a directory tree, keying every file by its path relative to `base`.
 fn index_dir(dir: &Path, base: &Path, out: &mut HashMap<String, PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -173,7 +198,10 @@ fn index_dir(dir: &Path, base: &Path, out: &mut HashMap<String, PathBuf>) {
 /// The game directory a map belongs to: the parent of its `maps/` folder.
 pub fn game_dir(map_path: &Path) -> Option<PathBuf> {
     let maps = map_path.parent()?;
-    if !maps.file_name().is_some_and(|n| n.eq_ignore_ascii_case("maps")) {
+    if !maps
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case("maps"))
+    {
         return None;
     }
     Some(maps.parent()?.to_path_buf())
@@ -222,17 +250,18 @@ fn resolve_search_path(
 ) -> Vec<Mount> {
     // `|gameinfo_path|` is the game directory; `|all_source_engine_paths|` the
     // directory above it. Anything else is relative to the engine root.
-    let (bases, rest): (Vec<PathBuf>, &str) = if let Some(rest) = value.strip_prefix("|gameinfo_path|") {
-        (vec![game.to_path_buf()], rest)
-    } else if let Some(rest) = value.strip_prefix("|all_source_engine_paths|") {
-        (vec![engine_root.to_path_buf()], rest)
-    } else if value.contains('|') {
-        return Vec::new();
-    } else {
-        let mut bases = vec![engine_root.to_path_buf()];
-        bases.extend(steam_hl2.map(Path::to_path_buf));
-        (bases, value)
-    };
+    let (bases, rest): (Vec<PathBuf>, &str) =
+        if let Some(rest) = value.strip_prefix("|gameinfo_path|") {
+            (vec![game.to_path_buf()], rest)
+        } else if let Some(rest) = value.strip_prefix("|all_source_engine_paths|") {
+            (vec![engine_root.to_path_buf()], rest)
+        } else if value.contains('|') {
+            return Vec::new();
+        } else {
+            let mut bases = vec![engine_root.to_path_buf()];
+            bases.extend(steam_hl2.map(Path::to_path_buf));
+            (bases, value)
+        };
 
     let rest = rest.trim_matches('/');
     if rest.is_empty() || rest == "." {
@@ -246,8 +275,11 @@ fn resolve_search_path(
         if let Some(parent) = rest.strip_suffix("/*").or_else(|| rest.strip_suffix('*')) {
             let dir = base.join(parent.trim_end_matches('/'));
             if let Ok(entries) = std::fs::read_dir(&dir) {
-                let mut children: Vec<PathBuf> =
-                    entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+                let mut children: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect();
                 children.sort();
                 out.extend(children.into_iter().map(Mount::Dir));
             }
@@ -258,7 +290,10 @@ fn resolve_search_path(
             }
         } else {
             let path = base.join(rest);
-            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("vpk")) {
+            if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("vpk"))
+            {
                 // A multi-part archive is indexed by its `_dir` half.
                 let indexed = dir_vpk(&path);
                 if indexed.is_file() {
@@ -281,7 +316,11 @@ fn dir_vpk(path: &Path) -> PathBuf {
     if path.is_file() {
         return path.to_path_buf();
     }
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let stem = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
     path.with_file_name(format!("{stem}_dir.vpk"))
 }
 
@@ -317,7 +356,9 @@ fn search_path_values(gameinfo: &str) -> Vec<String> {
         }
 
         // `"game+mod"  "hl2/custom/*"` — the value is the last field.
-        let Some(value) = line.split_whitespace().next_back() else { continue };
+        let Some(value) = line.split_whitespace().next_back() else {
+            continue;
+        };
         let value = value.trim_matches('"').replace('\\', "/");
         if !value.is_empty() && !values.contains(&value) {
             values.push(value);
@@ -330,9 +371,12 @@ fn search_path_values(gameinfo: &str) -> Vec<String> {
 fn steam_library(path: &Path) -> Option<PathBuf> {
     let mut current = Some(path);
     while let Some(dir) = current {
-        if dir.file_name().is_some_and(|n| n.eq_ignore_ascii_case("common"))
+        if dir
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("common"))
             && dir.parent().is_some_and(|p| {
-                p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("steamapps"))
+                p.file_name()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("steamapps"))
             })
         {
             return Some(dir.to_path_buf());
@@ -362,7 +406,10 @@ mod tests {
 
     #[test]
     fn keys_ignore_case_and_slash_direction() {
-        assert_eq!(key("Materials\\Concrete\\Wall.VTF"), "materials/concrete/wall.vtf");
+        assert_eq!(
+            key("Materials\\Concrete\\Wall.VTF"),
+            "materials/concrete/wall.vtf"
+        );
     }
 
     #[test]
@@ -393,7 +440,12 @@ mod tests {
         "#;
         assert_eq!(
             search_path_values(gameinfo),
-            vec!["ep2/custom/*", "|gameinfo_path|.", "hl2/hl2_textures.vpk", "episodic"]
+            vec![
+                "ep2/custom/*",
+                "|gameinfo_path|.",
+                "hl2/hl2_textures.vpk",
+                "episodic"
+            ]
         );
     }
 
@@ -411,7 +463,10 @@ mod tests {
         "#;
         assert_eq!(
             search_path_values(gameinfo),
-            vec!["|gameinfo_path|ez2/*", "|all_source_engine_paths|mapbase/hl2/*"]
+            vec![
+                "|gameinfo_path|ez2/*",
+                "|all_source_engine_paths|mapbase/hl2/*"
+            ]
         );
     }
 
@@ -456,7 +511,10 @@ mod tests {
             .open("materials/concrete/concretewall001a.vmt")
             .expect("concretewall001a.vmt should be in hl2_textures");
         assert!(!data.is_empty());
-        assert!(vfs.open("materials/concrete/concretewall001a.vtf").is_some());
+        assert!(
+            vfs.open("materials/concrete/concretewall001a.vtf")
+                .is_some()
+        );
     }
 
     /// Source material paths are stored in whatever case the mapper used.
@@ -464,8 +522,14 @@ mod tests {
     fn lookups_ignore_case() {
         let Some(map) = hl2_map() else { return };
         let vfs = Vfs::for_map(&map, &[]);
-        assert!(vfs.open("MATERIALS/CONCRETE/CONCRETEWALL001A.VTF").is_some());
-        assert!(vfs.open("materials\\concrete\\concretewall001a.vtf").is_some());
+        assert!(
+            vfs.open("MATERIALS/CONCRETE/CONCRETEWALL001A.VTF")
+                .is_some()
+        );
+        assert!(
+            vfs.open("materials\\concrete\\concretewall001a.vtf")
+                .is_some()
+        );
     }
 
     /// Entropy: Zero keeps its own content loose and mounts Half-Life 2's
@@ -479,7 +543,8 @@ mod tests {
             "Entropy: Zero's own loose materials should be found"
         );
         assert!(
-            vfs.open("materials/concrete/concretewall001a.vtf").is_some(),
+            vfs.open("materials/concrete/concretewall001a.vtf")
+                .is_some(),
             "Half-Life 2's textures should be reachable from an E:Z map"
         );
     }

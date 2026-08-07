@@ -103,9 +103,21 @@ impl Transform {
         let mut out = Aabb::empty();
         for i in 0..8 {
             let corner = Vec3::new(
-                if i & 1 == 0 { bounds.min.x } else { bounds.max.x },
-                if i & 2 == 0 { bounds.min.y } else { bounds.max.y },
-                if i & 4 == 0 { bounds.min.z } else { bounds.max.z },
+                if i & 1 == 0 {
+                    bounds.min.x
+                } else {
+                    bounds.max.x
+                },
+                if i & 2 == 0 {
+                    bounds.min.y
+                } else {
+                    bounds.max.y
+                },
+                if i & 4 == 0 {
+                    bounds.min.z
+                } else {
+                    bounds.max.z
+                },
             );
             out.extend(self.to_block_space(corner));
         }
@@ -150,19 +162,28 @@ mod tests {
         let config = config_with(16.0, OriginMode::MapOrigin, 0.0);
         let t = Transform::new(&config, Aabb::empty());
         let player = t.to_block_space(Vec3::new(0.0, 0.0, 72.0));
-        assert!((player.y - 4.5).abs() < 1e-9, "72 units should be 4.5 blocks");
+        assert!(
+            (player.y - 4.5).abs() < 1e-9,
+            "72 units should be 4.5 blocks"
+        );
     }
 
     #[test]
     fn round_trips_through_source_space() {
         for yaw in [0.0, 90.0, 37.5] {
             let config = config_with(16.0, OriginMode::BoundsMin, yaw);
-            let bounds = Aabb::new(Vec3::new(-512.0, -256.0, 0.0), Vec3::new(512.0, 256.0, 384.0));
+            let bounds = Aabb::new(
+                Vec3::new(-512.0, -256.0, 0.0),
+                Vec3::new(512.0, 256.0, 384.0),
+            );
             let t = Transform::new(&config, bounds);
 
             let src = Vec3::new(123.5, -64.25, 200.0);
             let back = t.to_source_space(t.to_block_space(src));
-            assert!((back - src).length() < 1e-6, "yaw {yaw}: {back:?} != {src:?}");
+            assert!(
+                (back - src).length() < 1e-6,
+                "yaw {yaw}: {back:?} != {src:?}"
+            );
         }
     }
 
@@ -170,7 +191,10 @@ mod tests {
     fn bounds_min_anchors_the_map_at_the_origin() {
         let mut config = config_with(16.0, OriginMode::BoundsMin, 0.0);
         config.transform.y_base = -64;
-        let bounds = Aabb::new(Vec3::new(-1024.0, -2048.0, -512.0), Vec3::new(1024.0, 512.0, 1024.0));
+        let bounds = Aabb::new(
+            Vec3::new(-1024.0, -2048.0, -512.0),
+            Vec3::new(1024.0, 512.0, 1024.0),
+        );
         let t = Transform::new(&config, bounds);
 
         let mapped = t.transform_bounds(bounds);
@@ -182,7 +206,10 @@ mod tests {
     #[test]
     fn bounds_stay_positive_under_rotation() {
         let config = config_with(16.0, OriginMode::BoundsMin, 45.0);
-        let bounds = Aabb::new(Vec3::new(-1024.0, -1024.0, 0.0), Vec3::new(1024.0, 1024.0, 256.0));
+        let bounds = Aabb::new(
+            Vec3::new(-1024.0, -1024.0, 0.0),
+            Vec3::new(1024.0, 1024.0, 256.0),
+        );
         let t = Transform::new(&config, bounds);
         let mapped = t.transform_bounds(bounds);
         assert!(mapped.min.x >= -1e-9 && mapped.min.z >= -1e-9, "{mapped:?}");
@@ -196,7 +223,10 @@ mod tests {
 
         for yaw in [0.0, 90.0, 33.0] {
             let config = config_with(16.0, OriginMode::BoundsMin, yaw);
-            let bounds = Aabb::new(Vec3::new(-512.0, -512.0, 0.0), Vec3::new(512.0, 512.0, 256.0));
+            let bounds = Aabb::new(
+                Vec3::new(-512.0, -512.0, 0.0),
+                Vec3::new(512.0, 512.0, 256.0),
+            );
             let t = Transform::new(&config, bounds);
 
             let plane = Plane::new(Vec3::new(1.0, 2.0, 3.0).normalized(), 64.0);

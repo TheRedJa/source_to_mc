@@ -118,7 +118,11 @@ pub fn report(map: &Map, config: &Config) -> Report {
             "Map needs Y {}..{} ({} blocks), outside vanilla's {VANILLA_MIN_Y}..{VANILLA_MAX_Y}. \
              Use a custom dimension_type with min_y = {} and height = {} (--emit-dimension), \
              or raise --units-per-block.",
-            y_range.min_y, y_range.max_y, y_range.height, y_range.dimension_min_y, y_range.dimension_height,
+            y_range.min_y,
+            y_range.max_y,
+            y_range.height,
+            y_range.dimension_min_y,
+            y_range.dimension_height,
         ));
     }
     if !y_range.fits_custom_dimension {
@@ -136,7 +140,8 @@ pub fn report(map: &Map, config: &Config) -> Report {
         ));
     }
     if worldspawn == 0 {
-        warnings.push("No worldspawn brushes found; the map may use an unexpected lump layout.".into());
+        warnings
+            .push("No worldspawn brushes found; the map may use an unexpected lump layout.".into());
     }
 
     Report {
@@ -177,8 +182,16 @@ impl Report {
 
         let src = &self.bounds_source.size;
         let blk = &self.bounds_blocks.size;
-        let _ = writeln!(s, "  size (source)    {:.0} x {:.0} x {:.0} units", src[0], src[1], src[2]);
-        let _ = writeln!(s, "  size (blocks)    {:.0} x {:.0} x {:.0}", blk[0], blk[1], blk[2]);
+        let _ = writeln!(
+            s,
+            "  size (source)    {:.0} x {:.0} x {:.0} units",
+            src[0], src[1], src[2]
+        );
+        let _ = writeln!(
+            s,
+            "  size (blocks)    {:.0} x {:.0} x {:.0}",
+            blk[0], blk[1], blk[2]
+        );
         let _ = writeln!(
             s,
             "  bounding volume  {} blocks",
@@ -194,10 +207,18 @@ impl Report {
                 y.dimension_min_y, y.dimension_height
             )
         };
-        let _ = writeln!(s, "  Y range          {}..{} ({} blocks, {fit})", y.min_y, y.max_y, y.height);
+        let _ = writeln!(
+            s,
+            "  Y range          {}..{} ({} blocks, {fit})",
+            y.min_y, y.max_y, y.height
+        );
 
         let _ = writeln!(s);
-        let _ = writeln!(s, "  brushes          {} ({} worldspawn)", self.brushes_total, self.brushes_worldspawn);
+        let _ = writeln!(
+            s,
+            "  brushes          {} ({} worldspawn)",
+            self.brushes_total, self.brushes_worldspawn
+        );
         let _ = writeln!(s, "  brush entities   {}", self.brush_entity_models);
         let _ = writeln!(s, "  displacements    {}", self.displacements);
         let _ = writeln!(s, "  static props     {}", self.static_props);
@@ -273,7 +294,7 @@ mod tests {
         assert_eq!(y.dimension_min_y % 16, 0);
         assert_eq!(y.dimension_height % 16, 0);
         assert!(y.dimension_min_y <= y.min_y);
-        assert!(y.dimension_min_y + y.dimension_height - 1 >= y.max_y);
+        assert!(y.dimension_min_y + y.dimension_height > y.max_y);
     }
 
     #[test]

@@ -80,14 +80,18 @@ impl Rules {
 
         let mut rules = Vec::with_capacity(file.rule.len());
         for (index, raw) in file.rule.into_iter().enumerate() {
-            let action = raw.action().with_context(|| {
-                format!("in rule {} of {origin}", index + 1)
-            })?;
+            let action = raw
+                .action()
+                .with_context(|| format!("in rule {} of {origin}", index + 1))?;
             let patterns = raw.patterns.into_vec();
             if patterns.is_empty() {
                 bail!("rule {} of {origin} matches nothing", index + 1);
             }
-            rules.push(Rule { patterns, action, origin: origin.to_string() });
+            rules.push(Rule {
+                patterns,
+                action,
+                origin: origin.to_string(),
+            });
         }
         Rules::compile(rules)
     }
@@ -191,7 +195,9 @@ impl RawRule {
             bail!("`set` only means anything alongside `auto = true`");
         }
         let sets = match &self.set {
-            Some(spec) => Some(crate::palette::blocks::parse_set(spec).map_err(|e| anyhow::anyhow!("{e}"))?),
+            Some(spec) => {
+                Some(crate::palette::blocks::parse_set(spec).map_err(|e| anyhow::anyhow!("{e}"))?)
+            }
             None => None,
         };
         match (&self.block, self.skip, self.auto) {
@@ -307,7 +313,10 @@ mod tests {
             auto = true
             "#,
         );
-        assert_eq!(rules.matches("tools/toolsnodraw").unwrap().1.action, Action::Skip);
+        assert_eq!(
+            rules.matches("tools/toolsnodraw").unwrap().1.action,
+            Action::Skip
+        );
         assert_eq!(
             rules.matches("nature/blendrubble").unwrap().1.action,
             Action::Auto(None)
@@ -335,9 +344,11 @@ mod tests {
 
     #[test]
     fn an_unknown_set_in_a_rule_is_rejected() {
-        let err =
-            Rules::parse("[[rule]]\nmatch = \"a/*\"\nauto = true\nset = \"cheese\"\n", "test")
-                .unwrap_err();
+        let err = Rules::parse(
+            "[[rule]]\nmatch = \"a/*\"\nauto = true\nset = \"cheese\"\n",
+            "test",
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("cheese"), "{err:#}");
     }
 
@@ -359,8 +370,7 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_rejected() {
-        let err =
-            Rules::parse("[[rule]]\nmatch = \"a/*\"\nblok = \"x\"\n", "test").unwrap_err();
+        let err = Rules::parse("[[rule]]\nmatch = \"a/*\"\nblok = \"x\"\n", "test").unwrap_err();
         assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
     }
 

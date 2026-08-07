@@ -280,22 +280,52 @@ mod tests {
         // Bottom half full, plus the two upper quarters at z = 0, the north
         // side. The raised side is north, so the stair faces north.
         let mask = BOTTOM | octant(false, false, true) | octant(true, false, true);
-        assert_eq!(shape_for(mask), Shape::Stairs { facing: Facing::North, top: false });
+        assert_eq!(
+            shape_for(mask),
+            Shape::Stairs {
+                facing: Facing::North,
+                top: false
+            }
+        );
 
         // The mirror: raised on the south side.
         let mask = BOTTOM | octant(false, true, true) | octant(true, true, true);
-        assert_eq!(shape_for(mask), Shape::Stairs { facing: Facing::South, top: false });
+        assert_eq!(
+            shape_for(mask),
+            Shape::Stairs {
+                facing: Facing::South,
+                top: false
+            }
+        );
 
         // Raised along x = 0, the west side.
         let mask = BOTTOM | octant(false, false, true) | octant(false, true, true);
-        assert_eq!(shape_for(mask), Shape::Stairs { facing: Facing::West, top: false });
+        assert_eq!(
+            shape_for(mask),
+            Shape::Stairs {
+                facing: Facing::West,
+                top: false
+            }
+        );
 
         let mask = BOTTOM | octant(true, false, true) | octant(true, true, true);
-        assert_eq!(shape_for(mask), Shape::Stairs { facing: Facing::East, top: false });
+        assert_eq!(
+            shape_for(mask),
+            Shape::Stairs {
+                facing: Facing::East,
+                top: false
+            }
+        );
 
         // Upside-down: top half full plus a lower edge on the north side.
         let mask = TOP | octant(false, false, false) | octant(true, false, false);
-        assert_eq!(shape_for(mask), Shape::Stairs { facing: Facing::North, top: true });
+        assert_eq!(
+            shape_for(mask),
+            Shape::Stairs {
+                facing: Facing::North,
+                top: true
+            }
+        );
     }
 
     /// A single raised corner, or two diagonal ones, is not a straight stair.
@@ -335,7 +365,11 @@ mod tests {
                 Shape::Stairs { .. } => mask,
             };
             // Every bit the mask sets must still be covered by the shape.
-            assert_eq!(mask & !covered, 0, "shape for {mask:08b} loses occupied space");
+            assert_eq!(
+                mask & !covered,
+                0,
+                "shape for {mask:08b} loses occupied space"
+            );
         }
     }
 
@@ -346,7 +380,12 @@ mod tests {
             "[type=bottom,waterlogged=false]"
         );
         assert_eq!(
-            Shape::Stairs { facing: Facing::North, top: true }.state().unwrap(),
+            Shape::Stairs {
+                facing: Facing::North,
+                top: true
+            }
+            .state()
+            .unwrap(),
             "[facing=north,half=top,shape=straight,waterlogged=false]"
         );
     }
@@ -356,7 +395,11 @@ mod tests {
         assert_eq!(Shape::Full.variant(), Variant::Full);
         assert_eq!(Shape::Slab { top: false }.variant(), Variant::Slab);
         assert_eq!(
-            Shape::Stairs { facing: Facing::North, top: false }.variant(),
+            Shape::Stairs {
+                facing: Facing::North,
+                top: false
+            }
+            .variant(),
             Variant::Stairs
         );
     }

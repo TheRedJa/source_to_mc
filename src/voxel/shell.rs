@@ -103,7 +103,10 @@ mod tests {
         // 6³ solid minus a 4³ interior.
         assert_eq!(shell.count(), 6 * 6 * 6 - 4 * 4 * 4);
         assert!(shell.is_solid([0, 0, 0]));
-        assert!(!shell.is_solid([3, 3, 3]), "the centre should be hollowed out");
+        assert!(
+            !shell.is_solid([3, 3, 3]),
+            "the centre should be hollowed out"
+        );
     }
 
     #[test]

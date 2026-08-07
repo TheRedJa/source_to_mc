@@ -73,8 +73,12 @@ mod tests {
     fn a_linear_mid_grey_matches_a_mid_grey_block() {
         let block = auto().block_for([0.25, 0.25, 0.25]).unwrap();
         assert!(
-            ["minecraft:stone", "minecraft:andesite", "minecraft:cobblestone"]
-                .contains(&block.name),
+            [
+                "minecraft:stone",
+                "minecraft:andesite",
+                "minecraft:cobblestone"
+            ]
+            .contains(&block.name),
             "got {}",
             block.name
         );

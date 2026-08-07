@@ -174,10 +174,17 @@ mod tests {
             Vec3::new(0.0, 0.5, 4.0),
         );
         let found = voxels(&tri);
-        assert!(found.iter().all(|v| v[1] == 0), "escaped its layer: {found:?}");
+        assert!(
+            found.iter().all(|v| v[1] == 0),
+            "escaped its layer: {found:?}"
+        );
         // The lower-left triangle of a 4x4 square: 4+3+2+1 full voxels plus the
         // ones the hypotenuse clips, which SAT counts because it touches them.
-        assert!(found.len() >= 10 && found.len() <= 16, "{} voxels", found.len());
+        assert!(
+            found.len() >= 10 && found.len() <= 16,
+            "{} voxels",
+            found.len()
+        );
         for v in [[0, 0, 0], [3, 0, 0], [0, 0, 3]] {
             assert!(found.contains(&v), "missing corner {v:?}");
         }
@@ -200,11 +207,7 @@ mod tests {
             for j in 0..=(n - i) {
                 let (u, v) = (i as f64 / n as f64, j as f64 / n as f64);
                 let p = tri.a + (tri.b - tri.a) * u + (tri.c - tri.a) * v;
-                let voxel = [
-                    p.x.floor() as i32,
-                    p.y.floor() as i32,
-                    p.z.floor() as i32,
-                ];
+                let voxel = [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32];
                 assert!(
                     found.contains(&voxel),
                     "point {p:?} is on the triangle but voxel {voxel:?} was not emitted"
@@ -225,7 +228,10 @@ mod tests {
         );
         let found = voxels(&tri);
         // Well past the hypotenuse, but inside the bounding box.
-        assert!(!found.contains(&[7, 7, 0]), "filled a voxel outside the triangle");
+        assert!(
+            !found.contains(&[7, 7, 0]),
+            "filled a voxel outside the triangle"
+        );
         // Off the plane entirely.
         assert!(!found.contains(&[1, 1, 5]));
         assert!(found.contains(&[0, 0, 0]));
@@ -236,7 +242,11 @@ mod tests {
         let point = Triangle::new(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
         assert!(voxels(&point).is_empty());
 
-        let line = Triangle::new(Vec3::ZERO, Vec3::new(4.0, 0.0, 0.0), Vec3::new(8.0, 0.0, 0.0));
+        let line = Triangle::new(
+            Vec3::ZERO,
+            Vec3::new(4.0, 0.0, 0.0),
+            Vec3::new(8.0, 0.0, 0.0),
+        );
         assert!(voxels(&line).is_empty());
 
         let nan = Triangle::new(Vec3::new(f64::NAN, 0.0, 0.0), Vec3::ZERO, Vec3::splat(1.0));
@@ -270,7 +280,10 @@ mod tests {
         let found = voxels(&tri);
         let top: Vec<_> = found.iter().filter(|v| v[1] == 2).collect();
         assert!(top.len() <= 1, "spilled into the layer above: {top:?}");
-        assert!(found.contains(&[0, 0, 0]) && found.contains(&[0, 1, 0]), "{found:?}");
+        assert!(
+            found.contains(&[0, 0, 0]) && found.contains(&[0, 1, 0]),
+            "{found:?}"
+        );
     }
 
     #[test]

@@ -131,7 +131,11 @@ fn binarize_alpha(image: &mut RgbaImage, coverage: f64) {
     };
 
     for pixel in image.pixels_mut() {
-        pixel.0[3] = if pixel.0[3] >= cutoff && cutoff < u8::MAX { 255 } else { 0 };
+        pixel.0[3] = if pixel.0[3] >= cutoff && cutoff < u8::MAX {
+            255
+        } else {
+            0
+        };
     }
 }
 
@@ -145,7 +149,9 @@ fn resize(mut image: DynamicImage, size: u32) -> RgbaImage {
             FilterType::Triangle,
         );
     }
-    image.resize_exact(size, size, FilterType::Lanczos3).to_rgba8()
+    image
+        .resize_exact(size, size, FilterType::Lanczos3)
+        .to_rgba8()
 }
 
 /// What a texture's header says, without decoding its pixels.
@@ -180,7 +186,12 @@ struct Key {
 
 impl<'a> Textures<'a> {
     pub fn new(vfs: &'a Vfs, size: u32) -> Textures<'a> {
-        Textures { vfs, size, cache: HashMap::new(), headers: HashMap::new() }
+        Textures {
+            vfs,
+            size,
+            cache: HashMap::new(),
+            headers: HashMap::new(),
+        }
     }
 
     /// Load `$basetexture`, e.g. `Concrete/concretewall001a`.
@@ -189,7 +200,8 @@ impl<'a> Textures<'a> {
     /// texture is downsampled, so the same file can legitimately be wanted
     /// both ways.
     pub fn get(&mut self, base_texture: &str, alpha_test: bool) -> Option<&RgbaImage> {
-        self.tiles(base_texture, alpha_test, [1, 1], [u32::MAX; 2])?.first()
+        self.tiles(base_texture, alpha_test, [1, 1], [u32::MAX; 2])?
+            .first()
     }
 
     /// Load a texture cut into a `grid` of tiles, row by row, using the first
@@ -296,7 +308,10 @@ mod tests {
         let opaque = image.pixels().filter(|p| p.0[3] > 200).count();
         assert_eq!(opaque, 256, "every pixel of concrete should be opaque");
         let mean: u32 = image.pixels().map(|p| p.0[0] as u32).sum::<u32>() / 256;
-        assert!((60..200).contains(&mean), "mean red channel {mean} is not a grey");
+        assert!(
+            (60..200).contains(&mean),
+            "mean red channel {mean} is not a grey"
+        );
     }
 
     /// Reassembling the tiles has to give back the picture. This is the test
@@ -325,14 +340,21 @@ mod tests {
             }
         }
 
-        let whole = vtf::from_bytes(&data).unwrap().highres_image.decode(0).unwrap();
+        let whole = vtf::from_bytes(&data)
+            .unwrap()
+            .highres_image
+            .decode(0)
+            .unwrap();
         let reference = whole.resize_exact(w, h, FilterType::Lanczos3).to_rgba8();
 
         let error: f64 = assembled
             .pixels()
             .zip(reference.pixels())
             .map(|(a, b)| {
-                (0..3).map(|c| (a.0[c] as f64 - b.0[c] as f64).abs()).sum::<f64>() / 3.0
+                (0..3)
+                    .map(|c| (a.0[c] as f64 - b.0[c] as f64).abs())
+                    .sum::<f64>()
+                    / 3.0
             })
             .sum::<f64>()
             / (w * h) as f64;
@@ -340,7 +362,10 @@ mod tests {
         // Filtering differs a little at the tile seams, so this is not exact;
         // any ordering or orientation mistake is worth tens of levels, not
         // ones.
-        assert!(error < 8.0, "reassembled tiles differ from the whole by {error:.1}/255");
+        assert!(
+            error < 8.0,
+            "reassembled tiles differ from the whole by {error:.1}/255"
+        );
     }
 
     /// The tiles have to be different from each other, or splitting bought
@@ -348,7 +373,9 @@ mod tests {
     #[test]
     fn tiles_of_a_detailed_texture_differ() {
         let Some(vfs) = vfs() else { return };
-        let Some(data) = vfs.open("materials/brick/brickwall017a.vtf") else { return };
+        let Some(data) = vfs.open("materials/brick/brickwall017a.vtf") else {
+            return;
+        };
 
         let tiles = decode_tiles(&data, 16, false, [4, 4], [u32::MAX; 2]).unwrap();
         let mut raw: Vec<&Vec<u8>> = tiles.iter().map(|t| t.as_raw()).collect();
@@ -361,10 +388,15 @@ mod tests {
     #[test]
     fn a_single_tile_is_the_whole_texture() {
         let Some(vfs) = vfs() else { return };
-        let Some(data) = vfs.open("materials/concrete/concretewall001a.vtf") else { return };
+        let Some(data) = vfs.open("materials/concrete/concretewall001a.vtf") else {
+            return;
+        };
         let tiles = decode_tiles(&data, 16, false, [1, 1], [u32::MAX; 2]).unwrap();
         assert_eq!(tiles.len(), 1);
-        assert_eq!(tiles[0].as_raw(), decode(&data, 16, false).unwrap().as_raw());
+        assert_eq!(
+            tiles[0].as_raw(),
+            decode(&data, 16, false).unwrap().as_raw()
+        );
     }
 
     /// A grate is a third see-through at full resolution. Averaging alpha on
@@ -373,7 +405,9 @@ mod tests {
     #[test]
     fn an_alpha_tested_texture_keeps_its_holes() {
         let Some(vfs) = vfs() else { return };
-        let Some(data) = vfs.open("materials/metal/metalgrate011a.vtf") else { return };
+        let Some(data) = vfs.open("materials/metal/metalgrate011a.vtf") else {
+            return;
+        };
 
         let averaged = decode(&data, 16, false).unwrap();
         assert_eq!(
@@ -385,7 +419,10 @@ mod tests {
         let cutout = decode(&data, 16, true).unwrap();
         let holes = cutout.pixels().filter(|p| p.0[3] == 0).count();
         assert!(holes > 20, "only {holes} of 256 texels see-through");
-        assert!(holes < 236, "{holes} of 256 texels see-through, grate vanished");
+        assert!(
+            holes < 236,
+            "{holes} of 256 texels see-through, grate vanished"
+        );
         // Alpha must be strictly on or off, or cutout rendering is a lottery.
         assert!(cutout.pixels().all(|p| p.0[3] == 0 || p.0[3] == 255));
     }
@@ -397,7 +434,10 @@ mod tests {
         let Some(vfs) = vfs() else { return };
         let data = vfs.open("materials/concrete/concretewall001a.vtf").unwrap();
         let image = decode(&data, 16, true).unwrap();
-        assert!(image.pixels().all(|p| p.0[3] == 255), "opaque concrete lost pixels");
+        assert!(
+            image.pixels().all(|p| p.0[3] == 255),
+            "opaque concrete lost pixels"
+        );
     }
 
     #[test]
@@ -422,7 +462,11 @@ mod tests {
 
         assert!(textures.get("Concrete/concretewall001a", false).is_some());
         assert!(textures.get("concrete/CONCRETEWALL001A", false).is_some());
-        assert_eq!(textures.decoded(), 1, "case differences should hit the cache");
+        assert_eq!(
+            textures.decoded(),
+            1,
+            "case differences should hit the cache"
+        );
 
         assert!(textures.get("nothing/at/all", false).is_none());
         // A miss is remembered too, so it is not re-searched per material.

@@ -65,8 +65,8 @@ pub fn leaf_brush_ranges(data: &[u8]) -> Result<Vec<LeafBrushRange>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::lumps::LUMP_COUNT;
+    use super::*;
 
     /// Byte offset of the lump directory within the BSP header.
     const LUMP_DIRECTORY_OFFSET: usize = 8;
@@ -74,7 +74,11 @@ mod tests {
 
     /// Build a minimal BSP-shaped buffer with a leaf lump of `leaves` entries.
     fn synthetic_bsp(version: i32, leaves: &[(u16, u16)]) -> Vec<u8> {
-        let stride = if version == 0 { LEAF_STRIDE_V0 } else { LEAF_STRIDE_V1 };
+        let stride = if version == 0 {
+            LEAF_STRIDE_V0
+        } else {
+            LEAF_STRIDE_V1
+        };
         let header_len = LUMP_DIRECTORY_OFFSET + LUMP_COUNT * LUMP_ENTRY_SIZE + 4;
         let mut data = vec![0u8; header_len];
         data[0..4].copy_from_slice(b"VBSP");

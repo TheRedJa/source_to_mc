@@ -58,7 +58,9 @@ pub struct Scale {
 
 impl Default for Scale {
     fn default() -> Self {
-        Scale { units_per_block: 16.0 }
+        Scale {
+            units_per_block: 16.0,
+        }
     }
 }
 
@@ -148,11 +150,26 @@ impl Default for Contents {
         for flag in ["playerclip", "monsterclip", "areaportal", "origin"] {
             actions.insert(flag.to_string(), ContentAction::Skip);
         }
-        actions.insert("water".into(), ContentAction::Block("minecraft:water".into()));
-        actions.insert("slime".into(), ContentAction::Block("minecraft:water".into()));
-        actions.insert("window".into(), ContentAction::Block("minecraft:glass".into()));
-        actions.insert("grate".into(), ContentAction::Block("minecraft:iron_bars".into()));
-        actions.insert("ladder".into(), ContentAction::Block("minecraft:ladder".into()));
+        actions.insert(
+            "water".into(),
+            ContentAction::Block("minecraft:water".into()),
+        );
+        actions.insert(
+            "slime".into(),
+            ContentAction::Block("minecraft:water".into()),
+        );
+        actions.insert(
+            "window".into(),
+            ContentAction::Block("minecraft:glass".into()),
+        );
+        actions.insert(
+            "grate".into(),
+            ContentAction::Block("minecraft:iron_bars".into()),
+        );
+        actions.insert(
+            "ladder".into(),
+            ContentAction::Block("minecraft:ladder".into()),
+        );
         Contents {
             actions,
             skip_sky: true,
@@ -218,7 +235,10 @@ pub struct Materials {
 impl Materials {
     /// `game_dirs` as paths.
     pub fn game_dir_paths(&self) -> Vec<std::path::PathBuf> {
-        self.game_dirs.iter().map(std::path::PathBuf::from).collect()
+        self.game_dirs
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect()
     }
 }
 
@@ -337,7 +357,10 @@ pub struct Displacement {
 
 impl Default for Displacement {
     fn default() -> Self {
-        Displacement { enabled: true, solidify: 2 }
+        Displacement {
+            enabled: true,
+            solidify: 2,
+        }
     }
 }
 
@@ -524,7 +547,12 @@ impl Default for Entities {
     fn default() -> Self {
         let mut classname_modes = BTreeMap::new();
         // Doors and platforms move, so their geometry is more useful on its own.
-        for class in ["func_door", "func_door_rotating", "func_movelinear", "func_tracktrain"] {
+        for class in [
+            "func_door",
+            "func_door_rotating",
+            "func_movelinear",
+            "func_tracktrain",
+        ] {
             classname_modes.insert(class.to_string(), BrushEntityMode::Separate);
         }
         Entities {
@@ -561,15 +589,10 @@ impl Default for Output {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct Performance {
     /// Worker threads; 0 uses one per core.
     pub threads: usize,
-}
-
-impl Default for Performance {
-    fn default() -> Self {
-        Performance { threads: 0 }
-    }
 }
 
 #[cfg(test)]

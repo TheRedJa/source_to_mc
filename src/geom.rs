@@ -14,7 +14,11 @@ pub struct Vec3 {
 }
 
 impl Vec3 {
-    pub const ZERO: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    pub const ZERO: Vec3 = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
 
     pub fn new(x: f64, y: f64, z: f64) -> Self {
         Vec3 { x, y, z }
@@ -179,7 +183,11 @@ impl Aabb {
     }
 
     pub fn size(&self) -> Vec3 {
-        if self.is_empty() { Vec3::ZERO } else { self.max - self.min }
+        if self.is_empty() {
+            Vec3::ZERO
+        } else {
+            self.max - self.min
+        }
     }
 
     pub fn center(&self) -> Vec3 {
@@ -353,7 +361,10 @@ mod tests {
         // A cube sliced by a diagonal plane through two opposite edges: the
         // two corners on the far side of the cut disappear, leaving 6.
         let mut planes = box_planes(Vec3::ZERO, Vec3::splat(16.0));
-        planes.push(Plane::new(Vec3::new(1.0, 1.0, 0.0).normalized(), 16.0 / 2f64.sqrt()));
+        planes.push(Plane::new(
+            Vec3::new(1.0, 1.0, 0.0).normalized(),
+            16.0 / 2f64.sqrt(),
+        ));
         let verts = polyhedron_vertices(&planes, 1e-4);
         assert_eq!(verts.len(), 6, "got {verts:?}");
     }
@@ -379,7 +390,10 @@ mod tests {
     fn a_cube_cut_corner_to_corner_has_half_the_volume() {
         let mut planes = box_planes(Vec3::ZERO, Vec3::splat(2.0));
         // Diagonal through two opposite edges of the x/y square.
-        planes.push(Plane::new(Vec3::new(1.0, 1.0, 0.0).normalized(), 2.0 / 2f64.sqrt()));
+        planes.push(Plane::new(
+            Vec3::new(1.0, 1.0, 0.0).normalized(),
+            2.0 / 2f64.sqrt(),
+        ));
         let volume = polyhedron_volume(&planes, 1e-9);
         assert!((volume - 4.0).abs() < 1e-9, "got {volume}");
     }
@@ -427,7 +441,10 @@ mod tests {
             }
         }
         let sampled = inside as f64 / (n * n * n) as f64;
-        assert!((volume - sampled).abs() < 2e-3, "exact {volume} vs sampled {sampled}");
+        assert!(
+            (volume - sampled).abs() < 2e-3,
+            "exact {volume} vs sampled {sampled}"
+        );
     }
 
     #[test]

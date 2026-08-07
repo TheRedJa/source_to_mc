@@ -10,7 +10,11 @@ use src2mc::voxel::transform::Transform;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "src2mc", version, about = "Convert Source Engine maps to Minecraft schematics")]
+#[command(
+    name = "src2mc",
+    version,
+    about = "Convert Source Engine maps to Minecraft schematics"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -309,13 +313,11 @@ fn convert_one(map: &Map, config: &Config, out: &Path) -> Result<Converted> {
 /// `write_pack` is false for `batch`, which merges every map's generated
 /// blocks into one pack at the top level instead: a texture shared across a
 /// campaign should be registered once, not once per map.
-fn convert_into(
-    map: &Map,
-    config: &Config,
-    out: &Path,
-    write_pack: bool,
-) -> Result<Converted> {
-    eprintln!("converting {} at {} units/block...", map.name, config.scale.units_per_block);
+fn convert_into(map: &Map, config: &Config, out: &Path, write_pack: bool) -> Result<Converted> {
+    eprintln!(
+        "converting {} at {} units/block...",
+        map.name, config.scale.units_per_block
+    );
 
     let result = src2mc::convert::convert(map, config)?;
     let stats = &result.stats;
@@ -362,8 +364,7 @@ fn convert_into(
         let split = result.pack.tilings().len();
         eprintln!(
             "  {} materials carry their own texture ({split} split, up to {} tiles per axis)",
-            stats.textures_resolved,
-            stats.tile_cap,
+            stats.textures_resolved, stats.tile_cap,
         );
     }
 
@@ -411,11 +412,7 @@ fn convert_into(
                 written.root.display(),
             );
         }
-        manifest.generated_blocks = result
-            .pack
-            .blocks()
-            .map(|b| b.block_id())
-            .collect();
+        manifest.generated_blocks = result.pack.blocks().map(|b| b.block_id()).collect();
     }
 
     manifest.entities = tiling::write_entities(out, &result.separate, &result.palette)?;
@@ -425,7 +422,10 @@ fn convert_into(
             manifest.entities.len()
         );
     }
-    std::fs::write(out.join("manifest.json"), serde_json::to_string_pretty(&manifest)?)?;
+    std::fs::write(
+        out.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
 
     if config.output.paste_script {
         std::fs::write(out.join("paste.txt"), tiling::paste_script(&manifest))?;
@@ -433,11 +433,18 @@ fn convert_into(
 
     if config.entities.manifest {
         let records = entities::extract(map, &result.transform);
-        std::fs::write(out.join("entities.json"), serde_json::to_string_pretty(&records)?)?;
+        std::fs::write(
+            out.join("entities.json"),
+            serde_json::to_string_pretty(&records)?,
+        )?;
         eprintln!("  {} entities recorded", records.len());
     }
 
-    eprintln!("  {} tiles written to {}", manifest.tiles.len(), out.display());
+    eprintln!(
+        "  {} tiles written to {}",
+        manifest.tiles.len(),
+        out.display()
+    );
 
     Ok(Converted {
         name: map.name.clone(),
@@ -471,7 +478,10 @@ fn batch(
         let size = Transform::new(config, map.bounds())
             .transform_bounds(map.bounds())
             .size();
-        footprints.push(layout::Footprint::new(size.x.ceil() as i32, size.z.ceil() as i32));
+        footprints.push(layout::Footprint::new(
+            size.x.ceil() as i32,
+            size.z.ceil() as i32,
+        ));
         loaded.push(map);
     }
 
@@ -653,12 +663,20 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Materials { map, common, stubs, guessed, json } => {
+        Command::Materials {
+            map,
+            common,
+            stubs,
+            guessed,
+            json,
+        } => {
             let config = common.resolve()?;
             let map = load(&map)?;
             let mut report = src2mc::palette::report::report(&map, &config)?;
             if guessed {
-                report.entries.retain(|e| e.decided_by == "auto" || e.decided_by == "fallback");
+                report
+                    .entries
+                    .retain(|e| e.decided_by == "auto" || e.decided_by == "fallback");
             }
             if stubs {
                 print!("{}", report.stubs());
@@ -669,7 +687,12 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Textures { map, common, missing, json } => {
+        Command::Textures {
+            map,
+            common,
+            missing,
+            json,
+        } => {
             let config = common.resolve()?;
             let map = load(&map)?;
             let mut report = src2mc::source::report::report(&map, &config);
@@ -683,25 +706,43 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Convert { map, common, out, options } => {
+        Command::Convert {
+            map,
+            common,
+            out,
+            options,
+        } => {
             let mut config = common.resolve()?;
             options.apply(&mut config);
             let map = load(&map)?;
             let converted = convert_one(&map, &config, &out)?;
 
             if config.output.emit_dimension {
-                let emitted = dimension::write(&out.join("dimension"), &map.name, &converted.y_range)?;
+                let emitted =
+                    dimension::write(&out.join("dimension"), &map.name, &converted.y_range)?;
                 eprintln!("  {}", emitted.instructions(&out.join("dimension")));
             }
         }
 
-        Command::Batch { maps, common, out, layout, spacing, options } => {
+        Command::Batch {
+            maps,
+            common,
+            out,
+            layout,
+            spacing,
+            options,
+        } => {
             let mut config = common.resolve()?;
             options.apply(&mut config);
             batch(&maps, &config, &out, layout, spacing)?;
         }
 
-        Command::Entities { map, common, out, classnames } => {
+        Command::Entities {
+            map,
+            common,
+            out,
+            classnames,
+        } => {
             let config = common.resolve()?;
             let map = load(&map)?;
             let transform = Transform::new(&config, map.bounds());

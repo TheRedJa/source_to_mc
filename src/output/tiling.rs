@@ -79,12 +79,13 @@ pub fn write_entities(
         return Ok(Vec::new());
     }
     let dir = dir.join("entities");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
     let mut written = Vec::with_capacity(entities.len());
     for entity in entities {
-        let Some((min, max)) = entity.grid.bounds() else { continue };
+        let Some((min, max)) = entity.grid.bounds() else {
+            continue;
+        };
         let blocks: Vec<(IVec3, BlockId)> = entity.grid.iter().collect();
         let file = format!("{}.schem", entity.name());
         schem::write(&dir.join(&file), &blocks, palette, min, max, &file)?;
@@ -118,7 +119,16 @@ pub fn write_tiles(
     units_per_block: f64,
     block_counts: std::collections::BTreeMap<String, usize>,
 ) -> Result<Manifest> {
-    write_tiles_with_props(dir, map_name, grid, &[], palette, tile_size, units_per_block, block_counts)
+    write_tiles_with_props(
+        dir,
+        map_name,
+        grid,
+        &[],
+        palette,
+        tile_size,
+        units_per_block,
+        block_counts,
+    )
 }
 
 /// As [`write_tiles`], placing each prop into the tile it stands in.
@@ -334,11 +344,18 @@ pub fn paste_script(manifest: &Manifest) -> String {
              # arrive, run {} as a datapack function instead; it places\n\
              # exactly the same props at exactly the same coordinates.\n\n",
             manifest.props,
-            manifest.prop_function.as_deref().unwrap_or("the props function"),
+            manifest
+                .prop_function
+                .as_deref()
+                .unwrap_or("the props function"),
         ));
     }
 
-    let paste = if manifest.props > 0 { "//paste -a -o -e" } else { "//paste -a -o" };
+    let paste = if manifest.props > 0 {
+        "//paste -a -o -e"
+    } else {
+        "//paste -a -o"
+    };
     for tile in &manifest.tiles {
         let stem = tile.file.trim_end_matches(".schem");
         out.push_str(&format!(
@@ -380,8 +397,16 @@ mod tests {
     fn empty_grid_writes_no_tiles() {
         let dir = temp_dir("empty");
         let (grid, palette) = grid_with(&[]);
-        let manifest =
-            write_tiles(&dir, "m", &grid, &palette, Some(64), 16.0, Default::default()).unwrap();
+        let manifest = write_tiles(
+            &dir,
+            "m",
+            &grid,
+            &palette,
+            Some(64),
+            16.0,
+            Default::default(),
+        )
+        .unwrap();
         assert!(manifest.tiles.is_empty());
         assert_eq!(manifest.total_blocks, 0);
     }
@@ -390,8 +415,16 @@ mod tests {
     fn geometry_in_one_tile_writes_one_file() {
         let dir = temp_dir("single");
         let (grid, palette) = grid_with(&[[1, 2, 3], [4, 5, 6]]);
-        let manifest =
-            write_tiles(&dir, "m", &grid, &palette, Some(64), 16.0, Default::default()).unwrap();
+        let manifest = write_tiles(
+            &dir,
+            "m",
+            &grid,
+            &palette,
+            Some(64),
+            16.0,
+            Default::default(),
+        )
+        .unwrap();
 
         assert_eq!(manifest.tiles.len(), 1);
         assert_eq!(manifest.tiles[0].blocks, 2);
@@ -404,8 +437,16 @@ mod tests {
         let dir = temp_dir("split");
         // Two clusters far apart: the tiles between them must not be written.
         let (grid, palette) = grid_with(&[[0, 0, 0], [500, 0, 500]]);
-        let manifest =
-            write_tiles(&dir, "m", &grid, &palette, Some(64), 16.0, Default::default()).unwrap();
+        let manifest = write_tiles(
+            &dir,
+            "m",
+            &grid,
+            &palette,
+            Some(64),
+            16.0,
+            Default::default(),
+        )
+        .unwrap();
 
         assert_eq!(manifest.tiles.len(), 2, "only occupied tiles get written");
         assert_eq!(manifest.total_blocks, 2);
@@ -424,8 +465,16 @@ mod tests {
             }
         }
         let (grid, palette) = grid_with(&positions);
-        let manifest =
-            write_tiles(&dir, "m", &grid, &palette, Some(16), 16.0, Default::default()).unwrap();
+        let manifest = write_tiles(
+            &dir,
+            "m",
+            &grid,
+            &palette,
+            Some(16),
+            16.0,
+            Default::default(),
+        )
+        .unwrap();
 
         let tiled: usize = manifest.tiles.iter().map(|t| t.blocks).sum();
         assert_eq!(tiled, grid.count());
@@ -440,8 +489,16 @@ mod tests {
             positions.push([x, 0, 0]);
         }
         let (grid, palette) = grid_with(&positions);
-        let manifest =
-            write_tiles(&dir, "m", &grid, &palette, Some(32), 16.0, Default::default()).unwrap();
+        let manifest = write_tiles(
+            &dir,
+            "m",
+            &grid,
+            &palette,
+            Some(32),
+            16.0,
+            Default::default(),
+        )
+        .unwrap();
 
         for tile in &manifest.tiles {
             assert!(tile.size.iter().all(|s| *s <= 32), "tile too big: {tile:?}");
@@ -453,7 +510,18 @@ mod tests {
     fn rejects_a_tile_size_beyond_the_format_limit() {
         let dir = temp_dir("toobig");
         let (grid, palette) = grid_with(&[[0, 0, 0]]);
-        assert!(write_tiles(&dir, "m", &grid, &palette, Some(40_000), 16.0, Default::default()).is_err());
+        assert!(
+            write_tiles(
+                &dir,
+                "m",
+                &grid,
+                &palette,
+                Some(40_000),
+                16.0,
+                Default::default()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -464,7 +532,10 @@ mod tests {
             write_tiles(&dir, "m", &grid, &palette, None, 16.0, Default::default()).unwrap();
 
         assert_eq!(manifest.tiles.len(), 1);
-        assert_eq!(manifest.tiles[0].file, "m.schem", "no tile suffix when unsplit");
+        assert_eq!(
+            manifest.tiles[0].file, "m.schem",
+            "no tile suffix when unsplit"
+        );
         assert_eq!(manifest.tiles[0].blocks, 3);
         assert_eq!(manifest.tiles[0].min, [-40, 0, 0]);
         assert_eq!(manifest.tiles[0].max, [500, 300, 500]);
@@ -477,8 +548,8 @@ mod tests {
         let dir = temp_dir("hugesingle");
         // Two blocks far enough apart that the bounding box blows the cell cap.
         let (grid, palette) = grid_with(&[[0, 0, 0], [5000, 5000, 5000]]);
-        let err = write_tiles(&dir, "m", &grid, &palette, None, 16.0, Default::default())
-            .unwrap_err();
+        let err =
+            write_tiles(&dir, "m", &grid, &palette, None, 16.0, Default::default()).unwrap_err();
         assert!(err.to_string().contains("--tile-size"), "{err}");
     }
 
@@ -487,8 +558,16 @@ mod tests {
     fn paste_script_pastes_at_the_recorded_origin() {
         let dir = temp_dir("origin");
         let (grid, palette) = grid_with(&[[0, 0, 0], [500, 0, 500]]);
-        let manifest =
-            write_tiles(&dir, "m", &grid, &palette, Some(64), 16.0, Default::default()).unwrap();
+        let manifest = write_tiles(
+            &dir,
+            "m",
+            &grid,
+            &palette,
+            Some(64),
+            16.0,
+            Default::default(),
+        )
+        .unwrap();
 
         let script = paste_script(&manifest);
         assert!(!script.contains("//pos1"), "pos1 has no effect on paste");
@@ -504,13 +583,24 @@ mod tests {
     fn paste_script_covers_every_tile() {
         let dir = temp_dir("script");
         let (grid, palette) = grid_with(&[[0, 0, 0], [500, 0, 500]]);
-        let manifest =
-            write_tiles(&dir, "m", &grid, &palette, Some(64), 16.0, Default::default()).unwrap();
+        let manifest = write_tiles(
+            &dir,
+            "m",
+            &grid,
+            &palette,
+            Some(64),
+            16.0,
+            Default::default(),
+        )
+        .unwrap();
 
         let script = paste_script(&manifest);
         for tile in &manifest.tiles {
             let stem = tile.file.trim_end_matches(".schem");
-            assert!(script.contains(&format!("//schem load {stem}")), "script missing {stem}");
+            assert!(
+                script.contains(&format!("//schem load {stem}")),
+                "script missing {stem}"
+            );
             assert!(script.contains(&format!(
                 "# tile at {},{},{}",
                 tile.min[0], tile.min[1], tile.min[2]

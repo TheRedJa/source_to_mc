@@ -200,7 +200,10 @@ mod tests {
                 small += 1;
             }
         }
-        assert_eq!(small, 0, "the lump table would be read as Left 4 Dead 2's order");
+        assert_eq!(
+            small, 0,
+            "the lump table would be read as Left 4 Dead 2's order"
+        );
     }
 
     #[test]
@@ -247,7 +250,10 @@ mod tests {
         let before = data.len();
         sanitize_text_lump(&mut data, LUMP_ENTITIES).unwrap();
         assert_eq!(data.len(), before);
-        assert_eq!(lump_entry(&data, LUMP_ENTITIES).unwrap().length, original.len());
+        assert_eq!(
+            lump_entry(&data, LUMP_ENTITIES).unwrap().length,
+            original.len()
+        );
     }
 
     #[test]

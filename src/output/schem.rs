@@ -172,8 +172,7 @@ pub fn encode_all(
                 palette: palette_map,
                 data: ByteArray::new(data),
             },
-            entities: (!props.is_empty())
-                .then(|| props.iter().map(|p| p.entity(min)).collect()),
+            entities: (!props.is_empty()).then(|| props.iter().map(|p| p.entity(min)).collect()),
             metadata: Metadata {
                 name: name.to_string(),
                 author: "src2mc".to_string(),
@@ -225,13 +224,15 @@ pub fn write_all(
     name: &str,
 ) -> Result<()> {
     let nbt = encode_all(blocks, props, palette, min, max, name)?;
-    let file = std::fs::File::create(path)
-        .with_context(|| format!("creating {}", path.display()))?;
+    let file =
+        std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
     let mut encoder = GzEncoder::new(file, Compression::default());
     encoder
         .write_all(&nbt)
         .with_context(|| format!("writing {}", path.display()))?;
-    encoder.finish().with_context(|| format!("finishing {}", path.display()))?;
+    encoder
+        .finish()
+        .with_context(|| format!("finishing {}", path.display()))?;
     Ok(())
 }
 
@@ -323,12 +324,21 @@ mod tests {
 
         let nbt = encode(&grid, &palette, [-5, 10, 7], [-5, 10, 7], "tile").unwrap();
         let root: HashMap<String, Value> = fastnbt::from_bytes(&nbt).unwrap();
-        let Value::Compound(schematic) = &root["Schematic"] else { panic!() };
+        let Value::Compound(schematic) = &root["Schematic"] else {
+            panic!()
+        };
 
-        assert_eq!(schematic["Offset"], Value::IntArray(IntArray::new(vec![-5, 10, 7])));
+        assert_eq!(
+            schematic["Offset"],
+            Value::IntArray(IntArray::new(vec![-5, 10, 7]))
+        );
 
-        let Value::Compound(blocks) = &schematic["Blocks"] else { panic!() };
-        let Value::Compound(written) = &blocks["Palette"] else { panic!() };
+        let Value::Compound(blocks) = &schematic["Blocks"] else {
+            panic!()
+        };
+        let Value::Compound(written) = &blocks["Palette"] else {
+            panic!()
+        };
         assert_eq!(written["minecraft:air"], Value::Int(0));
         assert_eq!(written["minecraft:stone"], Value::Int(1));
     }
@@ -361,9 +371,15 @@ mod tests {
 
         let nbt = encode_blocks(&blocks, &palette, [0, 0, 0], [1, 1, 1], "clip").unwrap();
         let root: HashMap<String, Value> = fastnbt::from_bytes(&nbt).unwrap();
-        let Value::Compound(schematic) = &root["Schematic"] else { panic!() };
-        let Value::Compound(b) = &schematic["Blocks"] else { panic!() };
-        let Value::ByteArray(data) = &b["Data"] else { panic!() };
+        let Value::Compound(schematic) = &root["Schematic"] else {
+            panic!()
+        };
+        let Value::Compound(b) = &schematic["Blocks"] else {
+            panic!()
+        };
+        let Value::ByteArray(data) = &b["Data"] else {
+            panic!()
+        };
 
         let ids = read_varints(data, 8);
         assert_eq!(ids[0], stone as u32, "the in-region block survives");
@@ -378,7 +394,15 @@ mod tests {
 
         let mut palette = Palette::new();
         let stone = palette.intern("minecraft:stone");
-        write(&path, &[([0, 0, 0], stone)], &palette, [0, 0, 0], [1, 1, 1], "t").unwrap();
+        write(
+            &path,
+            &[([0, 0, 0], stone)],
+            &palette,
+            [0, 0, 0],
+            [1, 1, 1],
+            "t",
+        )
+        .unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[0..2], &[0x1f, 0x8b], "gzip magic");
 

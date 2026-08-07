@@ -145,12 +145,20 @@ mod tests {
                 surface.index,
                 surface.normal
             );
-            assert!(surface.material.is_some(), "displacement {} has no material", surface.index);
+            assert!(
+                surface.material.is_some(),
+                "displacement {} has no material",
+                surface.index
+            );
         }
 
         // Terrain is mostly ground, so most displacements should face up.
         let up = surfaces.iter().filter(|s| s.normal.z > 0.5).count();
-        assert!(up * 2 > surfaces.len(), "only {up} of {} face up", surfaces.len());
+        assert!(
+            up * 2 > surfaces.len(),
+            "only {up} of {} face up",
+            surfaces.len()
+        );
     }
 
     #[test]

@@ -17,6 +17,10 @@ use crate::source::vfs::Vfs;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// One material's triangles and the texture coordinates of their corners, as
+/// they are gathered before becoming a [`Part`].
+type Geometry = (Vec<[Vec3; 3]>, Vec<[[f64; 2]; 3]>);
+
 /// One model's triangles that share a material.
 #[derive(Debug, Clone)]
 pub struct Part {
@@ -122,7 +126,10 @@ pub struct Models<'a> {
 
 impl<'a> Models<'a> {
     pub fn new(vfs: &'a Vfs) -> Models<'a> {
-        Models { vfs, cache: HashMap::new() }
+        Models {
+            vfs,
+            cache: HashMap::new(),
+        }
     }
 
     /// The model at `path` (`models/props_c17/fence01a.mdl`), or `None` if it
@@ -139,7 +146,10 @@ impl<'a> Models<'a> {
 
     /// How many distinct models have been asked for, and how many resolved.
     pub fn stats(&self) -> (usize, usize) {
-        (self.cache.len(), self.cache.values().filter(|m| m.is_some()).count())
+        (
+            self.cache.len(),
+            self.cache.values().filter(|m| m.is_some()).count(),
+        )
     }
 
     fn load(&self, key: &str) -> Option<Model> {
@@ -179,7 +189,7 @@ impl<'a> Models<'a> {
             Vec3::new(t.x as f64, t.y as f64, t.z as f64)
         };
 
-        let mut parts: HashMap<String, (Vec<[Vec3; 3]>, Vec<[[f64; 2]; 3]>)> = HashMap::new();
+        let mut parts: HashMap<String, Geometry> = HashMap::new();
         let vertices = model.vertices();
 
         for mesh in model.meshes() {
@@ -189,7 +199,9 @@ impl<'a> Models<'a> {
                 let indices: Vec<usize> = strip.collect();
                 for tri in indices.chunks_exact(3) {
                     let corners = [tri[0], tri[1], tri[2]].map(|i| vertices.get(i));
-                    let [Some(a), Some(b), Some(c)] = corners else { continue };
+                    let [Some(a), Some(b), Some(c)] = corners else {
+                        continue;
+                    };
                     triangles.push([place(a.position), place(b.position), place(c.position)]);
                     uvs.push([a, b, c].map(|v| -> [f64; 2] {
                         std::array::from_fn(|axis| f64::from(v.texture_coordinates[axis]))
@@ -239,7 +251,14 @@ impl<'a> Models<'a> {
                 .iter()
                 .map(|dir| {
                     let dir = dir.replace('\\', "/").to_ascii_lowercase();
-                    format!("{}{name}", if dir.ends_with('/') { dir } else { format!("{dir}/") })
+                    format!(
+                        "{}{name}",
+                        if dir.ends_with('/') {
+                            dir
+                        } else {
+                            format!("{dir}/")
+                        }
+                    )
                 })
                 .collect()
         };
@@ -273,7 +292,11 @@ mod tests {
             panic!("a stock HL2 prop should be on the search path")
         };
 
-        assert!(model.triangle_count() > 4, "only {} triangles", model.triangle_count());
+        assert!(
+            model.triangle_count() > 4,
+            "only {} triangles",
+            model.triangle_count()
+        );
         assert!(!model.bounds.is_empty());
         for part in &model.parts {
             assert!(!part.material.is_empty());
@@ -305,7 +328,9 @@ mod tests {
     fn triangles_agree_with_the_declared_bounds() {
         let Some(vfs) = vfs() else { return };
         let mut models = Models::new(&vfs);
-        let Some(model) = models.get("models/props_c17/fence01a.mdl") else { return };
+        let Some(model) = models.get("models/props_c17/fence01a.mdl") else {
+            return;
+        };
 
         let mut actual = Aabb::empty();
         for tri in model.parts.iter().flat_map(|p| &p.triangles) {
@@ -333,7 +358,9 @@ mod tests {
     fn models_report_a_plausible_uv_rate() {
         let Some(vfs) = vfs() else { return };
         let mut models = Models::new(&vfs);
-        let Some(model) = models.get("models/props_c17/fence01a.mdl") else { return };
+        let Some(model) = models.get("models/props_c17/fence01a.mdl") else {
+            return;
+        };
 
         for part in &model.parts {
             assert!(part.uv_per_unit > 0.0, "{} has no UV rate", part.material);
@@ -361,12 +388,7 @@ mod tests {
         ) else {
             return;
         };
-        let rate = |m: &Arc<Model>| {
-            m.parts
-                .iter()
-                .map(|p| p.uv_per_unit)
-                .fold(0.0f64, f64::max)
-        };
+        let rate = |m: &Arc<Model>| m.parts.iter().map(|p| p.uv_per_unit).fold(0.0f64, f64::max);
         assert!(
             rate(&cliff) < rate(&fence),
             "cliff {} should stretch further than fence {}",
@@ -381,11 +403,14 @@ mod tests {
     fn model_materials_resolve_on_the_search_path() {
         let Some(vfs) = vfs() else { return };
         let mut models = Models::new(&vfs);
-        let Some(model) = models.get("models/props_c17/fence01a.mdl") else { return };
+        let Some(model) = models.get("models/props_c17/fence01a.mdl") else {
+            return;
+        };
 
         for part in &model.parts {
             assert!(
-                vfs.open(&format!("materials/{}.vmt", part.material)).is_some(),
+                vfs.open(&format!("materials/{}.vmt", part.material))
+                    .is_some(),
                 "{} does not resolve",
                 part.material
             );
@@ -413,4 +438,3 @@ mod tests {
         assert_eq!(models.stats().0, 1);
     }
 }
-

@@ -95,8 +95,9 @@ impl MaterialScale {
 
         // Round to whole blocks so the tile grid lines up with the texture's
         // own repeat, rather than drifting a fraction of a block per tile.
-        let blocks: [u32; 2] =
-            std::array::from_fn(|axis| (spanned[axis].round() as i64).clamp(1, i64::from(u32::MAX)) as u32);
+        let blocks: [u32; 2] = std::array::from_fn(|axis| {
+            (spanned[axis].round() as i64).clamp(1, i64::from(u32::MAX)) as u32
+        });
         // And never finer than the source can feed. Below one source texel per
         // output pixel a tile is upscaled mush: cutting a 512-pixel texture
         // 128 ways leaves four texels to fill a 16x16 block face. Past this
@@ -114,7 +115,11 @@ impl MaterialScale {
                 .clamp(1, self.size[axis].max(1))
         });
 
-        Split { grid, texels_per_tile, window }
+        Split {
+            grid,
+            texels_per_tile,
+            window,
+        }
     }
 }
 
@@ -152,8 +157,12 @@ pub fn material_scales(map: &crate::bsp::Map) -> Vec<Option<MaterialScale>> {
     let mut samples: Vec<Vec<[f64; 2]>> = vec![Vec::new(); map.materials().len()];
 
     for info in &map.bsp.textures_info {
-        let Ok(index) = usize::try_from(info.texture_data_index) else { continue };
-        let Some(bucket) = samples.get_mut(index) else { continue };
+        let Ok(index) = usize::try_from(info.texture_data_index) else {
+            continue;
+        };
+        let Some(bucket) = samples.get_mut(index) else {
+            continue;
+        };
         let rate = TexCoord::of(info).texels_per_unit();
         if rate[0] > 0.0 && rate[1] > 0.0 && rate[0].is_finite() && rate[1].is_finite() {
             bucket.push(rate);
@@ -165,18 +174,28 @@ pub fn material_scales(map: &crate::bsp::Map) -> Vec<Option<MaterialScale>> {
         .enumerate()
         .map(|(index, mut rates)| {
             let data = map.bsp.textures_data.get(index)?;
-            let size = [u32::try_from(data.width).ok()?, u32::try_from(data.height).ok()?];
+            let size = [
+                u32::try_from(data.width).ok()?,
+                u32::try_from(data.height).ok()?,
+            ];
             if size[0] == 0 || size[1] == 0 || rates.is_empty() {
                 return None;
             }
-            Some(MaterialScale { size, texels_per_unit: median(&mut rates) })
+            Some(MaterialScale {
+                size,
+                texels_per_unit: median(&mut rates),
+            })
         })
         .collect()
 }
 
 fn median(rates: &mut [[f64; 2]]) -> [f64; 2] {
     std::array::from_fn(|axis| {
-        rates.sort_by(|a, b| a[axis].partial_cmp(&b[axis]).unwrap_or(std::cmp::Ordering::Equal));
+        rates.sort_by(|a, b| {
+            a[axis]
+                .partial_cmp(&b[axis])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         rates[rates.len() / 2][axis]
     })
 }
@@ -219,7 +238,10 @@ mod tests {
     /// eight Minecraft blocks of wall.
     #[test]
     fn a_default_scaled_texture_spans_eight_blocks() {
-        let scale = MaterialScale { size: [512, 512], texels_per_unit: [4.0, 4.0] };
+        let scale = MaterialScale {
+            size: [512, 512],
+            texels_per_unit: [4.0, 4.0],
+        };
         assert_eq!(scale.blocks_spanned(16.0), [8.0, 8.0]);
         // Half the units per block, twice the blocks.
         assert_eq!(scale.blocks_spanned(8.0), [16.0, 16.0]);
@@ -240,13 +262,15 @@ mod tests {
             ([2048, 512], 4.0),   // wider than tall
             ([64, 64], 16.0),     // a quarter of a block
         ] {
-            let scale = MaterialScale { size, texels_per_unit: [rate, rate] };
+            let scale = MaterialScale {
+                size,
+                texels_per_unit: [rate, rate],
+            };
             let split = scale.split(16.0, 8, 16);
             let spanned = scale.blocks_spanned(16.0);
 
             for axis in 0..2 {
-                let blocks_per_tile =
-                    split.texels_per_tile[axis] / (rate * 16.0);
+                let blocks_per_tile = split.texels_per_tile[axis] / (rate * 16.0);
                 assert!(
                     blocks_per_tile < 1.5,
                     "{size:?} at {rate} texels/unit: one tile covers                      {blocks_per_tile:.1} blocks",
@@ -278,7 +302,10 @@ mod tests {
         ] {
             // A rate stretched far enough that the span alone would allow far
             // more tiles than the texture has detail for.
-            let scale = MaterialScale { size, texels_per_unit: [0.05, 0.05] };
+            let scale = MaterialScale {
+                size,
+                texels_per_unit: [0.05, 0.05],
+            };
             let split = scale.split(16.0, 1024, out);
             assert_eq!(
                 split.grid,
@@ -299,7 +326,10 @@ mod tests {
     /// long before the resolution does.
     #[test]
     fn the_resolution_limit_leaves_normal_textures_alone() {
-        let scale = MaterialScale { size: [512, 512], texels_per_unit: [4.0, 4.0] };
+        let scale = MaterialScale {
+            size: [512, 512],
+            texels_per_unit: [4.0, 4.0],
+        };
         assert_eq!(scale.split(16.0, 16, 16).grid, [8, 8]);
         assert_eq!(scale.split(16.0, 64, 16).grid, [8, 8]);
     }
@@ -308,7 +338,10 @@ mod tests {
     /// the case that already looked right and must not regress.
     #[test]
     fn a_texture_that_fits_the_cap_is_used_whole() {
-        let scale = MaterialScale { size: [512, 512], texels_per_unit: [4.0, 4.0] };
+        let scale = MaterialScale {
+            size: [512, 512],
+            texels_per_unit: [4.0, 4.0],
+        };
         let split = scale.split(16.0, 8, 16);
         assert_eq!(split.grid, [8, 8]);
         assert_eq!(split.texels_per_tile, [64.0, 64.0]);
@@ -320,11 +353,18 @@ mod tests {
     #[test]
     fn a_texture_over_the_cap_uses_a_window_of_itself() {
         // 32 blocks of wall from a 512 texture: one block is 16 texels.
-        let scale = MaterialScale { size: [512, 512], texels_per_unit: [1.0, 1.0] };
+        let scale = MaterialScale {
+            size: [512, 512],
+            texels_per_unit: [1.0, 1.0],
+        };
         let split = scale.split(16.0, 8, 16);
         assert_eq!(split.grid, [8, 8]);
         assert_eq!(split.texels_per_tile, [16.0, 16.0]);
-        assert_eq!(split.window, [128, 128], "only a quarter of the texture is used");
+        assert_eq!(
+            split.window,
+            [128, 128],
+            "only a quarter of the texture is used"
+        );
         assert!(!split.is_whole(scale.size));
 
         // Raising the cap widens the window without changing the tile size.
@@ -338,7 +378,10 @@ mod tests {
     #[test]
     fn a_texture_smaller_than_a_block_is_a_single_tile() {
         // A quarter of a block: rounding the span would give zero tiles.
-        let scale = MaterialScale { size: [64, 64], texels_per_unit: [16.0, 16.0] };
+        let scale = MaterialScale {
+            size: [64, 64],
+            texels_per_unit: [16.0, 16.0],
+        };
         assert_eq!(scale.blocks_spanned(16.0), [0.25, 0.25]);
 
         let split = scale.split(16.0, 8, 16);
@@ -349,7 +392,10 @@ mod tests {
 
     #[test]
     fn a_degenerate_rate_spans_one_block_rather_than_dividing_by_zero() {
-        let scale = MaterialScale { size: [512, 512], texels_per_unit: [0.0, 0.0] };
+        let scale = MaterialScale {
+            size: [512, 512],
+            texels_per_unit: [0.0, 0.0],
+        };
         assert_eq!(scale.blocks_spanned(16.0), [1.0, 1.0]);
     }
 
@@ -376,7 +422,11 @@ mod tests {
         assert_eq!(scales.len(), map.materials().len());
 
         let found: Vec<MaterialScale> = scales.into_iter().flatten().collect();
-        assert!(found.len() > 50, "only {} materials had a scale", found.len());
+        assert!(
+            found.len() > 50,
+            "only {} materials had a scale",
+            found.len()
+        );
 
         let mut multi_block = 0;
         for scale in &found {

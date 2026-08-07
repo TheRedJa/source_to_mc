@@ -59,7 +59,13 @@ impl SeparateEntity {
             .unwrap_or("unnamed");
         let sanitized: String = label
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         // The entity index keeps two doors with the same targetname apart.
         format!("{}_{}_{}", self.classname, sanitized, self.entity)
@@ -200,7 +206,10 @@ fn models_to_convert(map: &Map, config: &Config, entities: &[EntityModel]) -> Ve
             // entity claims falls back to the global setting rather than being
             // dropped, so malformed entity data cannot silently lose geometry.
             *model == 0
-                || modes.get(model).copied().unwrap_or(config.entities.brush_entities)
+                || modes
+                    .get(model)
+                    .copied()
+                    .unwrap_or(config.entities.brush_entities)
                     == BrushEntityMode::Include
         })
         .collect()
@@ -281,18 +290,16 @@ fn voxelize_displacement(
     let inward = transform.transform_direction(-surface.normal);
     // Terrain is world geometry like any other, so a split texture is chosen
     // by the same world projection the brushes use.
-    let uv = tiles
-        .zip(surface.texcoord)
-        .map(|(set, tex)| {
-            let uv = Uv::new(
-                tex,
-                transform,
-                Vec3::ZERO,
-                set.texels_per_tile,
-                transform.units_per_block(),
-            );
-            (uv, set)
-        });
+    let uv = tiles.zip(surface.texcoord).map(|(set, tex)| {
+        let uv = Uv::new(
+            tex,
+            transform,
+            Vec3::ZERO,
+            set.texels_per_tile,
+            transform.units_per_block(),
+        );
+        (uv, set)
+    });
 
     for tri in &surface.triangles {
         let mapped = Triangle::new(
@@ -487,7 +494,11 @@ impl Uv {
         let divisor: [f64; 2] = std::array::from_fn(|axis| {
             let face = per_block[axis] * units_per_block;
             let tile = texels_per_tile[axis];
-            if face > 0.0 && face.is_finite() { face.min(tile) } else { tile }
+            if face > 0.0 && face.is_finite() {
+                face.min(tile)
+            } else {
+                tile
+            }
             .max(f64::MIN_POSITIVE)
         });
 
@@ -544,7 +555,11 @@ fn tile_sets(
                     ids.push(palette.lock().unwrap().intern(&id));
                 }
             }
-            Some(TileSet { grid, texels_per_tile, ids })
+            Some(TileSet {
+                grid,
+                texels_per_tile,
+                ids,
+            })
         })
         .collect()
 }
@@ -555,11 +570,7 @@ fn tile_sets(
 /// so a voxel centre slightly off the surface still lands somewhere sensible.
 /// A degenerate triangle falls back to the first corner rather than dividing
 /// by zero.
-fn interpolate(
-    tri: &crate::voxel::mesh::Triangle,
-    corners: &[[f64; 2]; 3],
-    p: Vec3,
-) -> [f64; 2] {
+fn interpolate(tri: &crate::voxel::mesh::Triangle, corners: &[[f64; 2]; 3], p: Vec3) -> [f64; 2] {
     let (v0, v1, v2) = (tri.b - tri.a, tri.c - tri.a, p - tri.a);
     let (d00, d01, d11) = (v0.dot(v0), v0.dot(v1), v1.dot(v1));
     let denom = d00 * d11 - d01 * d01;
@@ -574,6 +585,9 @@ fn interpolate(
 }
 
 /// Voxelize a set of brushes into one grid, interning blocks into `palette`.
+// Every argument here is one of the conversion's inputs; bundling them into a
+// struct would only move the same list somewhere else.
+#[allow(clippy::too_many_arguments)]
 fn voxelize_solids(
     solids: &[Solid],
     map: &Map,
@@ -591,88 +605,94 @@ fn voxelize_solids(
 
     solids
         .par_iter()
-        .fold(|| (VoxelGrid::new(), MaskGrid::new()), |(mut grid, mut masks), solid| {
-            let decision = resolver.decide(solid.flags);
-            if decision == Decision::Skip {
-                skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return (grid, masks);
-            }
+        .fold(
+            || (VoxelGrid::new(), MaskGrid::new()),
+            |(mut grid, mut masks), solid| {
+                let decision = resolver.decide(solid.flags);
+                if decision == Decision::Skip {
+                    skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return (grid, masks);
+                }
 
-            let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
-            let block_solid = to_block_solid(solid, transform, origin);
+                let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
+                let block_solid = to_block_solid(solid, transform, origin);
 
-            // Resolve the block for each side once, rather than per voxel.
-            let side_blocks: Vec<Option<BlockId>> = solid
-                .sides
-                .iter()
-                .map(|side| {
-                    let material = side.texture_info.and_then(|i| map.material_index(i));
-                    side_block(&decision, resolver, material, side.texture_flags, skip_sky)
-                        .map(|name| palette.lock().unwrap().intern(name))
-                })
-                .collect();
+                // Resolve the block for each side once, rather than per voxel.
+                let side_blocks: Vec<Option<BlockId>> = solid
+                    .sides
+                    .iter()
+                    .map(|side| {
+                        let material = side.texture_info.and_then(|i| map.material_index(i));
+                        side_block(&decision, resolver, material, side.texture_flags, skip_sky)
+                            .map(|name| palette.lock().unwrap().intern(name))
+                    })
+                    .collect();
 
-            // A brush whose every side was vetoed contributes nothing.
-            if side_blocks.iter().all(Option::is_none) {
-                skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return (grid, masks);
-            }
-            // The side a voxel falls back to when its own nearest face is one
-            // the engine never draws. Half a brush's sides are nodraw, so this
-            // is not a rare case: it decides the block for a large share of
-            // the voxels in the map, and taking the tiled path here too is
-            // what keeps a wall from being half one repeated tile.
-            let default_side = side_blocks.iter().position(Option::is_some);
+                // A brush whose every side was vetoed contributes nothing.
+                if side_blocks.iter().all(Option::is_none) {
+                    skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return (grid, masks);
+                }
+                // The side a voxel falls back to when its own nearest face is one
+                // the engine never draws. Half a brush's sides are nodraw, so this
+                // is not a rare case: it decides the block for a large share of
+                // the voxels in the map, and taking the tiled path here too is
+                // what keeps a wall from being half one repeated tile.
+                let default_side = side_blocks.iter().position(Option::is_some);
 
-            // Where a face's material was split across several blocks, the
-            // projection that says which piece belongs at each voxel.
-            let side_tiles: Vec<Option<(Uv, &TileSet)>> = solid
-                .sides
-                .iter()
-                .map(|side| {
-                    let info_index = side.texture_info?;
-                    let set = tiles.get(map.material_index(info_index)?)?.as_ref()?;
-                    let info = map.bsp.textures_info.get(info_index)?;
-                    let tex = crate::bsp::texcoord::TexCoord::of(info);
-                    let uv = Uv::new(
-                        tex,
-                        transform,
-                        origin,
-                        set.texels_per_tile,
-                        transform.units_per_block(),
+                // Where a face's material was split across several blocks, the
+                // projection that says which piece belongs at each voxel.
+                let side_tiles: Vec<Option<(Uv, &TileSet)>> = solid
+                    .sides
+                    .iter()
+                    .map(|side| {
+                        let info_index = side.texture_info?;
+                        let set = tiles.get(map.material_index(info_index)?)?.as_ref()?;
+                        let info = map.bsp.textures_info.get(info_index)?;
+                        let tex = crate::bsp::texcoord::TexCoord::of(info);
+                        let uv = Uv::new(
+                            tex,
+                            transform,
+                            origin,
+                            set.texels_per_tile,
+                            transform.units_per_block(),
+                        );
+                        Some((uv, set))
+                    })
+                    .collect();
+
+                let block_of = |side: usize, pos: IVec3| -> Option<BlockId> {
+                    let base = side_blocks.get(side).copied().flatten()?;
+                    let Some((uv, set)) = side_tiles.get(side).and_then(Option::as_ref) else {
+                        return Some(base);
+                    };
+                    let centre = Vec3::new(
+                        pos[0] as f64 + 0.5,
+                        pos[1] as f64 + 0.5,
+                        pos[2] as f64 + 0.5,
                     );
-                    Some((uv, set))
-                })
-                .collect();
-
-            let block_of = |side: usize, pos: IVec3| -> Option<BlockId> {
-                let base = side_blocks.get(side).copied().flatten()?;
-                let Some((uv, set)) = side_tiles.get(side).and_then(Option::as_ref) else {
-                    return Some(base);
+                    let (s, t) = uv.at(centre);
+                    Some(set.at(s, t))
                 };
-                let centre =
-                    Vec3::new(pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5);
-                let (s, t) = uv.at(centre);
-                Some(set.at(s, t))
-            };
 
-            crate::voxel::brush::voxelize_with_shape(
-                &block_solid,
-                &config.output.voxelize,
-                |pos, side, mask| {
-                    let block = side
-                        .and_then(|s| block_of(s, pos))
-                        .or_else(|| default_side.and_then(|s| block_of(s, pos)));
-                    if let Some(block) = block {
-                        grid.set(pos, block);
-                        if want_masks {
-                            masks.add(pos, mask);
+                crate::voxel::brush::voxelize_with_shape(
+                    &block_solid,
+                    &config.output.voxelize,
+                    |pos, side, mask| {
+                        let block = side
+                            .and_then(|s| block_of(s, pos))
+                            .or_else(|| default_side.and_then(|s| block_of(s, pos)));
+                        if let Some(block) = block {
+                            grid.set(pos, block);
+                            if want_masks {
+                                masks.add(pos, mask);
+                            }
                         }
-                    }
-                },
-            );
-            (grid, masks)
-        })
+                    },
+                );
+                (grid, masks)
+            },
+        )
         .reduce(
             || (VoxelGrid::new(), MaskGrid::new()),
             |(mut ga, mut ma), (gb, mb)| {
@@ -784,8 +804,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
                 return None;
             }
             let (grid, _) = voxelize_solids(
-                &solids, map, config, &resolver, &transform, &origins, &tiles, &palette,
-                &skipped,
+                &solids, map, config, &resolver, &transform, &origins, &tiles, &palette, &skipped,
             );
             (grid.count() > 0).then(|| SeparateEntity {
                 entity: entity.entity,
@@ -820,11 +839,13 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
                         &transform,
                         config.displacement.solidify,
                         block,
-                        surface.material.and_then(|m| tiles.get(m)).and_then(Option::as_ref),
+                        surface
+                            .material
+                            .and_then(|m| tiles.get(m))
+                            .and_then(Option::as_ref),
                     )),
                     None => {
-                        displacements_skipped
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        displacements_skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
                 grid
@@ -877,7 +898,13 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
                 uvs: Vec::new(),
                 material: 0,
             };
-            grid.merge(voxelize_prop(&surface, &transform, config.props.solidify, barrier, None));
+            grid.merge(voxelize_prop(
+                &surface,
+                &transform,
+                config.props.solidify,
+                barrier,
+                None,
+            ));
             grid
         })
         .reduce(VoxelGrid::new, |mut a, b| {
@@ -972,7 +999,9 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             if config.props.bake_max_size > 0.0 && longest > config.props.bake_max_size {
                 continue;
             }
-            let Some(mesh) = assets.prop_meshes.get(placement.mesh) else { continue };
+            let Some(mesh) = assets.prop_meshes.get(placement.mesh) else {
+                continue;
+            };
 
             let quaternion = crate::output::display::rotation(&placement.prop, &transform);
             let rounded = crate::output::display::dequantize(crate::output::display::quantize(
@@ -988,8 +1017,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             // and masks off the rest, so a mesh reaching too far folds back on
             // itself. Anything that big is carried by several blocks instead.
             let reach = config.props.bake_reach.max(f64::MIN_POSITIVE);
-            let pieces =
-                mesh.split(basis, placement.prop.scale, reach);
+            let pieces = mesh.split(basis, placement.prop.scale, reach);
 
             // All of a prop's pieces are placed or none of them is: half a
             // gantry is worse than a gantry drawn the slow way. Cells are
@@ -1047,7 +1075,11 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
                     let asset = mesh.asset(id.clone(), Some(&place), Some(piece));
                     pack.insert_prop(asset, Vec::new());
                 }
-                baked.push((index, cell, format!("{}:{id}", crate::output::kubejs::NAMESPACE)));
+                baked.push((
+                    index,
+                    cell,
+                    format!("{}:{id}", crate::output::kubejs::NAMESPACE),
+                ));
             }
         }
     }
@@ -1079,7 +1111,9 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let palette = palette;
     let mut block_counts: BTreeMap<String, usize> = BTreeMap::new();
     for (_, id) in grid.iter() {
-        *block_counts.entry(palette.name(id).to_string()).or_default() += 1;
+        *block_counts
+            .entry(palette.name(id).to_string())
+            .or_default() += 1;
     }
 
     let skipped = skipped.into_inner();
@@ -1175,12 +1209,12 @@ mod tests {
         let materials = [material("tools/toolsfog"), material("tools/toolsinvisible")];
         let r = resolver(&materials);
         let glass = Decision::Force("minecraft:glass".into());
-        for index in 0..materials.len() {
+        for (index, material) in materials.iter().enumerate() {
             assert_eq!(
                 side_block(&glass, &r, Some(index), TextureFlags::empty(), true),
                 None,
                 "{} became glass",
-                materials[index].name
+                material.name
             );
         }
     }
@@ -1260,7 +1294,14 @@ mod tests {
             );
         }
         assert!(
-            side_block(&Decision::ByMaterial, &r, Some(0), TextureFlags::empty(), true).is_some()
+            side_block(
+                &Decision::ByMaterial,
+                &r,
+                Some(0),
+                TextureFlags::empty(),
+                true
+            )
+            .is_some()
         );
     }
 
@@ -1294,7 +1335,10 @@ mod tests {
 
         assert!(result.stats.blocks > 10_000, "got {}", result.stats.blocks);
         assert!(result.stats.solids_voxelized > 0);
-        assert!(result.palette.len() > 1, "palette should hold more than air");
+        assert!(
+            result.palette.len() > 1,
+            "palette should hold more than air"
+        );
 
         // Hollowing must remove a substantial share of a solid map.
         assert!(
@@ -1324,10 +1368,7 @@ mod tests {
             .iter()
             .max_by_key(|(_, count)| **count)
             .unwrap();
-        assert!(
-            count * 2 < total,
-            "{block} is {count} of {total} blocks"
-        );
+        assert!(count * 2 < total, "{block} is {count} of {total} blocks");
         assert!(
             result.stats.block_counts.len() > 8,
             "only {} block types",
@@ -1353,7 +1394,9 @@ mod tests {
             if origin.x == 0.0 && origin.y == 0.0 && origin.z == 0.0 {
                 continue;
             }
-            let Some(solid) = map.solids(*model).into_iter().next() else { continue };
+            let Some(solid) = map.solids(*model).into_iter().next() else {
+                continue;
+            };
             let placed = to_block_solid(&solid, &transform, *origin).bounds;
             let entity = transform.to_block_space(*origin);
 
@@ -1388,11 +1431,15 @@ mod tests {
             if origin.x == 0.0 && origin.y == 0.0 && origin.z == 0.0 {
                 continue;
             }
-            let Some(solid) = map.solids(*model).into_iter().next() else { continue };
+            let Some(solid) = map.solids(*model).into_iter().next() else {
+                continue;
+            };
             let entity = transform.to_block_space(*origin);
-            with_total += (to_block_solid(&solid, &transform, *origin).bounds.center() - entity)
-                .length();
-            without_total += (to_block_solid(&solid, &transform, Vec3::ZERO).bounds.center()
+            with_total +=
+                (to_block_solid(&solid, &transform, *origin).bounds.center() - entity).length();
+            without_total += (to_block_solid(&solid, &transform, Vec3::ZERO)
+                .bounds
+                .center()
                 - entity)
                 .length();
             count += 1;
@@ -1425,7 +1472,9 @@ mod tests {
         let mut generated = 0;
         for id in 0..result.palette.len() {
             let name = result.palette.name(id as crate::voxel::grid::BlockId);
-            let Some(_) = name.strip_prefix("kubejs:") else { continue };
+            let Some(_) = name.strip_prefix("kubejs:") else {
+                continue;
+            };
             generated += 1;
             assert!(
                 script.contains(&format!("event.create('{name}')")),
@@ -1447,8 +1496,8 @@ mod tests {
         if result.pack.is_empty() {
             return;
         }
-        let resolver = Resolver::with_textures(&config, map.materials(), &result.pack.ids())
-            .unwrap();
+        let resolver =
+            Resolver::with_textures(&config, map.materials(), &result.pack.ids()).unwrap();
 
         for (index, material) in map.materials().iter().enumerate() {
             if material.name.contains("grate") || material.name.starts_with("glass/") {
@@ -1470,7 +1519,10 @@ mod tests {
         assert!(result.pack.is_empty());
         for id in 0..result.palette.len() {
             let name = result.palette.name(id as crate::voxel::grid::BlockId);
-            assert!(name.starts_with("minecraft:"), "vanilla mode emitted {name}");
+            assert!(
+                name.starts_with("minecraft:"),
+                "vanilla mode emitted {name}"
+            );
         }
     }
 
@@ -1675,7 +1727,10 @@ mod tests {
         for (_, id) in on.grid.iter() {
             let name = on.palette.name(id);
             if name.contains(":prop_") {
-                assert!(on.pack.prop(name).is_some(), "{name} is placed but not registered");
+                assert!(
+                    on.pack.prop(name).is_some(),
+                    "{name} is placed but not registered"
+                );
                 blocks += 1;
             }
         }
@@ -1807,7 +1862,10 @@ mod tests {
         // A wall in the X/Z plane at four texels per unit: 16 units per block
         // is 64 texels, and a 512-pixel texture split into 8 gives 64-texel
         // tiles. So one block of wall is exactly one tile.
-        let tex = TexCoord { u: [4.0, 0.0, 0.0, 0.0], v: [0.0, 0.0, -4.0, 0.0] };
+        let tex = TexCoord {
+            u: [4.0, 0.0, 0.0, 0.0],
+            v: [0.0, 0.0, -4.0, 0.0],
+        };
         let uv = Uv::new(tex, &transform, Vec3::ZERO, [64.0, 64.0], 16.0);
         let set = TileSet {
             grid: [8, 8],
@@ -1885,7 +1943,11 @@ mod tests {
             // more than one tile per block, so it cycles the grid faster and
             // legitimately shows fewer distinct tiles. That shows no repeat,
             // which is why it is left exact rather than corrected.
-            let want = if rate * 16.0 <= set.texels_per_tile[0] { 8 } else { 4 };
+            let want = if rate * 16.0 <= set.texels_per_tile[0] {
+                8
+            } else {
+                4
+            };
             assert!(
                 distinct.len() >= want,
                 "at {rate} texels/unit only {} distinct tiles over 16 blocks",
@@ -1901,7 +1963,10 @@ mod tests {
         use crate::bsp::texcoord::TexCoord;
         let config = Config::default();
         let transform = Transform::new(&config, Aabb::new(Vec3::ZERO, Vec3::splat(256.0)));
-        let tex = TexCoord { u: [0.0; 4], v: [0.0; 4] };
+        let tex = TexCoord {
+            u: [0.0; 4],
+            v: [0.0; 4],
+        };
         let uv = Uv::new(tex, &transform, Vec3::ZERO, [64.0, 64.0], 16.0);
         let (column, row) = uv.at(Vec3::new(3.0, 4.0, 5.0));
         assert!(column.is_finite() && row.is_finite(), "got {column}, {row}");
@@ -1917,7 +1982,10 @@ mod tests {
         config.transform.origin_mode = crate::config::OriginMode::MapOrigin;
         let transform = Transform::new(&config, Aabb::new(Vec3::ZERO, Vec3::splat(1024.0)));
 
-        let tex = TexCoord { u: [4.0, 0.0, 0.0, 0.0], v: [0.0, 0.0, -4.0, 0.0] };
+        let tex = TexCoord {
+            u: [4.0, 0.0, 0.0, 0.0],
+            v: [0.0, 0.0, -4.0, 0.0],
+        };
         let uv = Uv::new(tex, &transform, Vec3::ZERO, [64.0, 64.0], 16.0);
         let set = TileSet {
             grid: [8, 8],
@@ -1972,7 +2040,10 @@ mod tests {
                     checked += 1;
                 }
             }
-            assert!(checked > 50, "only {checked} materials checked at tile_max {max}");
+            assert!(
+                checked > 50,
+                "only {checked} materials checked at tile_max {max}"
+            );
         }
     }
 
@@ -1984,7 +2055,10 @@ mod tests {
         let config = Config::default();
 
         let mut widened = 0;
-        for scale in crate::bsp::texcoord::material_scales(&map).into_iter().flatten() {
+        for scale in crate::bsp::texcoord::material_scales(&map)
+            .into_iter()
+            .flatten()
+        {
             let small = scale.split(config.scale.units_per_block, 8, 16);
             let large = scale.split(config.scale.units_per_block, 32, 16);
             assert_eq!(
@@ -2017,14 +2091,19 @@ mod tests {
         // busiest material is not most of it.
         let mut per_material: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (name, count) in &result.stats.block_counts {
-            let Some(rest) = name.strip_prefix("kubejs:") else { continue };
+            let Some(rest) = name.strip_prefix("kubejs:") else {
+                continue;
+            };
             let Some((base, _)) = rest.rsplit_once('_').and_then(|(a, b)| {
                 b.parse::<u32>().ok()?;
                 a.rsplit_once('_')
             }) else {
                 continue;
             };
-            per_material.entry(base.to_string()).or_default().push(*count);
+            per_material
+                .entry(base.to_string())
+                .or_default()
+                .push(*count);
         }
 
         let (material, counts) = per_material
@@ -2085,7 +2164,9 @@ mod tests {
 
         let (a, b) = (with.grid.bounds().unwrap(), without.grid.bounds().unwrap());
         let volume = |(min, max): ([i32; 3], [i32; 3])| {
-            (0..3).map(|i| (max[i] - min[i] + 1) as i64).product::<i64>()
+            (0..3)
+                .map(|i| (max[i] - min[i] + 1) as i64)
+                .product::<i64>()
         };
         assert!(
             volume(b) < volume(a),
@@ -2143,4 +2224,3 @@ mod tests {
         assert!(without.stats.blocks <= with.stats.blocks);
     }
 }
-

@@ -145,7 +145,9 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
 }
 
 fn triple(value: &str) -> Option<[f64; 3]> {
-    let mut parts = value.split_whitespace().filter_map(|p| p.parse::<f64>().ok());
+    let mut parts = value
+        .split_whitespace()
+        .filter_map(|p| p.parse::<f64>().ok());
     Some([parts.next()?, parts.next()?, parts.next()?])
 }
 
@@ -171,15 +173,24 @@ mod tests {
     fn an_unrotated_prop_only_moves() {
         let mut p = prop([0.0, 0.0, 0.0]);
         p.origin = Vec3::new(10.0, -20.0, 5.0);
-        assert!(close(p.place(Vec3::new(1.0, 2.0, 3.0)), Vec3::new(11.0, -18.0, 8.0)));
+        assert!(close(
+            p.place(Vec3::new(1.0, 2.0, 3.0)),
+            Vec3::new(11.0, -18.0, 8.0)
+        ));
     }
 
     /// Yaw turns a model about the vertical axis; Source's forward is +X.
     #[test]
     fn yaw_turns_the_model_about_z() {
         let p = prop([0.0, 90.0, 0.0]);
-        assert!(close(p.place(Vec3::new(1.0, 0.0, 0.0)), Vec3::new(0.0, 1.0, 0.0)));
-        assert!(close(p.place(Vec3::new(0.0, 0.0, 1.0)), Vec3::new(0.0, 0.0, 1.0)));
+        assert!(close(
+            p.place(Vec3::new(1.0, 0.0, 0.0)),
+            Vec3::new(0.0, 1.0, 0.0)
+        ));
+        assert!(close(
+            p.place(Vec3::new(0.0, 0.0, 1.0)),
+            Vec3::new(0.0, 0.0, 1.0)
+        ));
     }
 
     /// Positive pitch tips the nose *down* in Source, which is the sign
@@ -187,14 +198,23 @@ mod tests {
     #[test]
     fn positive_pitch_points_forward_downwards() {
         let p = prop([90.0, 0.0, 0.0]);
-        assert!(close(p.place(Vec3::new(1.0, 0.0, 0.0)), Vec3::new(0.0, 0.0, -1.0)));
+        assert!(close(
+            p.place(Vec3::new(1.0, 0.0, 0.0)),
+            Vec3::new(0.0, 0.0, -1.0)
+        ));
     }
 
     #[test]
     fn roll_turns_the_model_about_its_own_forward_axis() {
         let p = prop([0.0, 0.0, 90.0]);
-        assert!(close(p.place(Vec3::new(0.0, 1.0, 0.0)), Vec3::new(0.0, 0.0, 1.0)));
-        assert!(close(p.place(Vec3::new(1.0, 0.0, 0.0)), Vec3::new(1.0, 0.0, 0.0)));
+        assert!(close(
+            p.place(Vec3::new(0.0, 1.0, 0.0)),
+            Vec3::new(0.0, 0.0, 1.0)
+        ));
+        assert!(close(
+            p.place(Vec3::new(1.0, 0.0, 0.0)),
+            Vec3::new(1.0, 0.0, 0.0)
+        ));
     }
 
     /// Rotation must not stretch anything, whatever the angles.
@@ -222,7 +242,10 @@ mod tests {
         let mut p = prop([0.0, 0.0, 0.0]);
         p.origin = Vec3::new(100.0, 0.0, 0.0);
         p.scale = 2.0;
-        assert!(close(p.place(Vec3::new(1.0, 0.0, 0.0)), Vec3::new(102.0, 0.0, 0.0)));
+        assert!(close(
+            p.place(Vec3::new(1.0, 0.0, 0.0)),
+            Vec3::new(102.0, 0.0, 0.0)
+        ));
     }
 
     /// The regression that started the raw-lump reader. Portal 2's static prop
@@ -240,9 +263,17 @@ mod tests {
         }
         let map = crate::bsp::Map::load(path).expect("Portal 2 map should load");
         assert_eq!(map.static_props.version, 9);
-        assert_eq!(map.static_props.stride, 72, "the record size decides the branch");
+        assert_eq!(
+            map.static_props.stride, 72,
+            "the record size decides the branch"
+        );
 
-        let hidden = map.static_props.props.iter().filter(|p| p.no_draw()).count();
+        let hidden = map
+            .static_props
+            .props
+            .iter()
+            .filter(|p| p.no_draw())
+            .count();
         let total = map.static_props.props.len();
         assert!(total > 250, "only {total} static props in the lump");
         assert!(
@@ -250,6 +281,9 @@ mod tests {
             "{hidden} of {total} props read as NO_DRAW; the flags are being taken \
              from the wrong bytes again"
         );
-        assert!(extract(&map).len() > 250, "the props did not survive extraction");
+        assert!(
+            extract(&map).len() > 250,
+            "the props did not survive extraction"
+        );
     }
 }

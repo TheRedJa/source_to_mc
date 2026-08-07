@@ -84,9 +84,21 @@ pub fn basis(prop: &Prop, transform: &Transform) -> [Vec3; 3] {
 pub fn basis_of(q: [f64; 4]) -> [Vec3; 3] {
     let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
     [
-        Vec3::new(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w)),
-        Vec3::new(2.0 * (x * y - z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + x * w)),
-        Vec3::new(2.0 * (x * z + y * w), 2.0 * (y * z - x * w), 1.0 - 2.0 * (x * x + y * y)),
+        Vec3::new(
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y + z * w),
+            2.0 * (x * z - y * w),
+        ),
+        Vec3::new(
+            2.0 * (x * y - z * w),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z + x * w),
+        ),
+        Vec3::new(
+            2.0 * (x * z + y * w),
+            2.0 * (y * z - x * w),
+            1.0 - 2.0 * (x * x + y * y),
+        ),
     ]
 }
 
@@ -112,7 +124,11 @@ pub fn quantize(q: [f64; 4], steps: i64) -> [i64; 4] {
 pub fn dequantize(key: [i64; 4]) -> [f64; 4] {
     let q = key.map(|c| c as f64);
     let length = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-    if length > 0.0 { q.map(|c| c / length) } else { [0.0, 0.0, 0.0, 1.0] }
+    if length > 0.0 {
+        q.map(|c| c / length)
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    }
 }
 
 /// A rotation matrix, given as its columns, as a quaternion `[x, y, z, w]`.
@@ -161,7 +177,11 @@ fn quaternion(m: [Vec3; 3]) -> [f64; 4] {
     // than from an exact matrix and a display entity given a quaternion that
     // is not quite unit renders the model very slightly sheared.
     let length = out.iter().map(|c| c * c).sum::<f64>().sqrt();
-    if length > 0.0 { out.map(|c| c / length) } else { [0.0, 0.0, 0.0, 1.0] }
+    if length > 0.0 {
+        out.map(|c| c / length)
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    }
 }
 
 /// A display entity as the schematic format wants it.
@@ -234,7 +254,9 @@ impl Placement {
                 id: KIND.to_string(),
                 pos: self.pos.to_vec(),
                 rotation: vec![0.0, 0.0],
-                block_state: BlockState { name: self.block.clone() },
+                block_state: BlockState {
+                    name: self.block.clone(),
+                },
                 transformation: self.transformation(),
                 width: self.width,
                 height: self.height,
@@ -319,7 +341,13 @@ pub fn function(placements: &[Placement], map: &str) -> String {
 pub fn tag_for(map: &str) -> String {
     let name: String = map
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("src2mc_{name}")
 }
@@ -381,8 +409,8 @@ mod tests {
                 let mesh = Vec3::new(v.x / units, v.z / units, -v.y / units);
                 let placed = rotate(q, mesh);
                 // Where the vertex really belongs, in block space.
-                let want = transform.to_block_space(prop.place(v))
-                    - transform.to_block_space(prop.origin);
+                let want =
+                    transform.to_block_space(prop.place(v)) - transform.to_block_space(prop.origin);
                 assert!(
                     (placed - want).length() < 1e-9,
                     "{angles:?}: {v:?} placed at {placed:?}, want {want:?}"
@@ -396,15 +424,26 @@ mod tests {
     #[test]
     fn no_rotation_is_the_identity_quaternion() {
         let q = rotation(&prop([0.0, 0.0, 0.0]), &transform());
-        assert!((q[3].abs() - 1.0).abs() < 1e-12, "{q:?} is not the identity");
+        assert!(
+            (q[3].abs() - 1.0).abs() < 1e-12,
+            "{q:?} is not the identity"
+        );
     }
 
     #[test]
     fn quaternions_come_out_unit_length() {
-        for angles in [[0.0, 0.0, 0.0], [180.0, 0.0, 0.0], [0.0, 180.0, 0.0], [45.0, 45.0, 45.0]] {
+        for angles in [
+            [0.0, 0.0, 0.0],
+            [180.0, 0.0, 0.0],
+            [0.0, 180.0, 0.0],
+            [45.0, 45.0, 45.0],
+        ] {
             let q = rotation(&prop(angles), &transform());
             let length = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-            assert!((length - 1.0).abs() < 1e-9, "{angles:?} gave length {length}");
+            assert!(
+                (length - 1.0).abs() < 1e-9,
+                "{angles:?} gave length {length}"
+            );
         }
     }
 
@@ -412,7 +451,12 @@ mod tests {
         Placement {
             block: "kubejs:prop_x".into(),
             pos: [10.5, 64.0, -20.25],
-            rotation: [0.0, std::f64::consts::FRAC_1_SQRT_2, 0.0, std::f64::consts::FRAC_1_SQRT_2],
+            rotation: [
+                0.0,
+                std::f64::consts::FRAC_1_SQRT_2,
+                0.0,
+                std::f64::consts::FRAC_1_SQRT_2,
+            ],
             scale: 1.0,
             width: 2.0,
             height: 3.0,
@@ -439,7 +483,11 @@ mod tests {
     #[test]
     fn every_entity_carries_the_tags_worldedit_demands() {
         let entity = placement().entity([0, 0, 0]);
-        assert_eq!(entity.data.rotation, vec![0.0, 0.0], "Rotation must be present");
+        assert_eq!(
+            entity.data.rotation,
+            vec![0.0, 0.0],
+            "Rotation must be present"
+        );
         assert_eq!(entity.pos.len(), 3, "Pos must be a triple");
         assert!(!entity.id.is_empty(), "Id names the entity type");
         assert!(!entity.data.id.is_empty(), "Data carries the id too");
@@ -464,7 +512,10 @@ mod tests {
 
         assert!(command.starts_with("summon minecraft:block_display 10.500 64.000 -20.250"));
         assert!(command.contains("Name:\"kubejs:prop_x\""));
-        assert!(command.contains("0.707107f"), "the rotation is in the command");
+        assert!(
+            command.contains("0.707107f"),
+            "the rotation is in the command"
+        );
         assert_eq!(
             entity.data.transformation.left_rotation[1],
             std::f64::consts::FRAC_1_SQRT_2 as f32
@@ -492,7 +543,11 @@ mod tests {
         let summon = text.find("summon ").expect("no props");
         assert!(kill < summon, "cleanup has to come first");
         assert!(text.contains("tag=src2mc_d1_trainstation_02"));
-        assert_eq!(text.matches("summon ").count(), 1, "one placement, one summon");
+        assert_eq!(
+            text.matches("summon ").count(),
+            1,
+            "one placement, one summon"
+        );
     }
 
     #[test]

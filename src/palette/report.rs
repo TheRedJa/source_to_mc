@@ -6,8 +6,8 @@
 
 use crate::bsp::Map;
 use crate::config::Config;
-use crate::palette::color::hex;
 use crate::palette::Resolver;
+use crate::palette::color::hex;
 use anyhow::Result;
 use serde::Serialize;
 
@@ -45,7 +45,10 @@ pub fn report(map: &Map, config: &Config) -> Result<MaterialReport> {
     let mut entries: Vec<Entry> = Vec::new();
     for (index, assignment) in resolver.assignments().iter().enumerate() {
         let uses = usage.get(index).copied().unwrap_or(0);
-        match entries.iter_mut().find(|e| e.material == assignment.material) {
+        match entries
+            .iter_mut()
+            .find(|e| e.material == assignment.material)
+        {
             Some(existing) => existing.uses += uses,
             None => entries.push(Entry {
                 material: assignment.material.clone(),
@@ -59,7 +62,11 @@ pub fn report(map: &Map, config: &Config) -> Result<MaterialReport> {
     }
 
     // Most-used first: those are the ones worth writing a rule for.
-    entries.sort_by(|a, b| b.uses.cmp(&a.uses).then_with(|| a.material.cmp(&b.material)));
+    entries.sort_by(|a, b| {
+        b.uses
+            .cmp(&a.uses)
+            .then_with(|| a.material.cmp(&b.material))
+    });
 
     let rules = resolver.rules();
     let unused_rules = rules
@@ -69,7 +76,11 @@ pub fn report(map: &Map, config: &Config) -> Result<MaterialReport> {
         .map(|rule| rule.patterns.join(", "))
         .collect();
 
-    Ok(MaterialReport { map: map.name.clone(), entries, unused_rules })
+    Ok(MaterialReport {
+        map: map.name.clone(),
+        entries,
+        unused_rules,
+    })
 }
 
 impl MaterialReport {
@@ -94,8 +105,8 @@ impl MaterialReport {
 
         let _ = writeln!(
             s,
-            "{:<width$}  {:>6}  {:<7}  {:<28}  {}",
-            "material", "uses", "colour", "block", "by"
+            "{:<width$}  {:>6}  {:<7}  {:<28}  by",
+            "material", "uses", "colour", "block"
         );
         for entry in &self.entries {
             let _ = writeln!(
@@ -117,7 +128,11 @@ impl MaterialReport {
         );
 
         if !self.unused_rules.is_empty() {
-            let _ = writeln!(s, "\n{} rules matched nothing in this map:", self.unused_rules.len());
+            let _ = writeln!(
+                s,
+                "\n{} rules matched nothing in this map:",
+                self.unused_rules.len()
+            );
             for patterns in &self.unused_rules {
                 let _ = writeln!(s, "    {patterns}");
             }
@@ -258,6 +273,9 @@ mod tests {
         let report = report(&map, &Config::default()).unwrap();
         let stubs = report.stubs();
         let rules = crate::palette::rules::Rules::parse(&stubs, "stubs").unwrap();
-        assert_eq!(rules.len(), report.guessed().filter(|e| e.block.is_some()).count());
+        assert_eq!(
+            rules.len(),
+            report.guessed().filter(|e| e.block.is_some()).count()
+        );
     }
 }

@@ -16,7 +16,7 @@ use crate::geom::{Aabb, Plane, Vec3};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use vbsp::{Bsp, BrushFlags, TextureFlags};
+use vbsp::{BrushFlags, Bsp, TextureFlags};
 
 /// Slop allowed when testing points against brush planes, in Source units.
 const PLANE_EPSILON: f64 = 1e-3;
@@ -51,7 +51,11 @@ fn read_from_vpk(archive: &Path, inner: &str) -> Result<Vec<u8>> {
         .keys()
         .find(|k| k.replace('\\', "/").eq_ignore_ascii_case(&wanted))
         .ok_or_else(|| {
-            anyhow::anyhow!("{} holds no {inner}; try `src2mc maps {}`", archive.display(), archive.display())
+            anyhow::anyhow!(
+                "{} holds no {inner}; try `src2mc maps {}`",
+                archive.display(),
+                archive.display()
+            )
         })?
         .clone();
     let entry = vpk.tree.get(&key).expect("the key came from the tree");
@@ -289,7 +293,11 @@ impl Map {
                 bounds = bounds.union(&solid.bounds);
             }
         }
-        if bounds.is_empty() { self.bounds() } else { bounds }
+        if bounds.is_empty() {
+            self.bounds()
+        } else {
+            bounds
+        }
     }
 
     /// Overall world bounds, taken from worldspawn's model.
@@ -446,14 +454,19 @@ mod tests {
 
     #[test]
     fn an_ordinary_path_is_not_taken_for_an_archive() {
-        assert_eq!(packed(Path::new("/games/hl2/maps/d1_trainstation_02.bsp")), None);
+        assert_eq!(
+            packed(Path::new("/games/hl2/maps/d1_trainstation_02.bsp")),
+            None
+        );
         assert_eq!(packed(Path::new("/games/infra/pak02_dir.vpk")), None);
     }
 
     #[test]
     fn a_map_inside_an_archive_splits_into_the_two_halves() {
-        let (archive, inner) =
-            packed(Path::new("/games/infra/pak02_dir.vpk:maps/infra_c1_m1_office.bsp")).unwrap();
+        let (archive, inner) = packed(Path::new(
+            "/games/infra/pak02_dir.vpk:maps/infra_c1_m1_office.bsp",
+        ))
+        .unwrap();
         assert_eq!(archive, Path::new("/games/infra/pak02_dir.vpk"));
         assert_eq!(inner, "maps/infra_c1_m1_office.bsp");
     }
@@ -476,8 +489,7 @@ mod tests {
     /// A separator inside a directory name must not capture the split.
     #[test]
     fn the_split_is_taken_from_the_right() {
-        let (archive, inner) =
-            packed(Path::new("/odd.vpk:dir/pak01_dir.vpk:maps/x.bsp")).unwrap();
+        let (archive, inner) = packed(Path::new("/odd.vpk:dir/pak01_dir.vpk:maps/x.bsp")).unwrap();
         assert_eq!(archive, Path::new("/odd.vpk:dir/pak01_dir.vpk"));
         assert_eq!(inner, "maps/x.bsp");
     }
@@ -490,7 +502,9 @@ mod tests {
             "/mnt/games/SteamLibrary/steamapps/common/infra/infra/pak02_dir.vpk",
             ":maps/infra_c1_m1_office.bsp"
         ));
-        let Some((archive, _)) = packed(spec) else { panic!("not recognised as packed") };
+        let Some((archive, _)) = packed(spec) else {
+            panic!("not recognised as packed")
+        };
         if !archive.exists() {
             return;
         }
@@ -504,7 +518,10 @@ mod tests {
         // The bug this all turned on: nearly every one of these read as hidden.
         let visible = props::extract(&map).len();
         assert!(visible > 8000, "only {visible} of 8386 props survived");
-        assert!(!map.solids(0).is_empty(), "no brushes came out of a version 22 map");
+        assert!(
+            !map.solids(0).is_empty(),
+            "no brushes came out of a version 22 map"
+        );
     }
 
     #[test]
@@ -514,7 +531,9 @@ mod tests {
             "brick/brickwall031b"
         );
         assert_eq!(
-            normalize_material("maps/ez2_c1_1/building_template/building_template019c_-864_-84_3648"),
+            normalize_material(
+                "maps/ez2_c1_1/building_template/building_template019c_-864_-84_3648"
+            ),
             "building_template/building_template019c"
         );
     }
@@ -561,7 +580,10 @@ mod tests {
             normalize_material("metal/metalwall048a_2_3_4"),
             "metal/metalwall048a_2_3_4"
         );
-        assert_eq!(normalize_material("maps/x/metal/wall_1_2"), "metal/wall_1_2");
+        assert_eq!(
+            normalize_material("maps/x/metal/wall_1_2"),
+            "metal/wall_1_2"
+        );
     }
 
     #[test]
@@ -570,7 +592,10 @@ mod tests {
         assert!(!map.materials().is_empty());
         for material in map.materials() {
             assert!(
-                material.reflectivity.iter().all(|c| c.is_finite() && *c >= 0.0),
+                material
+                    .reflectivity
+                    .iter()
+                    .all(|c| c.is_finite() && *c >= 0.0),
                 "{} has reflectivity {:?}",
                 material.name,
                 material.reflectivity
@@ -589,7 +614,9 @@ mod tests {
     fn texture_infos_resolve_to_materials() {
         let Some(map) = sample_map() else { return };
         for index in 0..map.bsp.textures_info.len() {
-            let material = map.material_index(index).expect("every texture info has a material");
+            let material = map
+                .material_index(index)
+                .expect("every texture info has a material");
             assert!(material < map.materials().len());
         }
     }
@@ -616,8 +643,11 @@ mod tests {
     fn leaf_brush_ranges_match_vbsp_field_for_field() {
         let Some(map) = sample_map() else { return };
 
-        let mut ours: Vec<(u16, u16)> =
-            map.leaf_brushes.iter().map(|r| (r.first, r.count)).collect();
+        let mut ours: Vec<(u16, u16)> = map
+            .leaf_brushes
+            .iter()
+            .map(|r| (r.first, r.count))
+            .collect();
         let mut theirs: Vec<(u16, u16)> = map
             .bsp
             .leaves

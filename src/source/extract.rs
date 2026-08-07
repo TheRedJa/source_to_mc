@@ -194,7 +194,11 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
     // a split texture's tiles are, so it comes out of the same budget: what is
     // left over is what the textures may be cut into.
     let reserved = assets.prop_meshes.len()
-        + if config.props.bake { assets.placements.len() } else { 0 };
+        + if config.props.bake {
+            assets.placements.len()
+        } else {
+            0
+        };
     let cap = choose_cap(&layouts, config, reserved);
     assets.stats.tile_cap = cap;
 
@@ -226,8 +230,11 @@ struct Pending {
 
 /// One block, one whole texture: what a material gets when nothing says how
 /// its texture is laid out.
-pub(crate) const WHOLE: Split =
-    Split { grid: [1, 1], texels_per_tile: [1.0, 1.0], window: [u32::MAX; 2] };
+pub(crate) const WHOLE: Split = Split {
+    grid: [1, 1],
+    texels_per_tile: [1.0, 1.0],
+    window: [u32::MAX; 2],
+};
 
 /// What is known about how a material's texture sits on the surfaces wearing
 /// it, which is all that decides how finely it should be cut.
@@ -296,7 +303,9 @@ pub fn layouts(map: &Map, config: &Config) -> std::collections::BTreeMap<String,
     let mut textures = Textures::new(&vfs, config.materials.texture_size);
 
     for (index, scale) in material_scales(map).into_iter().enumerate() {
-        let Some(material) = map.materials().get(index) else { continue };
+        let Some(material) = map.materials().get(index) else {
+            continue;
+        };
         if material.name.starts_with("tools/") {
             continue;
         }
@@ -316,7 +325,9 @@ pub fn layouts(map: &Map, config: &Config) -> std::collections::BTreeMap<String,
             {
                 continue;
             }
-            let Some(model) = models.get(&prop.model) else { continue };
+            let Some(model) = models.get(&prop.model) else {
+                continue;
+            };
             for part in &model.parts {
                 if out.contains_key(&part.material) {
                     continue;
@@ -343,7 +354,10 @@ pub fn cap_for(layouts: &[Layout], config: &Config, reserved: usize) -> u32 {
 
 /// How many blocks a set of materials would register at a given cap.
 pub fn blocks_at(layouts: &[Layout], config: &Config, cap: u32) -> usize {
-    layouts.iter().map(|l| l.split(config, cap).tiles() as usize).sum()
+    layouts
+        .iter()
+        .map(|l| l.split(config, cap).tiles() as usize)
+        .sum()
 }
 
 /// Pick the finest cut that stays inside the block budget.
@@ -366,11 +380,16 @@ fn choose_cap(layouts: &[Layout], config: &Config, reserved: usize) -> u32 {
         return ceiling;
     }
     let blocks = |cap: u32| -> usize {
-        layouts.iter().map(|l| l.split(config, cap).tiles() as usize).sum()
+        layouts
+            .iter()
+            .map(|l| l.split(config, cap).tiles() as usize)
+            .sum()
     };
-    (1..=ceiling).rev().find(|cap| blocks(*cap) <= budget).unwrap_or(1)
+    (1..=ceiling)
+        .rev()
+        .find(|cap| blocks(*cap) <= budget)
+        .unwrap_or(1)
 }
-
 
 /// Resolve one material to a generated block and add it to the pack.
 fn insert_block(
@@ -381,10 +400,15 @@ fn insert_block(
     raw_name: Option<&str>,
     split: Split,
 ) -> bool {
-    let Some(assets) = materials.assets(name, raw_name) else { return false };
-    let Some(tiles) =
-        textures.tiles(&assets.base_texture, assets.alpha_test, split.grid, split.window)
-    else {
+    let Some(assets) = materials.assets(name, raw_name) else {
+        return false;
+    };
+    let Some(tiles) = textures.tiles(
+        &assets.base_texture,
+        assets.alpha_test,
+        split.grid,
+        split.window,
+    ) else {
         return false;
     };
     let tiles = tiles.to_vec();
@@ -506,7 +530,11 @@ fn place_props(
                 let mut bounds = crate::geom::Aabb::empty();
                 for corner in 0..8 {
                     let pick = |axis: usize, lo: Vec3, hi: Vec3| {
-                        if corner & (1 << axis) == 0 { lo.axis(axis) } else { hi.axis(axis) }
+                        if corner & (1 << axis) == 0 {
+                            lo.axis(axis)
+                        } else {
+                            hi.axis(axis)
+                        }
                     };
                     bounds.extend(prop.place(Vec3::new(
                         pick(0, model.bounds.min, model.bounds.max),
@@ -535,9 +563,11 @@ fn place_props(
                 Some(index) => *index,
                 None => {
                     let index = base + assets.prop_materials.len();
-                    assets
-                        .prop_materials
-                        .push(prop_material(materials, &mut *textures, &part.material));
+                    assets.prop_materials.push(prop_material(
+                        materials,
+                        &mut *textures,
+                        &part.material,
+                    ));
                     if let Some(pending) = pending.as_mut() {
                         pending.push(Pending {
                             name: part.material.clone(),
@@ -556,7 +586,11 @@ fn place_props(
             };
 
             assets.props.push(PropSurface {
-                triangles: part.triangles.iter().map(|tri| tri.map(|v| prop.place(v))).collect(),
+                triangles: part
+                    .triangles
+                    .iter()
+                    .map(|tri| tri.map(|v| prop.place(v)))
+                    .collect(),
                 uvs: part.uvs.clone(),
                 material,
             });
@@ -599,7 +633,10 @@ pub(crate) fn sheet_layout(
         .assets(name, None)
         .and_then(|assets| textures.header(&assets.base_texture))
     {
-        Some(header) => Layout::Sheet { uv_per_unit, size: header.size },
+        Some(header) => Layout::Sheet {
+            uv_per_unit,
+            size: header.size,
+        },
         None => Layout::Unknown,
     }
 }
@@ -643,7 +680,10 @@ mod tests {
             assets.stats.resolved
         );
         // One block per material, plus the extra tiles each split one needs.
-        assert_eq!(assets.pack.len(), assets.stats.resolved + assets.stats.tiles);
+        assert_eq!(
+            assets.pack.len(),
+            assets.stats.resolved + assets.stats.tiles
+        );
         assert!(
             assets.stats.tiles > assets.stats.resolved,
             "only {} extra tiles for {} materials: textures are barely being split",
@@ -821,7 +861,10 @@ mod tests {
         let Some(map) = sample_map() else { return };
         let assets = extract(&map, &kubejs());
         assert!(
-            assets.pack.blocks().all(|b| !b.material.starts_with("tools/")),
+            assets
+                .pack
+                .blocks()
+                .all(|b| !b.material.starts_with("tools/")),
             "a tool texture was registered"
         );
     }
@@ -849,7 +892,10 @@ mod tests {
         let assets = extract(&orphan, &kubejs());
         assert!(assets.pack.is_empty());
         assert_eq!(assets.stats.resolved, 0);
-        assert!(assets.stats.materials > 0, "materials should still be counted");
+        assert!(
+            assets.stats.materials > 0,
+            "materials should still be counted"
+        );
         assert_eq!(assets.stats.props_placed, 0);
     }
 
@@ -861,7 +907,11 @@ mod tests {
         let Some(map) = sample_map() else { return };
         let assets = extract(&map, &Config::default());
 
-        assert!(assets.stats.props_placed > 100, "{} props placed", assets.stats.props_placed);
+        assert!(
+            assets.stats.props_placed > 100,
+            "{} props placed",
+            assets.stats.props_placed
+        );
         assert!(!assets.props.is_empty());
 
         let all = assets.materials(&map);
@@ -954,7 +1004,10 @@ mod tests {
             // The MTL and the model JSON have to agree on every slot, or the
             // loader silently draws the model untextured.
             for slot in asset.textures.keys() {
-                assert!(asset.mtl.contains(&format!("#{slot}")), "{slot} is not in the MTL");
+                assert!(
+                    asset.mtl.contains(&format!("#{slot}")),
+                    "{slot} is not in the MTL"
+                );
             }
         }
     }
@@ -970,9 +1023,16 @@ mod tests {
         }
         // A modelled prop's solid backing lives on the placement, so it can
         // move with the mesh and stay out of the world's own blocks.
-        let solid = assets.placements.iter().filter(|p| !p.collision.is_empty()).count();
+        let solid = assets
+            .placements
+            .iter()
+            .filter(|p| !p.collision.is_empty())
+            .count();
         assert!(solid > 0, "no props are solid at all");
-        assert!(solid < assets.placements.len(), "even small clutter is solid");
+        assert!(
+            solid < assets.placements.len(),
+            "even small clutter is solid"
+        );
     }
 
     /// Turning the meshes off has to give back exactly the old behaviour.
@@ -985,7 +1045,10 @@ mod tests {
 
         assert!(assets.placements.is_empty());
         assert_eq!(assets.stats.props_modelled, 0);
-        assert!(!assets.props.is_empty(), "props should be voxelized instead");
+        assert!(
+            !assets.props.is_empty(),
+            "props should be voxelized instead"
+        );
     }
 
     /// Vanilla output has no pack to register meshes in, so it must keep

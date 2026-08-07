@@ -55,7 +55,9 @@ impl Palette {
     }
 
     pub fn name(&self, id: BlockId) -> &str {
-        self.names.get(id as usize).map_or("minecraft:air", |s| s.as_str())
+        self.names
+            .get(id as usize)
+            .map_or("minecraft:air", |s| s.as_str())
     }
 
     pub fn len(&self) -> usize {
@@ -161,8 +163,11 @@ impl VoxelGrid {
     /// Every occupied voxel, in arbitrary order.
     pub fn iter(&self) -> impl Iterator<Item = (IVec3, BlockId)> + '_ {
         self.sections.iter().flat_map(|(section, blocks)| {
-            blocks.iter().enumerate().filter_map(move |(index, block)| {
-                (*block != AIR).then(|| {
+            blocks
+                .iter()
+                .enumerate()
+                .filter(|&(_index, block)| *block != AIR)
+                .map(|(index, block)| {
                     (
                         [
                             (section[0] << SECTION_BITS) | (index & SECTION_MASK as usize) as i32,
@@ -173,7 +178,6 @@ impl VoxelGrid {
                         *block,
                     )
                 })
-            })
         })
     }
 
@@ -221,7 +225,13 @@ mod tests {
     #[test]
     fn round_trips_positions_including_negatives() {
         let mut grid = VoxelGrid::new();
-        let positions = [[0, 0, 0], [1, 2, 3], [-1, -1, -1], [-17, 300, -4096], [15, 15, 15]];
+        let positions = [
+            [0, 0, 0],
+            [1, 2, 3],
+            [-1, -1, -1],
+            [-17, 300, -4096],
+            [15, 15, 15],
+        ];
         for (i, pos) in positions.iter().enumerate() {
             grid.set(*pos, i as BlockId + 1);
         }

@@ -97,11 +97,17 @@ pub fn static_props(data: &[u8]) -> Result<StaticProps> {
     // the lump, so they are used against `data` directly.
     let lump = &data[entry.range()];
     let count = read_i32(lump, 0)?;
-    ensure!((0..=4096).contains(&count), "game lump declares {count} entries");
+    ensure!(
+        (0..=4096).contains(&count),
+        "game lump declares {count} entries"
+    );
 
     for index in 0..count as usize {
         let at = 4 + index * GAME_LUMP_ENTRY;
-        ensure!(at + GAME_LUMP_ENTRY <= lump.len(), "game lump directory is truncated");
+        ensure!(
+            at + GAME_LUMP_ENTRY <= lump.len(),
+            "game lump directory is truncated"
+        );
         if read_i32(lump, at)? != STATIC_PROPS {
             continue;
         }
@@ -109,7 +115,9 @@ pub fn static_props(data: &[u8]) -> Result<StaticProps> {
         let offset = read_i32(lump, at + 8)?.max(0) as usize;
         let length = read_i32(lump, at + 12)?.max(0) as usize;
         ensure!(
-            offset.checked_add(length).is_some_and(|end| end <= data.len()),
+            offset
+                .checked_add(length)
+                .is_some_and(|end| end <= data.len()),
             "the static prop lump extends past the end of the file"
         );
         return parse(&data[offset..offset + length], version);
@@ -121,11 +129,17 @@ pub fn static_props(data: &[u8]) -> Result<StaticProps> {
 /// Parse the `sprp` lump body.
 fn parse(lump: &[u8], version: u16) -> Result<StaticProps> {
     let dict = read_i32(lump, 0)?;
-    ensure!((0..=65536).contains(&dict), "prop dictionary declares {dict} models");
+    ensure!(
+        (0..=65536).contains(&dict),
+        "prop dictionary declares {dict} models"
+    );
     let mut at = 4;
     let mut models = Vec::with_capacity(dict as usize);
     for _ in 0..dict {
-        ensure!(at + NAME_LEN <= lump.len(), "the prop dictionary is truncated");
+        ensure!(
+            at + NAME_LEN <= lump.len(),
+            "the prop dictionary is truncated"
+        );
         let name = &lump[at..at + NAME_LEN];
         let end = name.iter().position(|b| *b == 0).unwrap_or(NAME_LEN);
         models.push(String::from_utf8_lossy(&name[..end]).into_owned());
@@ -147,7 +161,12 @@ fn parse(lump: &[u8], version: u16) -> Result<StaticProps> {
     at += 4;
     let count = count as usize;
     if count == 0 {
-        return Ok(StaticProps { models, props: Vec::new(), version, stride: 0 });
+        return Ok(StaticProps {
+            models,
+            props: Vec::new(),
+            version,
+            stride: 0,
+        });
     }
 
     // Measured, not looked up. Several branches of the engine share a version
@@ -187,7 +206,12 @@ fn parse(lump: &[u8], version: u16) -> Result<StaticProps> {
         });
     }
 
-    Ok(StaticProps { models, props, version, stride })
+    Ok(StaticProps {
+        models,
+        props,
+        version,
+        stride,
+    })
 }
 
 fn read_vec(record: &[u8], at: usize) -> [f32; 3] {
@@ -277,7 +301,14 @@ mod tests {
     /// the props away.
     #[test]
     fn the_bytes_after_the_record_header_are_not_flags() {
-        for (version, stride) in [(4u16, 56usize), (5, 60), (6, 64), (9, 72), (10, 76), (11, 80)] {
+        for (version, stride) in [
+            (4u16, 56usize),
+            (5, 60),
+            (6, 64),
+            (9, 72),
+            (10, 76),
+            (11, 80),
+        ] {
             let records = vec![
                 record(stride, [1.0, 2.0, 3.0], [0.0, 90.0, 0.0], 0, 0),
                 record(stride, [4.0, 5.0, 6.0], [0.0, 0.0, 0.0], 1, NO_DRAW),
@@ -285,14 +316,23 @@ mod tests {
             let data = bsp(version, stride, &["models/a.mdl", "models/b.mdl"], &records);
             let props = static_props(&data).expect("version {version} should parse");
 
-            assert_eq!(props.stride, stride, "version {version} measured the wrong stride");
+            assert_eq!(
+                props.stride, stride,
+                "version {version} measured the wrong stride"
+            );
             assert_eq!(props.models, vec!["models/a.mdl", "models/b.mdl"]);
             assert_eq!(props.props.len(), 2);
             assert_eq!(props.props[0].origin, [1.0, 2.0, 3.0]);
             assert_eq!(props.props[0].angles, [0.0, 90.0, 0.0]);
             assert_eq!(props.props[0].prop_type, 0);
-            assert!(!props.props[0].no_draw(), "version {version} lost a visible prop");
-            assert!(props.props[1].no_draw(), "version {version} kept a hidden prop");
+            assert!(
+                !props.props[0].no_draw(),
+                "version {version} lost a visible prop"
+            );
+            assert!(
+                props.props[1].no_draw(),
+                "version {version} kept a hidden prop"
+            );
         }
     }
 
@@ -317,8 +357,13 @@ mod tests {
 
         // Same bytes, older version: no scale field, so the default stands
         // rather than whatever happens to be at that offset.
-        let props = static_props(&bsp(9, 72, &["models/a.mdl"], &[record(72, [0.0; 3], [0.0; 3], 0, 0)]))
-            .unwrap();
+        let props = static_props(&bsp(
+            9,
+            72,
+            &["models/a.mdl"],
+            &[record(72, [0.0; 3], [0.0; 3], 0, 0)],
+        ))
+        .unwrap();
         assert_eq!(props.props[0].scale, 1.0);
     }
 
@@ -347,7 +392,12 @@ mod tests {
     /// it looks, and guessing past that would place props at random.
     #[test]
     fn a_lump_that_does_not_divide_evenly_is_refused() {
-        let mut data = bsp(9, 72, &["models/a.mdl"], &[record(72, [0.0; 3], [0.0; 3], 0, 0)]);
+        let mut data = bsp(
+            9,
+            72,
+            &["models/a.mdl"],
+            &[record(72, [0.0; 3], [0.0; 3], 0, 0)],
+        );
         // Claim two props where there is only room for one and a bit.
         let at = data.len() - 72 - 4;
         data[at..at + 4].copy_from_slice(&2i32.to_le_bytes());
@@ -356,7 +406,12 @@ mod tests {
 
     #[test]
     fn a_truncated_dictionary_is_an_error_not_a_panic() {
-        let mut data = bsp(6, 64, &["models/a.mdl"], &[record(64, [0.0; 3], [0.0; 3], 0, 0)]);
+        let mut data = bsp(
+            6,
+            64,
+            &["models/a.mdl"],
+            &[record(64, [0.0; 3], [0.0; 3], 0, 0)],
+        );
         let at = 8 + LUMP_GAME_LUMP * 16;
         let offset = i32::from_le_bytes(data[at..at + 4].try_into().unwrap()) as usize;
         // Claim a hundred models where one was written.

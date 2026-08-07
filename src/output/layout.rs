@@ -15,7 +15,10 @@ pub struct Footprint {
 
 impl Footprint {
     pub fn new(width: i32, depth: i32) -> Footprint {
-        Footprint { width: width.max(0), depth: depth.max(0) }
+        Footprint {
+            width: width.max(0),
+            depth: depth.max(0),
+        }
     }
 }
 
@@ -124,7 +127,10 @@ mod tests {
             Footprint::new(100, 100),
         ];
         let offsets = grid(&footprints, 2, 0);
-        assert_eq!(offsets[2][2], 100, "second row should follow the first's depth");
+        assert_eq!(
+            offsets[2][2], 100,
+            "second row should follow the first's depth"
+        );
         // The tall map is in the second row, so the third row clears it.
         assert_eq!(offsets[3][2], 100);
     }

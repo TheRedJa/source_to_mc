@@ -44,12 +44,11 @@ impl EntityRecord {
         }
         // Outputs look like `OnTrigger,targetname,input,param,delay,times`.
         for (key, value) in &self.properties {
-            if key.starts_with("On") {
-                if let Some((target, _)) = value.split_once(&[',', '\u{1b}'][..]) {
-                    if !target.is_empty() {
-                        out.push(target);
-                    }
-                }
+            if key.starts_with("On")
+                && let Some((target, _)) = value.split_once(&[',', '\u{1b}'][..])
+                && !target.is_empty()
+            {
+                out.push(target);
             }
         }
         out.sort_unstable();
@@ -60,7 +59,9 @@ impl EntityRecord {
 
 /// Parse a whitespace-separated triple such as an `origin` or `angles` value.
 fn parse_triple(value: &str) -> Option<[f64; 3]> {
-    let mut parts = value.split_whitespace().filter_map(|p| p.parse::<f64>().ok());
+    let mut parts = value
+        .split_whitespace()
+        .filter_map(|p| p.parse::<f64>().ok());
     let (x, y, z) = (parts.next()?, parts.next()?, parts.next()?);
     parts.next().is_none().then_some([x, y, z])
 }
@@ -112,7 +113,10 @@ pub fn classname_histogram(entities: &[EntityRecord]) -> Vec<(String, usize)> {
     for entity in entities {
         *counts.entry(entity.classname.as_str()).or_default() += 1;
     }
-    let mut out: Vec<(String, usize)> = counts.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    let mut out: Vec<(String, usize)> = counts
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
     out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     out
 }

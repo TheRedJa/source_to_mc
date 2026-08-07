@@ -50,12 +50,12 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
 
     let mut entries: Vec<Entry> = Vec::new();
     let add = |entries: &mut Vec<Entry>,
-                   textures: &mut Textures,
-                   name: &str,
-                   raw: Option<&str>,
-                   uses: usize,
-                   split: crate::bsp::texcoord::Split,
-                   from_prop: bool| {
+               textures: &mut Textures,
+               name: &str,
+               raw: Option<&str>,
+               uses: usize,
+               split: crate::bsp::texcoord::Split,
+               from_prop: bool| {
         if let Some(existing) = entries.iter_mut().find(|e| e.material == name) {
             existing.uses += uses;
             return;
@@ -102,7 +102,9 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
         let mut models = crate::source::mdl::Models::new(&vfs);
         let mut seen: Vec<String> = Vec::new();
         for prop in crate::bsp::props::extract(map) {
-            let Some(model) = models.get(&prop.model) else { continue };
+            let Some(model) = models.get(&prop.model) else {
+                continue;
+            };
             for part in &model.parts {
                 if seen.contains(&part.material) {
                     continue;
@@ -115,12 +117,24 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
                     part.uv_per_unit,
                 )
                 .split(config, config.materials.tile_max);
-                add(&mut entries, &mut textures, &part.material, None, 0, split, true);
+                add(
+                    &mut entries,
+                    &mut textures,
+                    &part.material,
+                    None,
+                    0,
+                    split,
+                    true,
+                );
             }
         }
     }
 
-    entries.sort_by(|a, b| b.uses.cmp(&a.uses).then_with(|| a.material.cmp(&b.material)));
+    entries.sort_by(|a, b| {
+        b.uses
+            .cmp(&a.uses)
+            .then_with(|| a.material.cmp(&b.material))
+    });
 
     TextureReport {
         map: map.name.clone(),
@@ -167,8 +181,8 @@ impl TextureReport {
 
         let _ = writeln!(
             s,
-            "{:<width$}  {:>6}  {:<38}  {:>7}  {}",
-            "material", "uses", "texture", "blocks", ""
+            "{:<width$}  {:>6}  {:<38}  {:>7}  ",
+            "material", "uses", "texture", "blocks"
         );
         for entry in &self.entries {
             let flags = match (entry.alpha_test, entry.translucent) {
@@ -190,7 +204,11 @@ impl TextureReport {
         }
 
         let used = self.entries.iter().filter(|e| e.uses > 0).count();
-        let used_resolved = self.entries.iter().filter(|e| e.uses > 0 && e.resolved).count();
+        let used_resolved = self
+            .entries
+            .iter()
+            .filter(|e| e.uses > 0 && e.resolved)
+            .count();
         // Tool materials never become blocks, so counting them here would
         // overstate what the pack registers.
         let blocks: usize = self
@@ -216,8 +234,8 @@ impl TextureReport {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use std::path::PathBuf;
     use std::path::Path;
+    use std::path::PathBuf;
 
     fn sample_map(path: &str) -> Option<Map> {
         let path = Path::new(path);
@@ -225,7 +243,9 @@ mod tests {
     }
 
     fn hl2() -> Option<Map> {
-        sample_map("/mnt/games/SteamLibrary/steamapps/common/Half-Life 2/hl2/maps/d1_trainstation_02.bsp")
+        sample_map(
+            "/mnt/games/SteamLibrary/steamapps/common/Half-Life 2/hl2/maps/d1_trainstation_02.bsp",
+        )
     }
 
     #[test]
@@ -235,11 +255,19 @@ mod tests {
 
         assert!(!report.search_path.is_empty(), "no content sources");
         let used = report.entries.iter().filter(|e| e.uses > 0).count();
-        let resolved = report.entries.iter().filter(|e| e.uses > 0 && e.resolved).count();
+        let resolved = report
+            .entries
+            .iter()
+            .filter(|e| e.uses > 0 && e.resolved)
+            .count();
         assert!(
             resolved * 10 >= used * 9,
             "only {resolved} of {used} used materials resolved: {:?}",
-            report.unresolved().map(|e| &e.material).take(10).collect::<Vec<_>>()
+            report
+                .unresolved()
+                .map(|e| &e.material)
+                .take(10)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -286,7 +314,12 @@ mod tests {
         let from_props = report.entries.iter().filter(|e| e.from_prop).count();
         assert!(from_props > 10, "only {from_props} prop materials listed");
         assert!(
-            report.entries.iter().filter(|e| e.from_prop && e.resolved).count() * 2
+            report
+                .entries
+                .iter()
+                .filter(|e| e.from_prop && e.resolved)
+                .count()
+                * 2
                 > from_props,
             "most prop materials should resolve"
         );
@@ -302,7 +335,10 @@ mod tests {
         let split = report.entries.iter().filter(|e| e.tiles != [1, 1]).count();
         assert!(split > 10, "only {split} materials are split at all");
         assert!(
-            report.entries.iter().all(|e| e.tiles[0] >= 1 && e.tiles[1] >= 1),
+            report
+                .entries
+                .iter()
+                .all(|e| e.tiles[0] >= 1 && e.tiles[1] >= 1),
             "a material claims fewer than one block"
         );
 

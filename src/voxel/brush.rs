@@ -292,7 +292,10 @@ mod tests {
     fn grid_aligned_cube_fills_exactly_its_volume() {
         let solid = block_box(Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0));
         for mode in [SampleMode::Center, SampleMode::Samples] {
-            let config = Voxelize { mode, ..Voxelize::default() };
+            let config = Voxelize {
+                mode,
+                ..Voxelize::default()
+            };
             assert_eq!(voxels(&solid, &config).len(), 4 * 4 * 4, "mode {mode:?}");
         }
     }
@@ -302,7 +305,10 @@ mod tests {
         let solid = block_box(Vec3::new(-2.0, 5.0, 10.0), Vec3::new(0.0, 6.0, 12.0));
         let config = Voxelize::default();
         let found = voxels(&solid, &config);
-        assert_eq!(found, vec![[-2, 5, 10], [-2, 5, 11], [-1, 5, 10], [-1, 5, 11]]);
+        assert_eq!(
+            found,
+            vec![[-2, 5, 10], [-2, 5, 11], [-1, 5, 10], [-1, 5, 11]]
+        );
     }
 
     #[test]
@@ -318,7 +324,10 @@ mod tests {
         };
         assert_eq!(voxels(&solid, &permissive).len(), 1);
 
-        let strict = Voxelize { fill_threshold: 0.9, ..permissive };
+        let strict = Voxelize {
+            fill_threshold: 0.9,
+            ..permissive
+        };
         assert_eq!(voxels(&solid, &strict).len(), 0);
     }
 
@@ -334,10 +343,20 @@ mod tests {
             fill_threshold: 0.5,
             preserve_thin: false,
         };
-        assert!(voxels(&solid, &dropped).is_empty(), "thin wall should fail the threshold");
+        assert!(
+            voxels(&solid, &dropped).is_empty(),
+            "thin wall should fail the threshold"
+        );
 
-        let kept = Voxelize { preserve_thin: true, ..dropped };
-        assert_eq!(voxels(&solid, &kept).len(), 9, "thin wall should be preserved");
+        let kept = Voxelize {
+            preserve_thin: true,
+            ..dropped
+        };
+        assert_eq!(
+            voxels(&solid, &kept).len(),
+            9,
+            "thin wall should be preserved"
+        );
     }
 
     /// The whole-cube shortcut must agree with brute-force sampling, including
@@ -345,7 +364,9 @@ mod tests {
     #[test]
     fn the_inside_outside_shortcut_matches_brute_force_sampling() {
         let mut solid = block_box(Vec3::new(-3.3, 0.7, 1.15), Vec3::new(6.8, 9.25, 5.4));
-        solid.planes.push(Plane::new(Vec3::new(1.0, 2.0, 3.0).normalized(), 6.0));
+        solid
+            .planes
+            .push(Plane::new(Vec3::new(1.0, 2.0, 3.0).normalized(), 6.0));
         solid.side_of_plane.push(6);
 
         let config = Voxelize {
@@ -400,14 +421,24 @@ mod tests {
         solid.planes.push(Plane::new(Vec3::new(0.0, 1.0, 0.0), 1.5));
         solid.side_of_plane.push(6);
 
-        let exact = Voxelize { mode: SampleMode::Exact, ..Voxelize::default() };
+        let exact = Voxelize {
+            mode: SampleMode::Exact,
+            ..Voxelize::default()
+        };
         assert!((occupancy(&solid, [1, 1, 1], &exact) - 0.5).abs() < 1e-9);
         assert_eq!(occupancy(&solid, [1, 0, 1], &exact), 1.0);
         assert_eq!(occupancy(&solid, [1, 2, 1], &exact), 0.0);
 
-        let sampled = Voxelize { mode: SampleMode::Samples, samples: 3, ..Voxelize::default() };
+        let sampled = Voxelize {
+            mode: SampleMode::Samples,
+            samples: 3,
+            ..Voxelize::default()
+        };
         let approx = occupancy(&solid, [1, 1, 1], &sampled);
-        assert!((approx - 0.5).abs() > 0.1, "sampling should be coarser, got {approx}");
+        assert!(
+            (approx - 0.5).abs() > 0.1,
+            "sampling should be coarser, got {approx}"
+        );
     }
 
     /// On a brush cut at an awkward angle, `exact` and dense sampling must
@@ -415,11 +446,20 @@ mod tests {
     #[test]
     fn exact_mode_agrees_with_dense_sampling() {
         let mut solid = block_box(Vec3::new(-1.4, 0.3, 0.6), Vec3::new(3.7, 4.2, 2.9));
-        solid.planes.push(Plane::new(Vec3::new(1.0, 2.0, 3.0).normalized(), 4.0));
+        solid
+            .planes
+            .push(Plane::new(Vec3::new(1.0, 2.0, 3.0).normalized(), 4.0));
         solid.side_of_plane.push(6);
 
-        let exact = Voxelize { mode: SampleMode::Exact, ..Voxelize::default() };
-        let dense = Voxelize { mode: SampleMode::Samples, samples: 24, ..Voxelize::default() };
+        let exact = Voxelize {
+            mode: SampleMode::Exact,
+            ..Voxelize::default()
+        };
+        let dense = Voxelize {
+            mode: SampleMode::Samples,
+            samples: 24,
+            ..Voxelize::default()
+        };
 
         let mut compared = 0;
         for x in -3..6 {
@@ -443,7 +483,10 @@ mod tests {
     #[test]
     fn exact_mode_voxelizes_a_whole_brush() {
         let solid = block_box(Vec3::ZERO, Vec3::new(3.0, 3.0, 3.0));
-        let config = Voxelize { mode: SampleMode::Exact, ..Voxelize::default() };
+        let config = Voxelize {
+            mode: SampleMode::Exact,
+            ..Voxelize::default()
+        };
         assert_eq!(voxels(&solid, &config).len(), 27);
     }
 
@@ -485,15 +528,27 @@ mod tests {
             planes,
             bounds: Aabb::new(Vec3::new(-6.0, -6.0, -4.0), Vec3::new(6.0, 6.0, 4.0)),
         };
-        assert!(solid.bounds.size().axis(0) > 1.0, "the box is not thin on any axis");
+        assert!(
+            solid.bounds.size().axis(0) > 1.0,
+            "the box is not thin on any axis"
+        );
         assert!(is_thin(&solid), "a tilted half-block plate is thin");
 
         // And it has to come out as a continuous surface rather than a dotted
         // line of the cells that happened to be half full.
-        let config = Voxelize { preserve_thin: true, ..Voxelize::default() };
+        let config = Voxelize {
+            preserve_thin: true,
+            ..Voxelize::default()
+        };
         let kept = voxels(&solid, &config).len();
-        let dropped =
-            voxels(&solid, &Voxelize { preserve_thin: false, ..config }).len();
+        let dropped = voxels(
+            &solid,
+            &Voxelize {
+                preserve_thin: false,
+                ..config
+            },
+        )
+        .len();
         assert!(
             kept > dropped * 2,
             "angled plate kept {kept} voxels against {dropped} without preservation"
@@ -518,7 +573,9 @@ mod tests {
     fn the_mask_shortcut_matches_sampling_everywhere() {
         use crate::voxel::shapes::octant;
         let mut solid = block_box(Vec3::new(-2.4, 0.3, 1.15), Vec3::new(5.8, 6.25, 4.4));
-        solid.planes.push(Plane::new(Vec3::new(1.0, 2.0, 3.0).normalized(), 7.0));
+        solid
+            .planes
+            .push(Plane::new(Vec3::new(1.0, 2.0, 3.0).normalized(), 7.0));
         solid.side_of_plane.push(6);
 
         for x in -5..9 {
@@ -570,7 +627,13 @@ mod tests {
         };
         let mask = octant_mask(&block_box(Vec3::ZERO, Vec3::new(1.0, 0.5, 1.0)), [0, 0, 0])
             | octant_mask(&upper, [0, 0, 0]);
-        assert_eq!(shape_for(mask), Shape::Stairs { facing: Facing::North, top: false });
+        assert_eq!(
+            shape_for(mask),
+            Shape::Stairs {
+                facing: Facing::North,
+                top: false
+            }
+        );
     }
 
     #[test]
@@ -604,10 +667,16 @@ mod tests {
     fn a_wedge_fills_about_half_of_its_bounding_box() {
         let mut solid = block_box(Vec3::ZERO, Vec3::new(8.0, 8.0, 2.0));
         // Diagonal cut through the x/y square.
-        solid.planes.push(Plane::new(Vec3::new(1.0, 1.0, 0.0).normalized(), 8.0 / 2f64.sqrt()));
+        solid.planes.push(Plane::new(
+            Vec3::new(1.0, 1.0, 0.0).normalized(),
+            8.0 / 2f64.sqrt(),
+        ));
         solid.side_of_plane.push(6);
 
-        let config = Voxelize { preserve_thin: false, ..Voxelize::default() };
+        let config = Voxelize {
+            preserve_thin: false,
+            ..Voxelize::default()
+        };
         let count = voxels(&solid, &config).len();
         let full = 8 * 8 * 2;
         assert!(

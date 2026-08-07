@@ -195,7 +195,9 @@ impl Pack {
     ) -> String {
         let id = asset.block_id();
         for texture in textures {
-            self.prop_textures.entry(texture.name).or_insert(texture.image);
+            self.prop_textures
+                .entry(texture.name)
+                .or_insert(texture.image);
         }
         self.props.entry(asset.id.clone()).or_insert(asset);
         id
@@ -208,7 +210,8 @@ impl Pack {
 
     /// The prop model registered under `id`, if any.
     pub fn prop(&self, id: &str) -> Option<&crate::output::obj::PropAsset> {
-        self.props.get(id.strip_prefix(&format!("{NAMESPACE}:")).unwrap_or(id))
+        self.props
+            .get(id.strip_prefix(&format!("{NAMESPACE}:")).unwrap_or(id))
     }
 
     pub fn props(&self) -> impl Iterator<Item = &crate::output::obj::PropAsset> {
@@ -338,7 +341,9 @@ impl Pack {
         } else {
             base
         };
-        self.blocks.contains_key(&id).then(|| format!("{NAMESPACE}:{id}"))
+        self.blocks
+            .contains_key(&id)
+            .then(|| format!("{NAMESPACE}:{id}"))
     }
 
     /// Material path to namespaced block id, for the palette.
@@ -373,7 +378,11 @@ impl Pack {
     /// Write the textures and startup script under `dir/kubejs`.
     pub fn write(&self, dir: &Path) -> Result<Written> {
         let root = dir.join("kubejs");
-        let textures = root.join("assets").join(NAMESPACE).join("textures").join("block");
+        let textures = root
+            .join("assets")
+            .join(NAMESPACE)
+            .join("textures")
+            .join("block");
         let scripts = root.join("startup_scripts");
         std::fs::create_dir_all(&textures)
             .with_context(|| format!("creating {}", textures.display()))?;
@@ -514,7 +523,10 @@ impl Pack {
                     Some(texture) => format!("  .texture('{texture}')"),
                     None => format!("  .texture('{NAMESPACE}:block/{}')", asset.id),
                 },
-                format!("  .soundType('{}')", sound_for(asset.surface_prop.as_deref())),
+                format!(
+                    "  .soundType('{}')",
+                    sound_for(asset.surface_prop.as_deref())
+                ),
                 "  .hardness(1.5)".to_string(),
                 "  .resistance(6.0)".to_string(),
                 // A baked prop is placed as a real block sitting inside its own
@@ -548,7 +560,11 @@ impl Pack {
 
 /// Something readable in the creative menu for a prop model.
 fn prop_name(model: &str) -> String {
-    let leaf = model.trim_end_matches(".mdl").rsplit('/').next().unwrap_or(model);
+    let leaf = model
+        .trim_end_matches(".mdl")
+        .rsplit('/')
+        .next()
+        .unwrap_or(model);
     let mut name = String::new();
     for (i, c) in leaf.chars().enumerate() {
         if i == 0 {
@@ -595,7 +611,10 @@ mod tests {
 
     #[test]
     fn material_paths_become_legal_resource_ids() {
-        assert_eq!(block_id("concrete/concretewall001a"), "concrete_concretewall001a");
+        assert_eq!(
+            block_id("concrete/concretewall001a"),
+            "concrete_concretewall001a"
+        );
         assert_eq!(block_id("Metal/MetalWall048A"), "metal_metalwall048a");
         assert_eq!(block_id("halflife/-2lab3_flr1b"), "halflife_-2lab3_flr1b");
         // Minecraft would reject anything outside [a-z0-9_.-].
@@ -610,12 +629,24 @@ mod tests {
 
     #[test]
     fn render_type_follows_the_material_flags() {
-        assert_eq!(RenderType::of(&assets(false, false, None)), RenderType::Solid);
-        assert_eq!(RenderType::of(&assets(true, false, None)), RenderType::Cutout);
-        assert_eq!(RenderType::of(&assets(false, true, None)), RenderType::Translucent);
+        assert_eq!(
+            RenderType::of(&assets(false, false, None)),
+            RenderType::Solid
+        );
+        assert_eq!(
+            RenderType::of(&assets(true, false, None)),
+            RenderType::Cutout
+        );
+        assert_eq!(
+            RenderType::of(&assets(false, true, None)),
+            RenderType::Translucent
+        );
         // A grate that also claims translucency must stay a cutout, or its
         // holes render as haze.
-        assert_eq!(RenderType::of(&assets(true, true, None)), RenderType::Cutout);
+        assert_eq!(
+            RenderType::of(&assets(true, true, None)),
+            RenderType::Cutout
+        );
     }
 
     #[test]
@@ -694,7 +725,6 @@ mod tests {
         assert!(!script.contains(".renderType('solid')"));
     }
 
-
     /// KubeJS 2101 has no slab or stairs block builder, so a generated block
     /// must never claim a sub-block shape — the id would never be registered
     /// and the paste would fail on it.
@@ -721,15 +751,28 @@ mod tests {
     #[test]
     fn the_script_only_calls_methods_that_exist() {
         let mut pack = Pack::default();
-        pack.insert("metal/grate011a", texture(), &assets(true, false, Some("metalgrate")));
+        pack.insert(
+            "metal/grate011a",
+            texture(),
+            &assets(true, false, Some("metalgrate")),
+        );
         let script = pack.script();
 
         assert!(script.contains(".texture('kubejs:block/metal_grate011a')"));
-        assert!(!script.contains(".textureAll("), "textureAll does not exist in KubeJS 2101");
+        assert!(
+            !script.contains(".textureAll("),
+            "textureAll does not exist in KubeJS 2101"
+        );
         // Only `basic` blocks exist, so `create` is never given a type.
         assert!(!script.contains("event.create('kubejs:metal_grate011a',"));
 
-        for method in [".displayName(", ".texture(", ".soundType(", ".hardness(", ".resistance("] {
+        for method in [
+            ".displayName(",
+            ".texture(",
+            ".soundType(",
+            ".hardness(",
+            ".resistance(",
+        ] {
             assert!(script.contains(method), "{method} missing");
         }
     }
@@ -739,7 +782,10 @@ mod tests {
         let mut pack = Pack::default();
         pack.insert("props/it's_a_thing", texture(), &assets(false, false, None));
         let script = pack.script();
-        assert!(script.contains("\\'"), "an apostrophe must not close the string");
+        assert!(
+            script.contains("\\'"),
+            "an apostrophe must not close the string"
+        );
     }
 
     #[test]
