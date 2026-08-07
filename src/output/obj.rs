@@ -188,20 +188,205 @@ impl Place {
     }
 }
 
+/// One block's worth of a prop: the triangles near enough to it to be drawn
+/// from it, and where it sits relative to the prop's own origin.
+///
+/// A prop small enough to be one block is one group covering everything, which
+/// is nearly all of them. See [`PropMesh::split`] for why the rest are cut up.
+#[derive(Debug, Clone)]
+pub struct Group {
+    /// Which triangles belong to it, as `(part, triangle)`.
+    pub members: Vec<(usize, usize)>,
+    /// Where the block wants to be, in blocks from the prop's origin.
+    pub centre: Vec3,
+    /// What this piece actually covers, in blocks from the prop's origin.
+    /// Where the block goes is chosen from inside it.
+    pub bounds: crate::geom::Aabb,
+}
+
 impl PropMesh {
+    /// Cut the placed mesh into pieces, none reaching further than `reach`
+    /// from its own piece's centre.
+    ///
+    /// A block model may be drawn far outside its own block, but not
+    /// arbitrarily far: Sodium packs each chunk vertex coordinate into 20 bits
+    /// spanning -8 to +24 blocks from the section origin and masks away what
+    /// does not fit, so a mesh reaching past that is drawn correctly up to the
+    /// limit and then folds back on itself. Nearly every prop is well inside
+    /// it and comes back as a single group; a gantry, a pipe run or a
+    /// rooftop's worth of scenery is not, and is carried by several blocks
+    /// instead, each drawing the part of the mesh nearest it.
+    ///
+    /// Grouping is by triangle centre, so the pieces tile the prop without
+    /// gaps or overlap: every triangle is drawn exactly once.
+    pub fn split(&self, basis: [Vec3; 3], scale: f64, reach: f64) -> Vec<Group> {
+        let place = Place { basis, scale, translation: Vec3::ZERO };
+        let placed = |v: Vec3| place.apply(v);
+
+        // The common case first, and without touching the grid: if the whole
+        // mesh fits around its own origin there is nothing to cut.
+        let mut extent: f64 = 0.0;
+        let mut whole = crate::geom::Aabb::empty();
+        for part in &self.parts {
+            for triangle in &part.triangles {
+                for corner in triangle {
+                    let p = placed(*corner);
+                    extent = extent.max(p.x.abs()).max(p.y.abs()).max(p.z.abs());
+                    whole.extend(p);
+                }
+            }
+        }
+        if extent <= reach {
+            let members = self
+                .parts
+                .iter()
+                .enumerate()
+                .flat_map(|(part, p)| (0..p.triangles.len()).map(move |t| (part, t)))
+                .collect();
+            return vec![Group { members, centre: Vec3::ZERO, bounds: whole }];
+        }
+
+        // A triangle is filed by its centre, so its corners hang over its
+        // cell's edge by however large the triangle is, and the block lands
+        // somewhere inside the piece rather than exactly at its middle. Both
+        // eat into the reach, so the cells are cut until what comes out
+        // actually fits rather than until the arithmetic says it should. Most
+        // props need one round; the limit is there because a single triangle
+        // wider than the reach cannot be cut by grouping at all, and refining
+        // forever would not help it.
+        // Only the pieces that do not fit are cut again, and only they. Cutting
+        // the whole prop finer because one corner of it is awkward multiplies
+        // the blocks it needs — and every one of those needs a free cell of its
+        // own, so over-splitting is what sends a prop back to being an entity.
+        let target = reach * 0.6;
+        let everything: Vec<(usize, usize)> = self
+            .parts
+            .iter()
+            .enumerate()
+            .flat_map(|(part, p)| (0..p.triangles.len()).map(move |t| (part, t)))
+            .collect();
+
+        let mut done = Vec::new();
+        let mut queue = vec![(everything, reach)];
+        while let Some((members, side)) = queue.pop() {
+            for group in self.grid(&placed, &members, side) {
+                // A group of one triangle is as cut up as it can get; nothing
+                // splits a single triangle.
+                if group.members.len() < 2
+                    || side <= reach / 64.0
+                    || self.reach_about(&placed, &group) <= target
+                {
+                    done.push(group);
+                } else {
+                    queue.push((group.members, side / 2.0));
+                }
+            }
+        }
+        done
+    }
+
+    /// Bucket `members` by which cell of `side` each triangle's centre falls in.
+    fn grid(
+        &self,
+        placed: &impl Fn(Vec3) -> Vec3,
+        members: &[(usize, usize)],
+        side: f64,
+    ) -> Vec<Group> {
+        let side = side.max(f64::MIN_POSITIVE);
+        let mut cells: BTreeMap<[i64; 3], Vec<(usize, usize)>> = BTreeMap::new();
+        for (part, index) in members {
+            let triangle = &self.parts[*part].triangles[*index];
+            let centre = (placed(triangle[0]) + placed(triangle[1]) + placed(triangle[2])) / 3.0;
+            let key = [centre.x, centre.y, centre.z].map(|c| (c / side).floor() as i64);
+            cells.entry(key).or_default().push((*part, *index));
+        }
+
+        cells
+            .into_iter()
+            .map(|(key, members)| {
+                let mut bounds = crate::geom::Aabb::empty();
+                for (part, index) in &members {
+                    for corner in &self.parts[*part].triangles[*index] {
+                        bounds.extend(placed(*corner));
+                    }
+                }
+                Group {
+                    members,
+                    centre: Vec3::new(
+                        (key[0] as f64 + 0.5) * side,
+                        (key[1] as f64 + 0.5) * side,
+                        (key[2] as f64 + 0.5) * side,
+                    ),
+                    bounds,
+                }
+            })
+            .collect()
+    }
+
+    /// How far `group` reaches from its own centre.
+    fn reach_about(&self, placed: &impl Fn(Vec3) -> Vec3, group: &Group) -> f64 {
+        let mut reach: f64 = 0.0;
+        for (part, index) in &group.members {
+            for corner in &self.parts[*part].triangles[*index] {
+                let p = placed(*corner) - group.centre;
+                reach = reach.max(p.x.abs()).max(p.y.abs()).max(p.z.abs());
+            }
+        }
+        reach
+    }
+
+    /// How far the furthest corner of `group` sits from `place`'s origin.
+    ///
+    /// The check that the split actually worked. A single triangle larger than
+    /// the reach cannot be cut up by grouping — nothing splits one triangle —
+    /// so the caller needs to know when a piece is still too big and the prop
+    /// has to be drawn some other way.
+    pub fn reach_of(&self, place: &Place, group: &Group) -> f64 {
+        let mut reach: f64 = 0.0;
+        for (part, index) in &group.members {
+            let Some(triangle) = self.parts.get(*part).and_then(|p| p.triangles.get(*index)) else {
+                continue;
+            };
+            for corner in triangle {
+                let p = place.apply(*corner);
+                reach = reach.max(p.x.abs()).max(p.y.abs()).max(p.z.abs());
+            }
+        }
+        reach
+    }
+
     /// Write this mesh out as the files one block needs.
     ///
     /// With no `place` the mesh is written in model space, for an entity to
     /// orient. With one, the orientation is baked into the coordinates and the
     /// result is a block that draws the prop where the map put it.
-    pub fn asset(&self, id: String, place: Option<&Place>) -> PropAsset {
+    /// With a `group`, only that piece of the mesh is written; without one,
+    /// all of it.
+    pub fn asset(&self, id: String, place: Option<&Place>, group: Option<&Group>) -> PropAsset {
         let mut positions = Index::default();
         let mut coords = Index::default();
         let mut faces = String::new();
+        // Which triangles of each part this piece draws. `None` is all of them.
+        let kept: Option<std::collections::HashSet<(usize, usize)>> =
+            group.map(|g| g.members.iter().copied().collect());
+        let mut written = 0usize;
 
-        for part in &self.parts {
+        for (index, part) in self.parts.iter().enumerate() {
+            if kept.as_ref().is_some_and(|kept| {
+                !(0..part.triangles.len()).any(|t| kept.contains(&(index, t)))
+            }) {
+                continue;
+            }
             faces.push_str(&format!("usemtl {}\n", part.material));
-            for (triangle, uv) in part.triangles.iter().zip(&part.uvs) {
+            for (triangle, uv) in part
+                .triangles
+                .iter()
+                .zip(&part.uvs)
+                .enumerate()
+                .filter(|(t, _)| kept.as_ref().is_none_or(|kept| kept.contains(&(index, *t))))
+                .map(|(_, pair)| pair)
+            {
+                written += 1;
                 let mut corners = [(0usize, 0usize); 3];
                 for (slot, (vertex, coord)) in corners.iter_mut().zip(triangle.iter().zip(uv)) {
                     let p = match place {
@@ -241,7 +426,7 @@ impl PropMesh {
             surface_prop: self.surface_prop.clone(),
             width: self.width,
             height: self.height,
-            triangles: self.triangles,
+            triangles: written,
         }
     }
 }
@@ -420,6 +605,9 @@ pub fn build(
     }
 
     let units = config.scale.units_per_block.max(f64::MIN_POSITIVE);
+    // No triangle may be wider than a piece of a split prop is allowed to be,
+    // or it cannot be put in one: see [`subdivide`].
+    let limit = if config.props.bake { config.props.bake_reach * 0.5 } else { 0.0 };
     let mut mesh_parts: Vec<MeshPart> = Vec::new();
     let mut mtl = String::new();
     let mut slots: BTreeMap<String, String> = BTreeMap::new();
@@ -473,7 +661,7 @@ pub fn build(
         let mut mesh_part =
             MeshPart { material: material_name, triangles: Vec::new(), uvs: Vec::new() };
         for (triangle, uv) in part.triangles.iter().zip(&part.uvs) {
-            mesh_part.triangles.push(triangle.map(|v| to_model_space(v, units)));
+            let corners = triangle.map(|v| to_model_space(v, units));
             // Texture coordinates written as they are. Both conventions run V
             // downwards from the top of the image: Source's because it is a
             // Direct3D engine, Minecraft's because `TextureAtlasSprite.getV`
@@ -482,7 +670,15 @@ pub fn build(
             // the sheet, and on a model sheet with unused areas that shows up
             // as half a prop wearing blank texture and the rest wearing pieces
             // of something else.
-            mesh_part.uvs.push(uv.map(|coord| repeat.apply(coord)));
+            let coords = uv.map(|coord| repeat.apply(coord));
+            // Cut anything too large to be drawn from one block. A prop is
+            // carried by as many blocks as it needs, but the pieces are made by
+            // grouping whole triangles, and nothing groups one triangle: a
+            // 32-block light shaft or a citadel wall panel is often a single
+            // pair of them. Splitting the edge is exact — the surface is flat
+            // and the texture coordinates run linearly across it — so this
+            // costs triangles and changes nothing you can see.
+            subdivide(corners, coords, limit, &mut mesh_part, 0);
             written += 1;
         }
         mesh_parts.push(mesh_part);
@@ -512,6 +708,48 @@ pub fn build(
         },
         emitted,
     ))
+}
+
+/// Split a triangle until no edge is longer than `limit`, in blocks.
+///
+/// The longest edge is halved and the triangle becomes two, which is exact:
+/// the surface is flat, so the midpoint lies on it, and texture coordinates
+/// run linearly across a triangle, so the midpoint's are the average of the
+/// edge's. Depth is capped because a limit of zero would otherwise never be
+/// reached.
+fn subdivide(
+    corners: [Vec3; 3],
+    uvs: [[f64; 2]; 3],
+    limit: f64,
+    out: &mut MeshPart,
+    depth: u32,
+) {
+    const MAX_DEPTH: u32 = 8;
+    let edges = [(0, 1), (1, 2), (2, 0)];
+    let longest = edges
+        .iter()
+        .enumerate()
+        .max_by(|a, b| {
+            let length = |e: &(usize, usize)| (corners[e.0] - corners[e.1]).length();
+            length(a.1).partial_cmp(&length(b.1)).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let (a, b) = edges[longest];
+    let c = 3 - a - b;
+
+    if depth >= MAX_DEPTH || limit <= 0.0 || (corners[a] - corners[b]).length() <= limit {
+        out.triangles.push(corners);
+        out.uvs.push(uvs);
+        return;
+    }
+
+    let middle = (corners[a] + corners[b]) * 0.5;
+    let middle_uv = [(uvs[a][0] + uvs[b][0]) * 0.5, (uvs[a][1] + uvs[b][1]) * 0.5];
+    // Both halves keep the winding of the original, so the faces still point
+    // the way the model meant them to.
+    subdivide([corners[a], middle, corners[c]], [uvs[a], middle_uv, uvs[c]], limit, out, depth + 1);
+    subdivide([middle, corners[b], corners[c]], [middle_uv, uvs[b], uvs[c]], limit, out, depth + 1);
 }
 
 /// Source model space to Minecraft model space, in blocks.

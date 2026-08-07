@@ -181,6 +181,19 @@ the single cell it stands in. Placements that round to the same angle and
 offset share one block, so a row of identical fence posts is one registration.
 `d1_trainstation_02`'s 325 meshes come to 258 of them.
 
+A block model may be drawn outside its own block, but not arbitrarily far.
+Sodium packs each chunk vertex coordinate into 20 bits spanning −8 to +24
+blocks from the section origin and masks away what does not fit, so a mesh
+reaching past that is drawn correctly up to the limit and then folds back on
+itself — which is what a gantry or a light shaft did, as a black sheet folded
+over the map. A block can sit anywhere in its 16-block section, so 8 blocks
+either way is the reach that is safe wherever it lands, and a prop bigger than
+that is carried by several blocks instead, each drawing the part of the mesh
+nearest it. Triangles too wide to fit in any one piece — a light shaft is often
+a single pair of them — are split at their longest edge first, which is exact
+on a flat triangle. `d1_trainstation_02` ends up with 321 of its 325 props
+baked and 4 still entities.
+
 The block never replaces anything: it only ever takes a cell that is already
 air, since taking one of the map's own would be a hole in whatever the prop
 stands against. A prop with nowhere to put a block — and anything over

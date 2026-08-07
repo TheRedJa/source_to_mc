@@ -43,6 +43,13 @@ pub struct Key {
     pub offset: [i64; 3],
     /// The prop's own scale, in 1/256ths.
     pub scale: i64,
+    /// Which piece of a split prop this is, in grid steps from the prop's
+    /// origin. Zero for a prop small enough to be one block.
+    ///
+    /// In the key because the pieces of one prop are different meshes wearing
+    /// the same model at the same angle, and without it they would all collapse
+    /// onto whichever was generated first.
+    pub piece: [i64; 3],
 }
 
 /// Scale is rounded to this many steps. Props are almost always at 1.0 and the
@@ -62,6 +69,7 @@ impl Key {
         scale: f64,
         grid: i64,
         angle_steps: i64,
+        piece: Vec3,
     ) -> Key {
         let grid = grid.max(1);
         let local = [
@@ -74,6 +82,7 @@ impl Key {
             rotation: crate::output::display::quantize(rotation, angle_steps),
             offset: local.map(|c| (c * grid as f64).round() as i64),
             scale: (scale * SCALE_STEPS).round() as i64,
+            piece: [piece.x, piece.y, piece.z].map(|c| (c * grid as f64).round() as i64),
         }
     }
 
@@ -130,16 +139,29 @@ pub fn anchor(grid: &VoxelGrid, bounds: Aabb, taken: &HashSet<IVec3>) -> Option<
     if bounds.is_empty() {
         return None;
     }
-    // Inside the prop first. A sign bolted to a wall or a railing set into a
-    // floor is thin enough that every cell it covers is the thing it is
-    // attached to, and for those the search widens by a block — still next to
-    // the prop, and a cell next to it beats no prop at all.
-    let grown = Aabb::new(
-        bounds.min - Vec3::new(1.0, 1.0, 1.0),
-        bounds.max + Vec3::new(1.0, 1.0, 1.0),
-    );
-    free(grid, bounds, bounds, taken).or_else(|| free(grid, grown, bounds, taken))
+    // Inside the prop first, then widening. A sign bolted to a wall, a railing
+    // set into a floor or a crate wearing its own invisible collision is thin
+    // enough that every cell it covers is already something, and for those a
+    // cell just outside is the difference between the prop being drawn by the
+    // chunk and being drawn every frame. Where the block sits does not move the
+    // mesh — the offset is baked — so a cell a little further out costs only
+    // the section the piece is filed under.
+    (0..=REACH_OUT).find_map(|grow| {
+        let grow = f64::from(grow);
+        let search = Aabb::new(
+            bounds.min - Vec3::new(grow, grow, grow),
+            bounds.max + Vec3::new(grow, grow, grow),
+        );
+        free(grid, search, bounds, taken)
+    })
 }
+
+/// How far outside its own footprint a piece will look for a free cell.
+///
+/// Bounded because the block still has to be near the geometry it draws: the
+/// further out it sits, the further the mesh reaches from it, and past the
+/// encodable range the mesh folds. The caller checks what it got.
+const REACH_OUT: i32 = 3;
 
 /// The free cell of `search` nearest the centre of `bounds`.
 fn free(
@@ -203,7 +225,7 @@ mod tests {
     }
 
     fn key(rotation: [f64; 4], origin: Vec3, anchor: IVec3) -> Key {
-        Key::new("prop_x", rotation, origin, anchor, 1.0, 16, 64)
+        Key::new("prop_x", rotation, origin, anchor, 1.0, 16, 64, Vec3::ZERO)
     }
 
     /// The whole reason keys exist: two props placed identically must not
@@ -236,6 +258,7 @@ mod tests {
             1.0,
             16,
             64,
+            Vec3::ZERO,
         );
         assert_ne!(base.id(), other_model.id());
     }
@@ -314,6 +337,7 @@ mod tests {
                 prop.scale,
                 grid,
                 steps,
+                Vec3::ZERO,
             );
             let place = key.place(grid);
 
@@ -398,11 +422,11 @@ mod tests {
         let mut palette = Palette::new();
         let stone = palette.intern("minecraft:stone");
         let mut grid = VoxelGrid::new();
-        // Solid a block past the prop's own footprint, since the search widens
-        // by that much before giving up.
-        for x in -1..5 {
-            for y in -1..5 {
-                for z in -1..5 {
+        // Solid well past the prop's own footprint, since the search widens by
+        // `REACH_OUT` blocks before giving up.
+        for x in -4..8 {
+            for y in -4..8 {
+                for z in -4..8 {
                     grid.set([x, y, z], stone);
                 }
             }

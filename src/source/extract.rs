@@ -479,7 +479,7 @@ fn place_props(
                         // to. Registering it costs one block per model.
                         let block = assets
                             .pack
-                            .insert_prop(mesh.asset(mesh.id.clone(), None), textures);
+                            .insert_prop(mesh.asset(mesh.id.clone(), None, None), textures);
                         assets.prop_meshes.push(mesh);
                         (block, assets.prop_meshes.len() - 1, width, height)
                     });

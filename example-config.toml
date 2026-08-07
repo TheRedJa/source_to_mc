@@ -204,6 +204,17 @@ bake_grid = 16
 # by a whole number of degrees rounds to itself at any setting, and that is
 # nearly all of them.
 bake_angle_steps = 256
+# Furthest a baked prop's geometry may sit from the block carrying it, in
+# blocks. A prop reaching further is split across several blocks, and any
+# triangle wider than half of this is cut up so it can be.
+#
+# Sodium packs each chunk vertex coordinate into 20 bits spanning -8 to +24
+# blocks from the section origin and masks off what does not fit, so a model
+# reaching past that is drawn correctly up to the limit and then folds back on
+# itself — which is what large props were doing. A block can sit anywhere in its
+# 16-block section, so 8 blocks either way is what is safe wherever it lands.
+# Vanilla is more forgiving, but not by enough to be worth a different number.
+bake_reach = 8.0
 # Props longer than this many Source units stay display entities however `bake`
 # is set; 0 bakes every size. A block's model is filed under the chunk section
 # holding that block, so a mesh reaching far past it appears and disappears with

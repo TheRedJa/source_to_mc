@@ -429,6 +429,16 @@ pub struct Props {
     /// whole number of degrees rounds to itself at any setting, and that is
     /// nearly all of them.
     pub bake_angle_steps: i64,
+    /// Furthest a baked prop's geometry may sit from the block carrying it,
+    /// in blocks. A prop reaching further is split across several blocks.
+    ///
+    /// Sodium packs each chunk vertex coordinate into 20 bits spanning -8 to
+    /// +24 blocks from the section origin, and masks off what does not fit, so
+    /// a model reaching past that folds back on itself — correct up to a point
+    /// and then inside out. A block can sit anywhere in its 16-block section,
+    /// which leaves 8 blocks either way as the reach that is safe wherever the
+    /// block lands. Vanilla is more forgiving, but not by enough to matter.
+    pub bake_reach: f64,
     /// Props longer than this many Source units stay display entities however
     /// `bake` is set; 0 bakes every size.
     ///
@@ -478,6 +488,7 @@ impl Default for Props {
             bake: true,
             bake_grid: 16,
             bake_angle_steps: 256,
+            bake_reach: 8.0,
             bake_max_size: 0.0,
             view_range: 1.0,
             max_triangles: 4_000,

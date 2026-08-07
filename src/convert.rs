@@ -89,6 +89,9 @@ pub struct Stats {
     /// Props drawn as a block with their rotation baked in, which the chunk
     /// mesh absorbs, rather than as an entity redrawn every frame.
     pub props_baked: usize,
+    /// Blocks those props needed. More than `props_baked` when a prop reached
+    /// too far to be drawn from one block and had to be split across several.
+    pub prop_blocks: usize,
     /// Invisible blocks placed to make the big ones solid.
     pub prop_barriers: usize,
     /// Voxels emitted as a slab or stair instead of a full cube.
@@ -943,23 +946,19 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         grid
     };
 
-    // Collision goes in last, and only where there is nothing already. A
-    // barrier is invisible, so overwriting a wall with one opens a hole you
-    // can see straight through; and coming after hollowing means it cannot
-    // make the map's own blocks look like interior worth removing.
+    // Props drawn as blocks rather than as entities. A prop's block may only
+    // take a cell that is air, since taking one of the map's own would punch a
+    // hole in whatever the prop stands against, and taking another prop's
+    // would delete that prop.
+    //
+    // Before the barriers, not after, because a big prop's barriers fill the
+    // shell its own geometry occupies — which is exactly where the blocks
+    // drawing that geometry want to sit. Letting the barriers go first left
+    // large props with nowhere to put their pieces and sent them back to being
+    // entities. The barrier pass gives way instead: it skips whatever is
+    // already there, so a prop block costs one voxel of collision out of a
+    // shell that runs to thousands.
     let mut grid = grid;
-    let mut barriers = 0;
-    for (pos, block) in collision.iter() {
-        if grid.get(pos) == AIR {
-            grid.set(pos, block);
-            barriers += 1;
-        }
-    }
-    // Props drawn as blocks rather than as entities. Last, so it sees the
-    // world exactly as it will be pasted: a prop's block may only take a cell
-    // that is air, since taking one of the map's own would punch a hole in
-    // whatever the prop stands against, and taking another prop's would delete
-    // that prop.
     let mut baked = Vec::new();
     let mut taken: std::collections::HashSet<IVec3> = std::collections::HashSet::new();
     let mut assets = assets;
@@ -968,37 +967,88 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let mut pack = std::mem::take(&mut assets.pack);
     if config.props.bake {
         for (index, placement) in assets.placements.iter().enumerate() {
-            let bounds = transform.transform_bounds(placement.bounds);
-            let bounds = Aabb::new(
-                bounds.min + Vec3::new(0.0, settle[index], 0.0),
-                bounds.max + Vec3::new(0.0, settle[index], 0.0),
-            );
             let size = placement.bounds.size();
             let longest = size.x.max(size.y).max(size.z);
             if config.props.bake_max_size > 0.0 && longest > config.props.bake_max_size {
                 continue;
             }
             let Some(mesh) = assets.prop_meshes.get(placement.mesh) else { continue };
-            let Some(cell) = crate::output::bake::anchor(&grid, bounds, &taken) else { continue };
 
-            let origin = transform.to_block_space(placement.prop.origin);
-            let key = crate::output::bake::Key::new(
-                &mesh.id,
-                crate::output::display::rotation(&placement.prop, &transform),
-                Vec3::new(origin.x, origin.y + settle[index], origin.z),
-                cell,
-                placement.prop.scale,
-                config.props.bake_grid,
+            let quaternion = crate::output::display::rotation(&placement.prop, &transform);
+            let rounded = crate::output::display::dequantize(crate::output::display::quantize(
+                quaternion,
                 config.props.bake_angle_steps,
-            );
-            let id = key.id();
-            if pack.prop(&id).is_none() {
-                let place = key.place(config.props.bake_grid);
-                let asset = mesh.asset(id.clone(), Some(&place));
-                pack.insert_prop(asset, Vec::new());
+            ));
+            let basis = crate::output::display::basis_of(rounded);
+            let origin = transform.to_block_space(placement.prop.origin);
+            let origin = Vec3::new(origin.x, origin.y + settle[index], origin.z);
+
+            // A block model may be drawn outside its own block, but Sodium
+            // packs chunk vertex coordinates into a range only 32 blocks wide
+            // and masks off the rest, so a mesh reaching too far folds back on
+            // itself. Anything that big is carried by several blocks instead.
+            let reach = config.props.bake_reach.max(f64::MIN_POSITIVE);
+            let pieces =
+                mesh.split(basis, placement.prop.scale, reach);
+
+            // All of a prop's pieces are placed or none of them is: half a
+            // gantry is worse than a gantry drawn the slow way. Cells are
+            // claimed as they are chosen and given back if the prop is
+            // abandoned, so two pieces of the same prop cannot be handed the
+            // same cell — the second block would replace the first and that
+            // part of the mesh would simply not be drawn.
+            let mut placing = Vec::with_capacity(pieces.len());
+            let mut claimed: Vec<IVec3> = Vec::new();
+            for piece in &pieces {
+                // Inside what this piece actually covers, which for a prop
+                // small enough not to be split is the whole prop's extent.
+                let Some(cell) = crate::output::bake::anchor(
+                    &grid,
+                    Aabb::new(origin + piece.bounds.min, origin + piece.bounds.max),
+                    &taken,
+                ) else {
+                    placing.clear();
+                    break;
+                };
+                taken.insert(cell);
+                claimed.push(cell);
+                let key = crate::output::bake::Key::new(
+                    &mesh.id,
+                    quaternion,
+                    origin,
+                    cell,
+                    placement.prop.scale,
+                    config.props.bake_grid,
+                    config.props.bake_angle_steps,
+                    piece.centre,
+                );
+                // What the split actually achieved, rather than what it was
+                // asked for: a single triangle wider than the reach cannot be
+                // cut up by grouping, since nothing splits one triangle. A
+                // prop still over the limit keeps the entity route, which is
+                // drawn by the entity renderer and has no such limit.
+                if mesh.reach_of(&key.place(config.props.bake_grid), piece) > reach {
+                    placing.clear();
+                    break;
+                }
+                placing.push((key, cell, piece));
             }
-            taken.insert(cell);
-            baked.push((index, cell, format!("{}:{id}", crate::output::kubejs::NAMESPACE)));
+            if placing.is_empty() {
+                for cell in claimed {
+                    taken.remove(&cell);
+                }
+                continue;
+            }
+
+            for (key, cell, piece) in placing {
+                let id = key.id();
+                if pack.prop(&id).is_none() {
+                    let place = key.place(config.props.bake_grid);
+                    let asset = mesh.asset(id.clone(), Some(&place), Some(piece));
+                    pack.insert_prop(asset, Vec::new());
+                }
+                baked.push((index, cell, format!("{}:{id}", crate::output::kubejs::NAMESPACE)));
+            }
         }
     }
     assets.pack = pack;
@@ -1007,10 +1057,24 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         let id = palette.intern(block);
         grid.set(*cell, id);
     }
+
+    // Collision last, and only where there is nothing already. A barrier is
+    // invisible, so overwriting a wall with one opens a hole you can see
+    // straight through; and coming after hollowing means it cannot make the
+    // map's own blocks look like interior worth removing.
+    let mut barriers = 0;
+    for (pos, block) in collision.iter() {
+        if grid.get(pos) == AIR {
+            grid.set(pos, block);
+            barriers += 1;
+        }
+    }
     let grid = grid;
-    let props_baked = baked.len();
     let is_baked: std::collections::HashSet<usize> =
         baked.iter().map(|(index, _, _)| *index).collect();
+    // Props, not blocks: one that had to be split is still one prop.
+    let props_baked = is_baked.len();
+    let prop_blocks = baked.len();
 
     let palette = palette;
     let mut block_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -1060,6 +1124,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             prop_models: assets.stats.prop_models,
             props_settled: settled,
             props_baked,
+            prop_blocks,
             prop_barriers: barriers,
             shapes_fitted,
             blocks_before_hollow,
@@ -1614,7 +1679,58 @@ mod tests {
                 blocks += 1;
             }
         }
-        assert_eq!(blocks, on.stats.props_baked, "a baked prop has no block");
+        assert_eq!(blocks, on.stats.prop_blocks, "a baked prop has no block");
+        assert!(
+            on.stats.prop_blocks >= on.stats.props_baked,
+            "a prop cannot take fewer than one block"
+        );
+    }
+
+    /// The failure that showed up as huge black sheets folded over the map.
+    ///
+    /// Sodium packs each chunk vertex coordinate into 20 bits spanning -8 to
+    /// +24 blocks from the section origin and masks off the rest, so a block
+    /// model reaching further than that is drawn correctly up to the limit and
+    /// then folds back on itself. A block can sit anywhere in its 16-block
+    /// section, so 8 blocks either way is the reach that is safe wherever it
+    /// lands, and no generated mesh may exceed it.
+    #[test]
+    fn no_baked_mesh_reaches_further_than_a_chunk_vertex_can_be_encoded() {
+        let Some(map) = sample_map() else { return };
+        let config = kubejs_config();
+        let converted = convert(&map, &config).unwrap();
+        if converted.stats.props_baked == 0 {
+            return;
+        }
+
+        let mut worst: f64 = 0.0;
+        let mut worst_id = String::new();
+        let mut checked = 0;
+        for asset in converted.pack.props() {
+            // Only the baked variants; the model-space assets an entity places
+            // are drawn by the entity renderer, which has no such limit.
+            if !asset.id.contains("_b") || asset.id == asset.mtl_id {
+                continue;
+            }
+            checked += 1;
+            for line in asset.obj.lines().filter(|l| l.starts_with("v ")) {
+                for value in line.split_whitespace().skip(1) {
+                    let reach: f64 = value.parse().unwrap_or(0.0);
+                    if reach.abs() > worst {
+                        worst = reach.abs();
+                        worst_id = asset.id.clone();
+                    }
+                }
+            }
+        }
+
+        assert!(checked > 0, "no baked variants to check");
+        assert!(
+            worst <= config.props.bake_reach,
+            "{worst_id} reaches {worst:.1} blocks from its block; past \
+             {} the coordinate wraps and the mesh folds back",
+            config.props.bake_reach
+        );
     }
 
     /// Two props must never be given the same cell, or the second block
