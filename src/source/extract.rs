@@ -50,13 +50,10 @@ pub struct PropSurface {
     /// Triangles in Source world space.
     pub triangles: Vec<[Vec3; 3]>,
     /// Each triangle corner's position in texture space, parallel to
-    /// `triangles`. Empty when the surface is only there to be solid.
+    /// `triangles`.
     pub uvs: Vec<[[f64; 2]; 3]>,
-    /// Index into the material list [`Assets::materials`] returns, or `None`
-    /// for a prop that is drawn as its own mesh and only needs something solid
-    /// behind it. Those become invisible barriers rather than blocks, so you
-    /// can lean on a car without seeing a staircase of cubes inside it.
-    pub material: Option<usize>,
+    /// Index into the material list [`Assets::materials`] returns.
+    pub material: usize,
 }
 
 /// One prop drawn as its real mesh, and where the map puts it.
@@ -68,6 +65,16 @@ pub struct PropPlacement {
     /// Culling box of the model, in blocks.
     pub width: f32,
     pub height: f32,
+    /// Where the placed mesh sits, in Source world space. What decides how far
+    /// the prop has to move to meet the floor the conversion built.
+    pub bounds: crate::geom::Aabb,
+    /// Triangles to make solid behind the mesh, in Source world space. Empty
+    /// for a prop small enough to walk through.
+    ///
+    /// Kept with the placement rather than alongside the voxelized props
+    /// because the two move together: settling a crate onto the floor has to
+    /// take its collision with it, or you stand on air above it.
+    pub collision: Vec<[Vec3; 3]>,
 }
 
 /// Everything read off the search path for one map.
@@ -451,27 +458,40 @@ fn place_props(
             };
 
             if let Some((block, width, height)) = mesh {
+                // Big props are solid, small ones are scenery you walk
+                // through. A display entity has no collision of its own, so
+                // being solid means invisible barriers behind the mesh.
+                let collision: Vec<[Vec3; 3]> = if longest >= config.props.collision_min_size {
+                    model
+                        .parts
+                        .iter()
+                        .flat_map(|part| &part.triangles)
+                        .map(|tri| tri.map(|v| prop.place(v)))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                let mut bounds = crate::geom::Aabb::empty();
+                for corner in 0..8 {
+                    let pick = |axis: usize, lo: Vec3, hi: Vec3| {
+                        if corner & (1 << axis) == 0 { lo.axis(axis) } else { hi.axis(axis) }
+                    };
+                    bounds.extend(prop.place(Vec3::new(
+                        pick(0, model.bounds.min, model.bounds.max),
+                        pick(1, model.bounds.min, model.bounds.max),
+                        pick(2, model.bounds.min, model.bounds.max),
+                    )));
+                }
+
                 assets.placements.push(PropPlacement {
                     prop: prop.clone(),
                     block,
                     width: width * prop.scale as f32,
                     height: height * prop.scale as f32,
+                    bounds,
+                    collision,
                 });
-                // Big props are solid, small ones are scenery you walk
-                // through. A display entity has no collision of its own, so
-                // being solid means invisible barriers behind the mesh.
-                if longest >= config.props.collision_min_size {
-                    assets.props.push(PropSurface {
-                        triangles: model
-                            .parts
-                            .iter()
-                            .flat_map(|part| &part.triangles)
-                            .map(|tri| tri.map(|v| prop.place(v)))
-                            .collect(),
-                        uvs: Vec::new(),
-                        material: None,
-                    });
-                }
                 assets.stats.props_placed += 1;
                 assets.stats.props_modelled += 1;
                 continue;
@@ -506,7 +526,7 @@ fn place_props(
             assets.props.push(PropSurface {
                 triangles: part.triangles.iter().map(|tri| tri.map(|v| prop.place(v))).collect(),
                 uvs: part.uvs.clone(),
-                material: Some(material),
+                material,
             });
         }
         assets.stats.props_placed += 1;
@@ -815,7 +835,7 @@ mod tests {
         let all = assets.materials(&map);
         let bounds = map.bounds();
         for surface in &assets.props {
-            assert!(surface.material.is_none_or(|m| m < all.len()));
+            assert!(surface.material < all.len());
             for v in surface.triangles.iter().flatten() {
                 assert!(v.is_finite());
                 for axis in 0..3 {
@@ -916,14 +936,11 @@ mod tests {
         if assets.placements.is_empty() {
             return;
         }
-        // Anything left in `props` for a modelled prop carries no material,
-        // which is what makes it a barrier rather than a block you can see.
-        let solid = assets.props.iter().filter(|s| s.material.is_none()).count();
+        // A modelled prop's solid backing lives on the placement, so it can
+        // move with the mesh and stay out of the world's own blocks.
+        let solid = assets.placements.iter().filter(|p| !p.collision.is_empty()).count();
         assert!(solid > 0, "no props are solid at all");
-        assert!(
-            solid <= assets.placements.len(),
-            "more collision hulls than props"
-        );
+        assert!(solid < assets.placements.len(), "even small clutter is solid");
     }
 
     /// Turning the meshes off has to give back exactly the old behaviour.
@@ -936,7 +953,7 @@ mod tests {
 
         assert!(assets.placements.is_empty());
         assert_eq!(assets.stats.props_modelled, 0);
-        assert!(assets.props.iter().all(|s| s.material.is_some()));
+        assert!(!assets.props.is_empty(), "props should be voxelized instead");
     }
 
     /// Vanilla output has no pack to register meshes in, so it must keep

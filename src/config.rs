@@ -388,6 +388,21 @@ pub struct Props {
     /// How many times a texture may be repeated into one image so that a
     /// model's tiling UVs stay inside the atlas sprite. See `output::obj`.
     pub texture_repeat_max: u32,
+    /// Move a prop vertically so it stands on the floor the conversion built
+    /// rather than in it.
+    ///
+    /// A prop is placed to a fraction of a block; the floor under it is
+    /// voxelized to whole ones, so the two disagree by up to a block and a
+    /// crate sinks into the ground. Cubing the prop hid that, because the
+    /// cubes were rounded by the same grid.
+    pub settle: bool,
+    /// How far settling may move a prop, in blocks.
+    ///
+    /// The correction exists to undo the grid's own rounding, so a block
+    /// covers it. Further than that is not rounding — it is a prop over a hole
+    /// the conversion did not build — and moving it there would invent a
+    /// position rather than recover one.
+    pub settle_max: f64,
     /// Props whose longest dimension is at least this many Source units get
     /// invisible barrier blocks so they are solid. Smaller clutter is left
     /// walk-through; 0 makes everything solid, and a huge value nothing.
@@ -425,6 +440,8 @@ impl Default for Props {
             entity_props: true,
             texture_size: 128,
             texture_repeat_max: 4,
+            settle: true,
+            settle_max: 1.0,
             collision_min_size: 48.0,
             view_range: 1.0,
             max_triangles: 4_000,

@@ -321,9 +321,13 @@ fn convert_into(
             "  {} of them drawn as their own mesh, from {} models",
             stats.props_modelled, stats.prop_models,
         );
+        eprintln!(
+            "  {} settled onto the floor, {} barrier blocks behind the big ones",
+            stats.props_settled, stats.prop_barriers,
+        );
     }
     eprintln!(
-        "  {} blocks after hollowing (from {})",
+        "  {} blocks, from {} of solid world before hollowing",
         stats.blocks, stats.blocks_before_hollow,
     );
     if stats.shapes_fitted > 0 {
