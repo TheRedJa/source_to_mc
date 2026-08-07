@@ -4,7 +4,8 @@ Convert Source Engine maps (`.bsp`) into Minecraft 1.21.1 schematics, so that
 recreating a game's geometry does not start with days of manual blocking-out.
 
 Built for recreating **Entropy: Zero** and **Entropy: Zero 2**, and tested
-against every stock map in both, plus Half-Life 2.
+against every stock map in both, plus Half-Life 2. Portal, Portal 2 and INFRA
+convert as well.
 
 ## Status
 
@@ -73,7 +74,16 @@ src2mc batch    maps/*.bsp -o out/ --spacing 256 --emit-dimension
 
 # With the map's own textures, as generated blocks (needs KubeJS).
 src2mc convert  maps/ez2_c1_1.bsp -o out/ --textures kubejs
+
+# Maps that ship only inside a VPK. `maps` prints each one already in the
+# archive:map form every other command takes.
+src2mc maps    infra/pak02_dir.vpk
+src2mc convert infra/pak02_dir.vpk:maps/infra_c1_m1_office.bsp -o out/
 ```
+
+Every command that takes a map takes either form. The search path for textures
+and models is rebuilt from the map's own `gameinfo.txt` either way, so a map
+read out of an archive resolves its content exactly like a loose one.
 
 `--tile-size` accepts up to 32767, the schematic format's per-axis limit. The
 practical ceiling is memory rather than the format: a schematic stores one entry
@@ -179,7 +189,6 @@ block, and the prop becomes an ordinary block placed in a free cell inside its
 own geometry — chunk-baked, free per frame, and lit face by face rather than by
 the single cell it stands in. Placements that round to the same angle and
 offset share one block, so a row of identical fence posts is one registration.
-`d1_trainstation_02`'s 325 meshes come to 258 of them.
 
 A block model may be drawn outside its own block, but not arbitrarily far.
 Sodium packs each chunk vertex coordinate into 20 bits spanning −8 to +24
@@ -192,7 +201,14 @@ that is carried by several blocks instead, each drawing the part of the mesh
 nearest it. Triangles too wide to fit in any one piece — a light shaft is often
 a single pair of them — are split at their longest edge first, which is exact
 on a flat triangle. `d1_trainstation_02` ends up with 321 of its 325 props
-baked and 4 still entities.
+baked and 4 still entities; across 140 stock Half-Life 2 and Entropy: Zero
+maps, 45,676 props bake and 531 do not, and no generated model reaches further
+than the 8 blocks it may.
+
+Splitting is what it costs: `d1_trainstation_02` registers 2195 blocks for its
+props where one block per placement was 258, and its pack grows from 86 MB to
+107 MB. Registration count itself is cheap — KubeJS loads tens of thousands of
+blocks in a fraction of a second — so what grows is disk.
 
 The block never replaces anything: it only ever takes a cell that is already
 air, since taking one of the map's own would be a hole in whatever the prop
@@ -479,3 +495,12 @@ cargo test --release
 
 Tests that need real maps look for an Entropy: Zero install and skip themselves
 when it is absent.
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE): free to use, modify and share for any
+noncommercial purpose.
+
+src2mc ships no game content. Textures, models and maps are read out of your own
+installation of the game, and nothing of Valve's is redistributed with the tool
+or with this repository.

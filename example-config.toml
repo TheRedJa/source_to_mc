@@ -133,10 +133,10 @@ enabled = true
 solidify = 2
 
 [props]
-# Voxelize prop_static models: the fences, railings, catwalks, crates, signs
-# and lamps that fill a map's rooms. None of it is in any brush lump, so
-# without this a converted map is an accurate but empty shell. Needs the game's
-# content on the search path, since a map stores only the path to each model.
+# Convert props at all: the fences, railings, catwalks, crates, signs, cars and
+# lamps that fill a map's rooms. None of it is in any brush lump, so without
+# this a converted map is an accurate but empty shell. Needs the game's content
+# on the search path, since a map stores only the path to each model.
 enabled = true
 # Ignore props whose longest dimension is under this many Source units. At 16
 # units per block anything smaller cannot be more than a stray cube, and maps
@@ -156,10 +156,10 @@ solidify = 0
 
 # Draw props as their real triangle mesh instead of voxelizing them. A forklift,
 # a car or a rock was never designed for a grid, so cubing it is where the
-# conversion looks worst. NeoForge's OBJ model loader renders an arbitrary mesh
-# and a block_display entity places it at any angle, so the prop can just be
-# itself. Needs the generated pack, so it only applies when
-# `[materials] mode = "kubejs"`; vanilla output is unchanged.
+# conversion looks worst. NeoForge's OBJ model loader draws an arbitrary mesh
+# from a block model, and the map's own rotation is baked into that mesh (see
+# `bake` below), so the prop can just be itself. Needs the generated pack, so it
+# only applies when `[materials] mode = "kubejs"`; vanilla output is unchanged.
 models = true
 # Also read props out of the entity lump — prop_physics, prop_dynamic and
 # anything else naming a .mdl — rather than only the compiled sprp lump. That is
