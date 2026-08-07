@@ -396,7 +396,7 @@ impl Pack {
             let models = assets.join("models").join("props");
             let block_models = assets.join("models").join("block");
             let blockstates = assets.join("blockstates");
-            let prop_textures = assets.join("textures").join("props");
+            let prop_textures = assets.join("textures");
             for dir in [&models, &block_models, &blockstates, &prop_textures] {
                 std::fs::create_dir_all(dir)
                     .with_context(|| format!("creating {}", dir.display()))?;
@@ -420,10 +420,15 @@ impl Pack {
             }
 
             for (name, image) in &self.prop_textures {
-                let leaf = name.rsplit('/').next().unwrap_or(name);
                 let png = crate::source::vtf::to_png(image)?;
                 bytes += png.len();
-                let path = prop_textures.join(format!("{leaf}.png"));
+                // The name carries its folders, and they decide which atlas
+                // the sprite lands on, so it is written where it says.
+                let path = prop_textures.join(format!("{name}.png"));
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("creating {}", parent.display()))?;
+                }
                 std::fs::write(&path, png)
                     .with_context(|| format!("writing {}", path.display()))?;
             }

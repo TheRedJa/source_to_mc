@@ -36,8 +36,18 @@ use crate::source::vtf::Textures;
 use image::RgbaImage;
 use std::collections::BTreeMap;
 
-/// Where a prop's meshes and their textures live inside the pack.
+/// Where a prop's meshes live inside the pack.
 const MODEL_DIR: &str = "props";
+
+/// Where a prop's textures live inside the pack.
+///
+/// Under `block/`, and not in a folder of their own, because that is what
+/// decides whether they are stitched into an atlas at all. Minecraft builds the
+/// block atlas from the source directories listed in `atlases/blocks.json`,
+/// which is `block` and `item` — a texture anywhere else is simply not on the
+/// atlas, and a model referring to it draws the black-and-purple missing
+/// texture. The directory source recurses, so a subfolder is fine.
+const TEXTURE_DIR: &str = "block/props";
 
 /// One prop model, as the files that render it.
 #[derive(Debug, Clone)]
@@ -160,19 +170,32 @@ impl Repeat {
 
         let mut repeat =
             Repeat { origin: [0, 0], count: [1, 1], capped: false };
+        let mut spans = [1.0f64; 2];
         for axis in 0..2 {
             if lo[axis] > hi[axis] {
                 continue;
             }
             let origin = lo[axis].floor();
-            let span = (hi[axis] - origin).ceil().max(1.0);
             // A wildly stretched unwrap would otherwise ask for a texture of
             // thousands of tiles, which is neither useful nor affordable.
-            let count = span.min(f64::from(max)) as u32;
+            spans[axis] = (hi[axis] - origin).ceil().max(1.0);
             repeat.origin[axis] = origin as i32;
-            repeat.count[axis] = count.max(1);
-            repeat.capped |= span > f64::from(count);
         }
+
+        // Square, even when only one axis tiles. Minecraft reads a sprite
+        // taller than it is wide as an animation strip and shows one frame of
+        // it; wider than tall it rejects outright as a broken aspect ratio, and
+        // the model then draws the missing texture. Repeating the other axis
+        // too costs image area and nothing else — the coordinates still divide
+        // by their own count, so one pass over the sheet is still one copy.
+        let square = spans
+            .iter()
+            .map(|span| span.min(f64::from(max)) as u32)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        repeat.count = [square; 2];
+        repeat.capped = spans.iter().any(|span| *span > f64::from(square));
         repeat
     }
 
@@ -290,7 +313,7 @@ pub fn build(
         let Some(assets) = materials.assets(&part.material, None) else { continue };
         let repeat = Repeat::of(part.uvs.iter(), config.props.texture_repeat_max);
         let name = format!(
-            "{MODEL_DIR}/{}_{}",
+            "{TEXTURE_DIR}/{}_{}",
             block_id(&part.material),
             repeat.suffix()
         );
@@ -440,7 +463,7 @@ mod tests {
     fn tiling_uvs_are_brought_inside_the_sprite() {
         let corners = uvs(&[[0.0, 0.0], [6.0, 0.0], [3.0, 1.0]]);
         let repeat = Repeat::of(corners.iter(), 8);
-        assert_eq!(repeat.count, [6, 1]);
+        assert_eq!(repeat.count, [6, 6], "the image has to stay square");
         for corner in corners.iter().flatten() {
             let [u, v] = repeat.apply(*corner);
             assert!((0.0..=1.0).contains(&u), "u {u} escaped the sprite");
@@ -465,12 +488,48 @@ mod tests {
     fn a_capped_repeat_wraps_instead_of_escaping() {
         let corners = uvs(&[[0.0, 0.0], [40.0, 0.0], [20.0, 1.0]]);
         let repeat = Repeat::of(corners.iter(), 4);
-        assert_eq!(repeat.count, [4, 1]);
+        assert_eq!(repeat.count, [4, 4]);
         assert!(repeat.capped);
         for u in [0.0, 3.9, 4.0, 17.5, 39.9] {
             let mapped = repeat.apply([u, 0.0])[0];
             assert!((0.0..=1.0).contains(&mapped), "{u} mapped to {mapped}");
         }
+    }
+
+    /// Whatever the UVs ask for, the image stays square. Minecraft reads a
+    /// taller-than-wide sprite as an animation and shows one frame, and
+    /// rejects a wider-than-tall one outright — either way the prop draws the
+    /// missing texture.
+    #[test]
+    fn a_repeat_is_always_square() {
+        for corners in [
+            vec![[0.0, 0.0], [7.0, 0.0], [3.0, 1.0]],
+            vec![[0.0, 0.0], [1.0, 0.0], [0.5, 9.0]],
+            vec![[-3.0, -2.0], [0.0, 0.0], [-1.0, 5.0]],
+            vec![[0.0, 0.0], [0.2, 0.0], [0.1, 0.3]],
+        ] {
+            let repeat = Repeat::of(uvs(&corners).iter(), 8);
+            assert_eq!(
+                repeat.count[0], repeat.count[1],
+                "{corners:?} asked for a {:?} image",
+                repeat.count
+            );
+            // Still inside the sprite, which is the point of repeating at all.
+            for corner in &corners {
+                let [u, v] = repeat.apply(*corner);
+                assert!((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v));
+            }
+        }
+    }
+
+    /// A sprite outside `block/` or `item/` is on no atlas at all, and every
+    /// model naming it draws the missing texture.
+    #[test]
+    fn prop_textures_live_where_the_block_atlas_looks() {
+        assert!(
+            TEXTURE_DIR == "block" || TEXTURE_DIR.starts_with("block/"),
+            "{TEXTURE_DIR} is not a source directory of the block atlas"
+        );
     }
 
     #[test]
