@@ -9,10 +9,26 @@ use src2mc::output::{dimension, layout, tiling};
 use src2mc::voxel::transform::Transform;
 use std::path::{Path, PathBuf};
 
+/// What `--version` says beyond the number.
+///
+/// The executable is published on its own, so it has to carry its own terms:
+/// whoever ends up with a copy of the binary and nothing else can still see
+/// who wrote it and what they may do with it.
+const NOTICE: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    "Copyright 2026 TheRedJa <https://github.com/TheRedJa/source_to_mc>\n",
+    "PolyForm Noncommercial License 1.0.0 \
+     <https://polyformproject.org/licenses/noncommercial/1.0.0>\n",
+    "Free for any noncommercial purpose. No game content is included: textures,\n",
+    "models and maps are read from your own installation.",
+);
+
 #[derive(Parser)]
 #[command(
     name = "src2mc",
     version,
+    long_version = NOTICE,
     about = "Convert Source Engine maps to Minecraft schematics"
 )]
 struct Cli {

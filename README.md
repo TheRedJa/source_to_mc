@@ -496,6 +496,10 @@ cargo test --release
 Tests that need real maps look for an Entropy: Zero install and skip themselves
 when it is absent.
 
+A prebuilt x86-64 Linux binary is on the
+[releases page](https://github.com/TheRedJa/source_to_mc/releases), zipped with
+the licence, this README and `example-config.toml`.
+
 ## License
 
 Copyright 2026 TheRedJa. [PolyForm Noncommercial 1.0.0](LICENSE): free to use,

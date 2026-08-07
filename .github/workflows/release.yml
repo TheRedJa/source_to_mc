@@ -1,0 +1,52 @@
+name: Release
+
+# Push a tag to publish: `git tag v0.1.0 && git push origin v0.1.0`.
+on:
+  push:
+    tags: ["v*"]
+  # So a release can be rebuilt without moving a tag.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux x86-64
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build directory
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked --release
+
+      # The binary is published on its own, so the archive has to carry the
+      # terms with it: whoever downloads it may never see the repository.
+      - name: Package
+        id: package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="src2mc-${version}-x86_64-linux"
+          mkdir "$name"
+          cp target/release/src2mc "$name/"
+          cp LICENSE NOTICE README.md example-config.toml "$name/"
+          # Stored, not deflated: the archive is a container for the terms and
+          # the config, and 7 MB over HTTP is not worth a decompression step.
+          zip -0 -r "$name.zip" "$name"
+          echo "archive=$name.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.archive }}
+          generate_release_notes: true
