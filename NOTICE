@@ -1,0 +1,11 @@
+Required Notice: Copyright 2026 TheRedJa (https://github.com/TheRedJa/source_to_mc)
+
+src2mc is licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE,
+or <https://polyformproject.org/licenses/noncommercial/1.0.0>.
+
+Anyone who redistributes any part of src2mc has to pass on the licence, or its
+URL, along with the Required Notice line above.
+
+src2mc contains no game content. Textures, models and maps are read from the
+copy of the game on the machine it runs on; none of it is included here or in
+anything the tool is distributed as.

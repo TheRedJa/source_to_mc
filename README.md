@@ -498,8 +498,9 @@ when it is absent.
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](LICENSE): free to use, modify and share for any
-noncommercial purpose.
+Copyright 2026 TheRedJa. [PolyForm Noncommercial 1.0.0](LICENSE): free to use,
+modify and share for any noncommercial purpose. Redistributing any part of it
+means passing on the licence and the notice in [NOTICE](NOTICE).
 
 src2mc ships no game content. Textures, models and maps are read out of your own
 installation of the game, and nothing of Valve's is redistributed with the tool

@@ -2,6 +2,9 @@
 name = "src2mc"
 version = "0.1.0"
 edition = "2024"
+authors = ["TheRedJa"]
+description = "Convert Source Engine maps into Minecraft schematics"
+repository = "https://github.com/TheRedJa/source_to_mc"
 license = "PolyForm-Noncommercial-1.0.0"
 
 [dependencies]
