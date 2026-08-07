@@ -33,6 +33,10 @@ pub struct Extracted {
     pub props_skipped: usize,
     /// Distinct models read successfully.
     pub models_loaded: usize,
+    /// Props placed as their real mesh rather than as blocks.
+    pub props_modelled: usize,
+    /// Distinct meshes generated for them.
+    pub prop_models: usize,
     /// Blocks registered for materials split across several of them.
     pub tiles: usize,
     /// Tiles per axis the budget allowed, which is what the textures were
@@ -46,10 +50,24 @@ pub struct PropSurface {
     /// Triangles in Source world space.
     pub triangles: Vec<[Vec3; 3]>,
     /// Each triangle corner's position in texture space, parallel to
-    /// `triangles`.
+    /// `triangles`. Empty when the surface is only there to be solid.
     pub uvs: Vec<[[f64; 2]; 3]>,
-    /// Index into the material list [`Assets::materials`] returns.
-    pub material: usize,
+    /// Index into the material list [`Assets::materials`] returns, or `None`
+    /// for a prop that is drawn as its own mesh and only needs something solid
+    /// behind it. Those become invisible barriers rather than blocks, so you
+    /// can lean on a car without seeing a staircase of cubes inside it.
+    pub material: Option<usize>,
+}
+
+/// One prop drawn as its real mesh, and where the map puts it.
+#[derive(Debug, Clone)]
+pub struct PropPlacement {
+    pub prop: crate::bsp::props::Prop,
+    /// Namespaced id of the generated block whose model is this mesh.
+    pub block: String,
+    /// Culling box of the model, in blocks.
+    pub width: f32,
+    pub height: f32,
 }
 
 /// Everything read off the search path for one map.
@@ -61,6 +79,8 @@ pub struct Assets {
     /// Materials that only props use, to be appended after the map's own.
     pub prop_materials: Vec<Material>,
     pub props: Vec<PropSurface>,
+    /// Props rendered as their own mesh rather than voxelized.
+    pub placements: Vec<PropPlacement>,
     pub stats: Extracted,
 }
 
@@ -83,7 +103,7 @@ impl Assets {
 /// and the palette falls back to rules and colour matching for those.
 pub fn extract(map: &Map, config: &Config) -> Assets {
     let want_pack = config.materials.mode == crate::config::MaterialMode::Kubejs;
-    let want_props = config.props.enabled && !map.bsp.static_props.props.props.is_empty();
+    let want_props = config.props.enabled;
     if !want_pack && !want_props {
         return Assets::default();
     }
@@ -351,7 +371,16 @@ fn place_props(
     mut pending: Option<&mut Vec<Pending>>,
     assets: &mut Assets,
 ) {
-    let props = crate::bsp::props::extract(&map.bsp);
+    let mut props = crate::bsp::props::extract(&map.bsp);
+    if config.props.entity_props {
+        // Crates, barrels, doors and cars are entities, not `sprp` records.
+        props.extend(crate::bsp::props::extract_entities(&map.bsp));
+    }
+    // Whether props may be drawn as their own mesh. It needs the generated
+    // pack, since that is what registers the models, so this is a `kubejs`
+    // mode feature and vanilla output is unchanged.
+    let modelled = config.props.models && pending.is_some();
+    let mut prop_textures = Textures::new(vfs, config.props.texture_size);
     // A malformed pattern must not take the conversion down with it; the
     // config loader already reports one, so here it simply skips nothing.
     let skip = globset(&config.props.skip).unwrap_or_else(|_| globset(&[]).unwrap());
@@ -362,6 +391,10 @@ fn place_props(
     let skybox = map.skybox().filter(|_| config.contents.skip_3d_skybox);
 
     let mut models = Models::new(vfs);
+    // Model path to the mesh built for it, so a fence repeated a dozen times
+    // is one OBJ and one attempt at building it.
+    let mut meshes: std::collections::HashMap<String, Option<(String, f32, f32)>> =
+        std::collections::HashMap::new();
     // Material name to its index in the combined list. The map's own
     // materials come first and keep the indices the BSP gave them.
     let mut index_of: std::collections::HashMap<String, usize> = map
@@ -393,6 +426,58 @@ fn place_props(
             continue;
         }
 
+        // Drawn as itself, if a mesh can be built for it. Everything that can
+        // go wrong here — a material with no texture, a model heavier than the
+        // budget — falls back to voxelizing, so a prop is never lost for want
+        // of a mesh.
+        if modelled {
+            let mesh = match meshes.get(&prop.model) {
+                Some(cached) => cached.clone(),
+                None => {
+                    let built = crate::output::obj::build(
+                        &prop.model,
+                        &model,
+                        config,
+                        materials,
+                        &mut prop_textures,
+                    )
+                    .map(|(asset, textures)| {
+                        let (width, height) = (asset.width, asset.height);
+                        (assets.pack.insert_prop(asset, textures), width, height)
+                    });
+                    meshes.insert(prop.model.clone(), built.clone());
+                    built
+                }
+            };
+
+            if let Some((block, width, height)) = mesh {
+                assets.placements.push(PropPlacement {
+                    prop: prop.clone(),
+                    block,
+                    width: width * prop.scale as f32,
+                    height: height * prop.scale as f32,
+                });
+                // Big props are solid, small ones are scenery you walk
+                // through. A display entity has no collision of its own, so
+                // being solid means invisible barriers behind the mesh.
+                if longest >= config.props.collision_min_size {
+                    assets.props.push(PropSurface {
+                        triangles: model
+                            .parts
+                            .iter()
+                            .flat_map(|part| &part.triangles)
+                            .map(|tri| tri.map(|v| prop.place(v)))
+                            .collect(),
+                        uvs: Vec::new(),
+                        material: None,
+                    });
+                }
+                assets.stats.props_placed += 1;
+                assets.stats.props_modelled += 1;
+                continue;
+            }
+        }
+
         for part in &model.parts {
             let material = match index_of.get(&part.material) {
                 Some(index) => *index,
@@ -421,13 +506,15 @@ fn place_props(
             assets.props.push(PropSurface {
                 triangles: part.triangles.iter().map(|tri| tri.map(|v| prop.place(v))).collect(),
                 uvs: part.uvs.clone(),
-                material,
+                material: Some(material),
             });
         }
         assets.stats.props_placed += 1;
     }
 
     assets.stats.models_loaded = models.stats().1;
+    assets.stats.prop_models = meshes.values().filter(|m| m.is_some()).count();
+    assets.pack.set_flip_v(config.props.flip_v);
 }
 
 /// Describe a prop's material the way the BSP describes a wall's, so both go
@@ -728,7 +815,7 @@ mod tests {
         let all = assets.materials(&map);
         let bounds = map.bounds();
         for surface in &assets.props {
-            assert!(surface.material < all.len());
+            assert!(surface.material.is_none_or(|m| m < all.len()));
             for v in surface.triangles.iter().flatten() {
                 assert!(v.is_finite());
                 for axis in 0..3 {
@@ -761,6 +848,133 @@ mod tests {
             "only {coloured} of {} prop materials have a colour",
             assets.prop_materials.len()
         );
+    }
+
+    /// The point of drawing props as meshes: most of them stop being blocks.
+    #[test]
+    fn props_come_back_as_meshes_rather_than_voxels() {
+        let Some(map) = sample_map() else { return };
+        let assets = extract(&map, &kubejs());
+        if assets.stats.props_placed == 0 {
+            return;
+        }
+
+        assert!(
+            assets.stats.props_modelled * 2 > assets.stats.props_placed,
+            "only {} of {} props are drawn as themselves",
+            assets.stats.props_modelled,
+            assets.stats.props_placed
+        );
+        assert_eq!(assets.placements.len(), assets.stats.props_modelled);
+        // A model placed many times is one mesh, or a map of fences would
+        // register hundreds of copies of one fence.
+        assert!(
+            assets.stats.prop_models < assets.stats.props_modelled,
+            "{} meshes for {} placements: nothing is being shared",
+            assets.stats.prop_models,
+            assets.stats.props_modelled
+        );
+    }
+
+    /// The failure that produces a silently broken paste: an entity naming a
+    /// block the pack never registered. Nothing else in the output shows it.
+    #[test]
+    fn every_prop_an_entity_names_is_registered_and_has_its_files() {
+        let Some(map) = sample_map() else { return };
+        let assets = extract(&map, &kubejs());
+        if assets.placements.is_empty() {
+            return;
+        }
+
+        let script = assets.pack.script();
+        for placement in &assets.placements {
+            assert!(
+                script.contains(&format!("event.create('{}')", placement.block)),
+                "{} is placed but never registered",
+                placement.block
+            );
+            let asset = assets
+                .pack
+                .prop(&placement.block)
+                .unwrap_or_else(|| panic!("{} has no mesh", placement.block));
+            assert!(!asset.obj.is_empty() && !asset.mtl.is_empty());
+            assert!(!asset.textures.is_empty(), "{} wears nothing", asset.id);
+            // The MTL and the model JSON have to agree on every slot, or the
+            // loader silently draws the model untextured.
+            for slot in asset.textures.keys() {
+                assert!(asset.mtl.contains(&format!("#{slot}")), "{slot} is not in the MTL");
+            }
+        }
+    }
+
+    /// A prop drawn as a mesh must not also be voxelized into visible blocks;
+    /// the whole point is that the cubes are gone.
+    #[test]
+    fn modelled_props_leave_only_invisible_collision_behind() {
+        let Some(map) = sample_map() else { return };
+        let assets = extract(&map, &kubejs());
+        if assets.placements.is_empty() {
+            return;
+        }
+        // Anything left in `props` for a modelled prop carries no material,
+        // which is what makes it a barrier rather than a block you can see.
+        let solid = assets.props.iter().filter(|s| s.material.is_none()).count();
+        assert!(solid > 0, "no props are solid at all");
+        assert!(
+            solid <= assets.placements.len(),
+            "more collision hulls than props"
+        );
+    }
+
+    /// Turning the meshes off has to give back exactly the old behaviour.
+    #[test]
+    fn prop_meshes_can_be_turned_off() {
+        let Some(map) = sample_map() else { return };
+        let mut config = kubejs();
+        config.props.models = false;
+        let assets = extract(&map, &config);
+
+        assert!(assets.placements.is_empty());
+        assert_eq!(assets.stats.props_modelled, 0);
+        assert!(assets.props.iter().all(|s| s.material.is_some()));
+    }
+
+    /// Vanilla output has no pack to register meshes in, so it must keep
+    /// voxelizing however the config is set.
+    #[test]
+    fn vanilla_mode_never_produces_meshes() {
+        let Some(map) = sample_map() else { return };
+        let mut config = Config::default();
+        config.props.models = true;
+        let assets = extract(&map, &config);
+        assert!(assets.placements.is_empty());
+        assert!(assets.pack.is_empty());
+    }
+
+    /// Crates, barrels, doors and cars live in the entity lump, and leaving
+    /// them out is why a converted warehouse is an empty warehouse.
+    #[test]
+    fn entity_props_are_placed_too() {
+        let Some(map) = sample_map() else { return };
+        let mut without = Config::default();
+        without.props.entity_props = false;
+        let without = extract(&map, &without);
+        let with = extract(&map, &Config::default());
+
+        assert!(
+            with.stats.props_placed > without.stats.props_placed,
+            "{} props either way: the entity lump contributed nothing",
+            with.stats.props_placed
+        );
+    }
+
+    /// A model `vmdl` cannot read must cost one prop, not the conversion. The
+    /// entity lump is full of animated models it panics on.
+    #[test]
+    fn an_unreadable_model_does_not_take_the_map_down() {
+        let Some(map) = sample_map() else { return };
+        let assets = extract(&map, &Config::default());
+        assert!(assets.stats.props_placed > 0);
     }
 
     #[test]

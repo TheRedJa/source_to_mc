@@ -19,6 +19,13 @@ pub struct Tile {
     pub max: IVec3,
     pub size: IVec3,
     pub blocks: usize,
+    /// Props placed in this tile as display entities. Pasted with `-e`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub props: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +41,13 @@ pub struct Manifest {
     /// Brush entities written to their own schematics.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entities: Vec<EntityTile>,
+    /// Props embedded in the schematics as display entities, which only paste
+    /// with `//paste -e`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub props: usize,
+    /// The `summon` script that places the same props, if one was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prop_function: Option<String>,
     /// Blocks these schematics need registered before they will paste. Empty
     /// unless textures were generated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -104,6 +118,25 @@ pub fn write_tiles(
     units_per_block: f64,
     block_counts: std::collections::BTreeMap<String, usize>,
 ) -> Result<Manifest> {
+    write_tiles_with_props(dir, map_name, grid, &[], palette, tile_size, units_per_block, block_counts)
+}
+
+/// As [`write_tiles`], placing each prop into the tile it stands in.
+///
+/// A prop that lands in a tile holding no blocks still gets one: dropping it
+/// because nothing solid happens to share its cell would lose exactly the
+/// free-standing scenery this is for.
+#[allow(clippy::too_many_arguments)]
+pub fn write_tiles_with_props(
+    dir: &Path,
+    map_name: &str,
+    grid: &VoxelGrid,
+    props: &[crate::output::display::Placement],
+    palette: &Palette,
+    tile_size: Option<u32>,
+    units_per_block: f64,
+    block_counts: std::collections::BTreeMap<String, usize>,
+) -> Result<Manifest> {
     if let Some(size) = tile_size {
         ensure!(size > 0, "--tile-size must be at least 1");
         ensure!(
@@ -112,7 +145,30 @@ pub fn write_tiles(
         );
     }
 
+    let key_of = |pos: [i32; 3]| -> IVec3 {
+        match tile_size {
+            None => [0, 0, 0],
+            Some(size) => {
+                let size = size as i32;
+                [
+                    floor_div(pos[0], size),
+                    floor_div(pos[1], size),
+                    floor_div(pos[2], size),
+                ]
+            }
+        }
+    };
+    let block_of = |p: &crate::output::display::Placement| -> IVec3 {
+        [
+            p.pos[0].floor() as i32,
+            p.pos[1].floor() as i32,
+            p.pos[2].floor() as i32,
+        ]
+    };
+
     let Some((min, max)) = grid.bounds() else {
+        // Props alone are not a map; without any blocks there is nothing to
+        // paste them into, and writing empty schematics would be noise.
         return Ok(Manifest {
             map: map_name.to_string(),
             units_per_block,
@@ -122,6 +178,8 @@ pub fn write_tiles(
             bounds_max: [0, 0, 0],
             tiles: Vec::new(),
             entities: Vec::new(),
+            props: 0,
+            prop_function: None,
             generated_blocks: Vec::new(),
             block_counts,
         });
@@ -138,36 +196,43 @@ pub fn write_tiles(
     // settings line up with each other.
     let mut buckets: HashMap<IVec3, Vec<(IVec3, BlockId)>> = HashMap::new();
     for (pos, block) in grid.iter() {
-        let key = match tile_size {
-            None => [0, 0, 0],
-            Some(size) => {
-                let size = size as i32;
-                [
-                    floor_div(pos[0], size),
-                    floor_div(pos[1], size),
-                    floor_div(pos[2], size),
-                ]
-            }
-        };
-        buckets.entry(key).or_default().push((pos, block));
+        buckets.entry(key_of(pos)).or_default().push((pos, block));
+    }
+
+    let mut prop_buckets: HashMap<IVec3, Vec<crate::output::display::Placement>> = HashMap::new();
+    for prop in props {
+        prop_buckets
+            .entry(key_of(block_of(prop)))
+            .or_default()
+            .push(prop.clone());
     }
 
     // Sort so output order is deterministic: y, then z, then x.
-    let mut keys: Vec<IVec3> = buckets.keys().copied().collect();
+    let mut keys: Vec<IVec3> = buckets.keys().chain(prop_buckets.keys()).copied().collect();
     keys.sort_by_key(|k| (k[1], k[2], k[0]));
+    keys.dedup();
 
     let mut tiles = Vec::with_capacity(keys.len());
     for key in keys {
-        let blocks = &buckets[&key];
-        if blocks.is_empty() {
+        static NO_BLOCKS: Vec<(IVec3, BlockId)> = Vec::new();
+        static NO_PROPS: Vec<crate::output::display::Placement> = Vec::new();
+        let blocks = buckets.get(&key).unwrap_or(&NO_BLOCKS);
+        let tile_props = prop_buckets.get(&key).unwrap_or(&NO_PROPS);
+        if blocks.is_empty() && tile_props.is_empty() {
             continue;
         }
 
         // Shrink each tile to the geometry it actually holds, so a tile with a
-        // single block does not carry a full cube of air.
+        // single block does not carry a full cube of air. Props count as
+        // geometry here: an entity outside the region it is written into is at
+        // the mercy of whatever the pasting tool does with it.
         let mut tile_min = [i32::MAX; 3];
         let mut tile_max = [i32::MIN; 3];
-        for (pos, _) in blocks {
+        for pos in blocks
+            .iter()
+            .map(|(pos, _)| *pos)
+            .chain(tile_props.iter().map(block_of))
+        {
             for axis in 0..3 {
                 tile_min[axis] = tile_min[axis].min(pos[axis]);
                 tile_max[axis] = tile_max[axis].max(pos[axis]);
@@ -178,7 +243,15 @@ pub fn write_tiles(
             None => format!("{map_name}.schem"),
             Some(_) => format!("{map_name}_x{}_y{}_z{}.schem", key[0], key[1], key[2]),
         };
-        schem::write(&dir.join(&file), blocks, palette, tile_min, tile_max, &file)?;
+        schem::write_all(
+            &dir.join(&file),
+            blocks,
+            tile_props,
+            palette,
+            tile_min,
+            tile_max,
+            &file,
+        )?;
 
         tiles.push(Tile {
             file,
@@ -190,6 +263,7 @@ pub fn write_tiles(
                 tile_max[2] - tile_min[2] + 1,
             ],
             blocks: blocks.len(),
+            props: tile_props.len(),
         });
     }
 
@@ -202,6 +276,8 @@ pub fn write_tiles(
         bounds_max: max,
         tiles,
         entities: Vec::new(),
+        props: 0,
+        prop_function: None,
         generated_blocks: Vec::new(),
         block_counts,
     })
@@ -219,6 +295,9 @@ pub fn paste_script(manifest: &Manifest) -> String {
     out.push_str("#\n");
     out.push_str("#   -o  pastes at the coordinates baked into the schematic\n");
     out.push_str("#   -a  skips air, so tiles do not erase each other\n");
+    if manifest.props > 0 {
+        out.push_str("#   -e  brings the props, which are display entities\n");
+    }
     out.push_str("#\n");
     out.push_str(
         "# Without -o, WorldEdit pastes relative to where you are standing, so\n\
@@ -248,10 +327,22 @@ pub fn paste_script(manifest: &Manifest) -> String {
         manifest.bounds_max[2],
     ));
 
+    if manifest.props > 0 {
+        out.push_str(&format!(
+            "#\n# {} props are drawn as their real models, by display entities inside\n\
+             # these schematics. They need `-e` to come across. If they do not\n\
+             # arrive, run {} as a datapack function instead; it places\n\
+             # exactly the same props at exactly the same coordinates.\n\n",
+            manifest.props,
+            manifest.prop_function.as_deref().unwrap_or("the props function"),
+        ));
+    }
+
+    let paste = if manifest.props > 0 { "//paste -a -o -e" } else { "//paste -a -o" };
     for tile in &manifest.tiles {
         let stem = tile.file.trim_end_matches(".schem");
         out.push_str(&format!(
-            "# tile at {},{},{}  ({} x {} x {}, {} blocks)\n//schem load {}\n//paste -a -o\n\n",
+            "# tile at {},{},{}  ({} x {} x {}, {} blocks)\n//schem load {}\n{paste}\n\n",
             tile.min[0],
             tile.min[1],
             tile.min[2],

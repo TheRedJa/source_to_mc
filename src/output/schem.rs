@@ -45,6 +45,10 @@ struct Schematic {
     offset: IntArray,
     #[serde(rename = "Blocks")]
     blocks: Blocks,
+    /// Props placed as display entities. Optional in the specification, so a
+    /// schematic without any is byte-for-byte what it always was.
+    #[serde(rename = "Entities", skip_serializing_if = "Option::is_none")]
+    entities: Option<Vec<crate::output::display::Entity>>,
     #[serde(rename = "Metadata")]
     metadata: Metadata,
 }
@@ -88,6 +92,19 @@ fn write_varint(out: &mut Vec<i8>, mut value: u32) {
 /// lookup per cell. Blocks outside the region are ignored.
 pub fn encode_blocks(
     blocks: &[(IVec3, BlockId)],
+    palette: &Palette,
+    min: IVec3,
+    max: IVec3,
+    name: &str,
+) -> Result<Vec<u8>> {
+    encode_all(blocks, &[], palette, min, max, name)
+}
+
+/// As [`encode_blocks`], and with the props that belong in this region placed
+/// as display entities.
+pub fn encode_all(
+    blocks: &[(IVec3, BlockId)],
+    props: &[crate::output::display::Placement],
     palette: &Palette,
     min: IVec3,
     max: IVec3,
@@ -155,6 +172,8 @@ pub fn encode_blocks(
                 palette: palette_map,
                 data: ByteArray::new(data),
             },
+            entities: (!props.is_empty())
+                .then(|| props.iter().map(|p| p.entity(min)).collect()),
             metadata: Metadata {
                 name: name.to_string(),
                 author: "src2mc".to_string(),
@@ -192,7 +211,20 @@ pub fn write(
     max: IVec3,
     name: &str,
 ) -> Result<()> {
-    let nbt = encode_blocks(blocks, palette, min, max, name)?;
+    write_all(path, blocks, &[], palette, min, max, name)
+}
+
+/// As [`write`], with the props belonging to this region.
+pub fn write_all(
+    path: &Path,
+    blocks: &[(IVec3, BlockId)],
+    props: &[crate::output::display::Placement],
+    palette: &Palette,
+    min: IVec3,
+    max: IVec3,
+    name: &str,
+) -> Result<()> {
+    let nbt = encode_all(blocks, props, palette, min, max, name)?;
     let file = std::fs::File::create(path)
         .with_context(|| format!("creating {}", path.display()))?;
     let mut encoder = GzEncoder::new(file, Compression::default());

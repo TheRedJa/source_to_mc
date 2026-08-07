@@ -84,6 +84,27 @@ fn uv_rate(triangles: &[[Vec3; 3]], uvs: &[[[f64; 2]; 3]]) -> f64 {
     rates[rates.len() / 2]
 }
 
+/// Stop `vmdl`'s own panics from printing, once.
+///
+/// A map can reference hundreds of models it cannot read, and each one would
+/// otherwise put a panic message and a backtrace on stderr for something that
+/// is handled. Only panics raised inside `vmdl` are silenced; anything else
+/// still goes through the hook that was installed before.
+fn quiet_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let from_vmdl = info
+                .location()
+                .is_some_and(|location| location.file().contains("vmdl"));
+            if !from_vmdl {
+                previous(info);
+            }
+        }));
+    });
+}
+
 /// The index buffer has several possible names; Source picks by renderer, and
 /// a few models ship only the software one.
 const VTX_SUFFIXES: [&str; 4] = [".dx90.vtx", ".dx80.vtx", ".vtx", ".sw.vtx"];
@@ -122,6 +143,16 @@ impl<'a> Models<'a> {
     }
 
     fn load(&self, key: &str) -> Option<Model> {
+        // `vmdl` does not merely fail on the parts of the format it has not
+        // implemented — it panics. Reading animation blocks is one such gap,
+        // and the entity lump's `prop_dynamic` and `prop_ragdoll` models are
+        // full of them, where `prop_static` never was. A model that cannot be
+        // read has to be one skipped prop, not a dead conversion.
+        quiet_panics();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.read(key))).ok()?
+    }
+
+    fn read(&self, key: &str) -> Option<Model> {
         let stem = key.strip_suffix(".mdl").unwrap_or(key);
 
         let mdl = vmdl::Mdl::read(&self.vfs.open(&format!("{stem}.mdl"))?).ok()?;

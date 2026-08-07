@@ -106,7 +106,14 @@ impl Block {
 
     /// Minecraft sound group closest to Source's `$surfaceprop`.
     fn sound_type(&self) -> &'static str {
-        let prop = self.surface_prop.as_deref().unwrap_or("").to_ascii_lowercase();
+        sound_for(self.surface_prop.as_deref())
+    }
+}
+
+/// Minecraft sound group closest to Source's `$surfaceprop`.
+fn sound_for(surface_prop: Option<&str>) -> &'static str {
+    let prop = surface_prop.unwrap_or("").to_ascii_lowercase();
+    {
         for (needle, sound) in [
             ("metalgrate", "metal"),
             ("metal", "metal"),
@@ -144,6 +151,12 @@ pub struct Pack {
     /// config is how they drifted apart twice: once stretching a tile over ten
     /// blocks of cliff, once over two.
     tiling: BTreeMap<String, crate::bsp::texcoord::Split>,
+    /// Prop models rendered as their own mesh, keyed by id.
+    props: BTreeMap<String, crate::output::obj::PropAsset>,
+    /// The textures those meshes wear, keyed by path under `textures/`.
+    prop_textures: BTreeMap<String, RgbaImage>,
+    /// Whether the OBJ files were written for a flipped V axis.
+    flip_v: bool,
 }
 
 /// Turn a Source material path into a Minecraft resource id.
@@ -168,7 +181,38 @@ pub fn block_id(material: &str) -> String {
 
 impl Pack {
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
+        self.blocks.is_empty() && self.props.is_empty()
+    }
+
+    /// Add a prop model and the textures it wears.
+    ///
+    /// Keyed by id, so a campaign's shared crate is one mesh however many maps
+    /// place it — the same thing that makes merging texture packs free.
+    pub fn insert_prop(
+        &mut self,
+        asset: crate::output::obj::PropAsset,
+        textures: Vec<crate::output::obj::PropTexture>,
+    ) -> String {
+        let id = asset.block_id();
+        for texture in textures {
+            self.prop_textures.entry(texture.name).or_insert(texture.image);
+        }
+        self.props.entry(asset.id.clone()).or_insert(asset);
+        id
+    }
+
+    /// Record how the prop meshes were written, so the model JSON agrees.
+    pub fn set_flip_v(&mut self, flip_v: bool) {
+        self.flip_v = flip_v;
+    }
+
+    /// The prop model registered under `id`, if any.
+    pub fn prop(&self, id: &str) -> Option<&crate::output::obj::PropAsset> {
+        self.props.get(id.strip_prefix(&format!("{NAMESPACE}:")).unwrap_or(id))
+    }
+
+    pub fn props(&self) -> impl Iterator<Item = &crate::output::obj::PropAsset> {
+        self.props.values()
     }
 
     /// The id for a shape of a generated block.
@@ -281,7 +325,7 @@ impl Pack {
     /// How many blocks the pack registers, which is what a KubeJS instance
     /// pays for at startup.
     pub fn registered(&self) -> usize {
-        self.blocks.len()
+        self.blocks.len() + self.props.len()
     }
 
     /// The block for one tile of a material, wrapping out-of-range indices so
@@ -317,6 +361,13 @@ impl Pack {
         for (material, split) in other.tiling {
             self.tiling.entry(material).or_insert(split);
         }
+        for (id, asset) in other.props {
+            self.props.entry(id).or_insert(asset);
+        }
+        for (name, image) in other.prop_textures {
+            self.prop_textures.entry(name).or_insert(image);
+        }
+        self.flip_v |= other.flip_v;
     }
 
     /// Write the textures and startup script under `dir/kubejs`.
@@ -337,11 +388,57 @@ impl Pack {
             std::fs::write(&path, png).with_context(|| format!("writing {}", path.display()))?;
         }
 
+        // Prop meshes: the OBJ and its material library, the model JSON that
+        // points the loader at them, and a blockstate so the block resolves to
+        // that model rather than to KubeJS's generated cube.
+        if !self.props.is_empty() {
+            let assets = root.join("assets").join(NAMESPACE);
+            let models = assets.join("models").join("props");
+            let block_models = assets.join("models").join("block");
+            let blockstates = assets.join("blockstates");
+            let prop_textures = assets.join("textures").join("props");
+            for dir in [&models, &block_models, &blockstates, &prop_textures] {
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
+            }
+
+            for asset in self.props.values() {
+                let write = |path: std::path::PathBuf, contents: &str| -> Result<()> {
+                    std::fs::write(&path, contents)
+                        .with_context(|| format!("writing {}", path.display()))
+                };
+                write(models.join(format!("{}.obj", asset.id)), &asset.obj)?;
+                write(models.join(format!("{}.mtl", asset.id)), &asset.mtl)?;
+                write(
+                    block_models.join(format!("{}.json", asset.id)),
+                    &asset.model_json(self.flip_v),
+                )?;
+                write(
+                    blockstates.join(format!("{}.json", asset.id)),
+                    &asset.blockstate_json(),
+                )?;
+            }
+
+            for (name, image) in &self.prop_textures {
+                let leaf = name.rsplit('/').next().unwrap_or(name);
+                let png = crate::source::vtf::to_png(image)?;
+                bytes += png.len();
+                let path = prop_textures.join(format!("{leaf}.png"));
+                std::fs::write(&path, png)
+                    .with_context(|| format!("writing {}", path.display()))?;
+            }
+        }
+
         let script = scripts.join("src2mc_blocks.js");
         std::fs::write(&script, self.script())
             .with_context(|| format!("writing {}", script.display()))?;
 
-        Ok(Written { root, blocks: self.blocks.len(), texture_bytes: bytes })
+        Ok(Written {
+            root,
+            blocks: self.blocks.len(),
+            props: self.props.len(),
+            texture_bytes: bytes,
+        })
     }
 
     /// The KubeJS startup script registering every block.
@@ -357,7 +454,12 @@ impl Pack {
              //\n\
              // Install: copy the `kubejs` folder into your instance, next to `mods`.\n\n",
         );
-        let _ = writeln!(s, "// {} blocks\n", self.blocks.len());
+        let _ = writeln!(
+            s,
+            "// {} blocks and {} prop models\n",
+            self.blocks.len(),
+            self.props.len()
+        );
         s.push_str("StartupEvents.registry('block', event => {\n");
 
         for block in self.blocks.values() {
@@ -387,9 +489,57 @@ impl Pack {
             s.push('\n');
         }
 
+        // Prop models. Registered the same way, and drawn by the model files
+        // written alongside; nothing here says "mesh" because as far as the
+        // registry is concerned these are ordinary blocks. They are never
+        // placed as blocks, only rendered by the display entities that carry
+        // their rotation.
+        for asset in self.props.values() {
+            let mut chain = vec![
+                format!("event.create('{}')", asset.block_id()),
+                format!("  .displayName('{}')", escape(&prop_name(&asset.model))),
+                // A texture is still declared: if the hand-written blockstate
+                // is ever ignored, this at least gives a recognisable cube
+                // instead of the missing-texture checkerboard.
+                match asset.textures.values().next() {
+                    Some(texture) => format!("  .texture('{texture}')"),
+                    None => format!("  .texture('{NAMESPACE}:block/{}')", asset.id),
+                },
+                format!("  .soundType('{}')", sound_for(asset.surface_prop.as_deref())),
+                "  .hardness(1.5)".to_string(),
+                "  .resistance(6.0)".to_string(),
+            ];
+            if asset.render_type != RenderType::Solid {
+                chain.push(format!("  .renderType('{}')", asset.render_type.name()));
+            }
+
+            let _ = writeln!(s, "  // {} ({} triangles)", asset.model, asset.triangles);
+            for (i, line) in chain.iter().enumerate() {
+                let last = i + 1 == chain.len();
+                let _ = writeln!(s, "  {line}{}", if last { ";" } else { "" });
+            }
+            s.push('\n');
+        }
+
         s.push_str("});\n");
         s
     }
+}
+
+/// Something readable in the creative menu for a prop model.
+fn prop_name(model: &str) -> String {
+    let leaf = model.trim_end_matches(".mdl").rsplit('/').next().unwrap_or(model);
+    let mut name = String::new();
+    for (i, c) in leaf.chars().enumerate() {
+        if i == 0 {
+            name.extend(c.to_uppercase());
+        } else if c == '_' {
+            name.push(' ');
+        } else {
+            name.push(c);
+        }
+    }
+    name
 }
 
 /// What was written, for reporting.
@@ -397,6 +547,8 @@ impl Pack {
 pub struct Written {
     pub root: std::path::PathBuf,
     pub blocks: usize,
+    /// Prop models written as meshes rather than as textured cubes.
+    pub props: usize,
     pub texture_bytes: usize,
 }
 

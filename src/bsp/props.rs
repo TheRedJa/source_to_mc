@@ -20,18 +20,30 @@ pub struct Prop {
     /// Uniform scale. Only later Source branches store one; older lumps are
     /// always 1.
     pub scale: f64,
+    /// The entity this came from, or `prop_static` for the `sprp` lump, which
+    /// no longer has entities of its own by the time the map is compiled.
+    pub classname: String,
 }
 
 impl Prop {
     /// Rotate and translate a point from model space into world space.
     pub fn place(&self, v: Vec3) -> Vec3 {
+        self.rotate(v * self.scale) + self.origin
+    }
+
+    /// Rotate a direction from model space into world space, without moving or
+    /// scaling it.
+    ///
+    /// What the display-entity path needs: a prop rendered as its own mesh is
+    /// placed by position and rotation separately, rather than by transforming
+    /// every vertex.
+    pub fn rotate(&self, v: Vec3) -> Vec3 {
         let m = self.rotation();
-        let v = v * self.scale;
         Vec3::new(
             m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z,
             m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z,
             m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z,
-        ) + self.origin
+        )
     }
 
     /// Source's `AngleMatrix`, as rows.
@@ -72,9 +84,66 @@ pub fn extract(bsp: &vbsp::Bsp) -> Vec<Prop> {
                     prop.angles.roll as f64,
                 ],
                 scale: 1.0,
+                classname: "prop_static".to_string(),
             })
         })
         .collect()
+}
+
+/// Every prop the *entity lump* places, in lump order.
+///
+/// The `sprp` lump is only half the story. `prop_static` is what the compiler
+/// bakes away, but a map's crates, barrels, doors, cars and set dressing that
+/// can be shot, opened or thrown are `prop_physics`, `prop_dynamic` and their
+/// relatives, and those stay in the entity lump as ordinary entities with a
+/// `model` key. Leaving them out is why a converted warehouse is an empty
+/// warehouse.
+///
+/// Anything naming a `.mdl` counts, whatever its classname: the point is the
+/// model, and enumerating classnames would only miss the mod-specific ones
+/// Entropy: Zero adds. Brush entities name their model as `*12` and are
+/// handled elsewhere, so they fall out here for want of a `.mdl`.
+pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
+    bsp.entities
+        .iter()
+        .filter_map(|raw| {
+            let mut model = None;
+            let mut origin = None;
+            let mut angles = [0.0; 3];
+            let mut scale = 1.0;
+            let mut classname = String::new();
+            for (key, value) in raw.properties() {
+                match key {
+                    "model" => model = Some(value.to_string()),
+                    "classname" => classname = value.to_string(),
+                    "origin" => origin = triple(value),
+                    "angles" => angles = triple(value).unwrap_or([0.0; 3]),
+                    // Two spellings, one meaning; whichever is present wins.
+                    "uniformscale" | "modelscale" => {
+                        scale = value.parse().ok().filter(|s| *s > 0.0).unwrap_or(1.0)
+                    }
+                    _ => {}
+                }
+            }
+
+            let model = model?.replace('\\', "/").to_ascii_lowercase();
+            if !model.ends_with(".mdl") {
+                return None;
+            }
+            Some(Prop {
+                model,
+                origin: origin.map(|[x, y, z]| Vec3::new(x, y, z))?,
+                angles,
+                scale,
+                classname,
+            })
+        })
+        .collect()
+}
+
+fn triple(value: &str) -> Option<[f64; 3]> {
+    let mut parts = value.split_whitespace().filter_map(|p| p.parse::<f64>().ok());
+    Some([parts.next()?, parts.next()?, parts.next()?])
 }
 
 #[cfg(test)]
@@ -87,6 +156,7 @@ mod tests {
             origin: Vec3::ZERO,
             angles,
             scale: 1.0,
+            classname: "prop_static".into(),
         }
     }
 

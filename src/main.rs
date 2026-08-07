@@ -116,9 +116,16 @@ struct ConvertOptions {
     /// Leave out displacement terrain.
     #[arg(long)]
     no_displacements: bool,
-    /// Leave out `prop_static` models: fences, railings, catwalks, crates.
+    /// Leave out prop models: fences, railings, catwalks, crates, cars.
     #[arg(long)]
     no_props: bool,
+    /// Voxelize props into blocks instead of rendering their real mesh.
+    #[arg(long)]
+    no_prop_models: bool,
+    /// Longest dimension, in Source units, at which a prop drawn as a mesh
+    /// gets invisible barriers behind it. 0 makes every prop solid.
+    #[arg(long)]
+    prop_collision: Option<f64>,
     /// Also write a datapack defining a dimension tall enough for the map.
     #[arg(long)]
     emit_dimension: bool,
@@ -167,6 +174,12 @@ impl ConvertOptions {
         }
         if self.no_props {
             config.props.enabled = false;
+        }
+        if self.no_prop_models {
+            config.props.models = false;
+        }
+        if let Some(size) = self.prop_collision {
+            config.props.collision_min_size = size;
         }
         if self.emit_dimension {
             config.output.emit_dimension = true;
@@ -299,8 +312,14 @@ fn convert_into(
     );
     if stats.props_placed > 0 || stats.props_skipped > 0 {
         eprintln!(
-            "  {} static props placed ({} skipped)",
+            "  {} props placed ({} skipped)",
             stats.props_placed, stats.props_skipped,
+        );
+    }
+    if stats.props_modelled > 0 {
+        eprintln!(
+            "  {} of them drawn as their own mesh, from {} models",
+            stats.props_modelled, stats.prop_models,
         );
     }
     eprintln!(
@@ -331,10 +350,11 @@ fn convert_into(
         );
     }
 
-    let mut manifest = tiling::write_tiles(
+    let mut manifest = tiling::write_tiles_with_props(
         out,
         &map.name,
         &result.grid,
+        &result.props,
         &result.palette,
         config.output.tile_size,
         config.scale.units_per_block,
@@ -343,12 +363,25 @@ fn convert_into(
 
     std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
 
+    // The props are already inside the schematics; this is the way back if
+    // WorldEdit drops them on the way through.
+    if !result.props.is_empty() {
+        let file = format!("{}_props.mcfunction", map.name);
+        std::fs::write(
+            out.join(&file),
+            src2mc::output::display::function(&result.props, &map.name),
+        )?;
+        manifest.props = result.props.len();
+        manifest.prop_function = Some(file);
+    }
+
     if !result.pack.is_empty() {
         if write_pack {
             let written = result.pack.write(out)?;
             eprintln!(
-                "  {} generated blocks ({} KB of textures) in {}",
+                "  {} generated blocks and {} prop meshes ({} KB of textures) in {}",
                 written.blocks,
+                written.props,
                 written.texture_bytes / 1024,
                 written.root.display(),
             );
@@ -498,8 +531,10 @@ fn batch(
     if !pack.is_empty() {
         let written = pack.write(out)?;
         eprintln!(
-            "{} generated blocks shared across the batch ({} KB of textures) in {}",
+            "{} generated blocks and {} prop meshes shared across the batch \
+             ({} KB of textures) in {}",
             written.blocks,
+            written.props,
             written.texture_bytes / 1024,
             written.root.display(),
         );

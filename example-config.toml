@@ -154,6 +154,43 @@ skip = ["*props_foliage*", "*/foliage/*"]
 # usually closed shells already, so a fence stays one block thick.
 solidify = 0
 
+# Draw props as their real triangle mesh instead of voxelizing them. A forklift,
+# a car or a rock was never designed for a grid, so cubing it is where the
+# conversion looks worst. NeoForge's OBJ model loader renders an arbitrary mesh
+# and a block_display entity places it at any angle, so the prop can just be
+# itself. Needs the generated pack, so it only applies when
+# `[materials] mode = "kubejs"`; vanilla output is unchanged.
+models = true
+# Also read props out of the entity lump — prop_physics, prop_dynamic and
+# anything else naming a .mdl — rather than only the compiled sprp lump. That is
+# where a map's crates, barrels, doors and cars are.
+entity_props = true
+# Resolution of a prop's own textures. Far above the 16x16 a block face gets,
+# because a mesh shows its texture at real scale rather than squeezed onto a cube.
+texture_size = 128
+# Source models tile their sheets, and a resource pack texture is a sprite on a
+# shared atlas where coordinates past 0..1 do not wrap. So the texture is
+# repeated into a larger image instead, up to this many times per axis. Past it
+# the coordinates wrap and a seam appears where they do.
+texture_repeat_max = 4
+# Props at least this many Source units across get invisible barrier blocks, so
+# you can stand on a container and walk through a traffic cone. 0 makes
+# everything solid; a huge value nothing.
+collision_min_size = 48.0
+# Beyond view_range * 64 blocks a prop stops rendering. Display entities are
+# drawn every frame rather than baked into the chunk mesh, so this is the lever
+# if a busy map costs frames.
+view_range = 1.0
+# Models heavier than this are voxelized instead; 0 renders every model however
+# many triangles it has.
+max_triangles = 4000
+# Light the mesh fully rather than by the single cell it stands in. A large prop
+# in a dark cell otherwise goes black.
+full_bright = false
+# Source and Minecraft disagree about which way the V texture axis runs. If every
+# prop's texture comes out upside down, this is the switch.
+flip_v = false
+
 [entities]
 # Write entities.json alongside the schematics.
 manifest = true

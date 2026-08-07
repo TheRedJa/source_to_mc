@@ -17,8 +17,13 @@ Working today:
 - Chooses a block per surface from its material: glob rules first, then the
   texture's average colour. Ships with rules for Half-Life 2 and Entropy: Zero.
 - Voxelizes displacement terrain, backed into solid so it is not a shell.
-- Voxelizes **static props**: the fences, railings, catwalks, crates, signs and
-  lamps that fill a map's rooms, none of which is in any brush lump.
+- Places **every prop** the map has — the compiled `prop_static` lump *and* the
+  entity lump's `prop_physics`, `prop_dynamic` and friends: the fences,
+  railings, catwalks, crates, cars, doors and lamps that fill a map's rooms,
+  none of which is in any brush lump.
+- Draws those props as their **real triangle mesh**, not as cubes, through
+  NeoForge's OBJ model loader and one display entity per placement — so a
+  forklift is a forklift. Large ones get invisible barriers to stand on.
 - Leaves out the **3D skybox room**, the scale model of the horizon that would
   otherwise convert into a second, wrongly-sized map.
 - Optionally extracts the map's **real textures** and emits them as Minecraft
@@ -34,8 +39,7 @@ Working today:
 - Converts whole campaigns at once, laid out side by side, and emits a
   dimension datapack tall enough to paste them into.
 
-Not implemented yet: dynamic props (`prop_physics` and friends), and Entropy:
-Zero 2's MapBase-specific entities.
+Not implemented yet: Entropy: Zero 2's MapBase-specific entities.
 
 ## Usage
 
@@ -122,24 +126,50 @@ one voxel thick, so `solidify` drives it a few voxels further in, along the
 surface's own inward normal rather than downwards: displacements make cliffs and
 ceilings as often as ground.
 
-**Static props** are everything a map puts *in* its rooms: the fences and
-railings along a platform, the catwalks over the canals, the crates, radiators,
-lamps and signs. `prop_static` does not survive compilation as an entity — VBSP
-writes the placements into the `sprp` game lump — and none of the geometry is in
-any brush lump, so a map converted from brushes alone is an accurate but empty
-shell. `d1_trainstation_02` alone places 299 of them. Each model's `.mdl`,
-`.vvd` and `.dx90.vtx` are read off the same search path the textures come from,
-LOD 0 is flattened to triangles, and those go through the same rasterizer
-displacements use. A prop's material is a material like any other, so it gets
-the same rules, the same colour matching and the same generated block; its
-average colour comes from the `.vtf` header, which is where the map compiler
-reads it from too.
+**Props** are everything a map puts *in* its rooms: the fences and railings
+along a platform, the catwalks over the canals, the crates, radiators, lamps,
+signs, cars and doors. None of the geometry is in any brush lump, so a map
+converted from brushes alone is an accurate but empty shell. They arrive by two
+routes: `prop_static` does not survive compilation as an entity — VBSP writes
+the placements into the `sprp` game lump — while `prop_physics`, `prop_dynamic`
+and their relatives stay in the entity lump as ordinary entities with a `model`
+key, so anything naming a `.mdl` counts. `d1_trainstation_02` places 345
+between them. Each model's `.mdl`, `.vvd` and `.dx90.vtx` are read off the same
+search path the textures come from and LOD 0 is flattened to triangles.
 
-Props are surfaces, not solids, so a fence stays one block thick. `[props]
-min_size` drops anything under 12 units — maps are full of pebbles and cans —
-and `max_size` is the lever for backdrop scenery, which is placed as ordinary
-props thousands of units across and can be tens of thousands of blocks of one
-dark material. It is off by default, because that scenery really is there.
+A prop is the one thing in a Source map that was never designed for a grid, so
+by default it is not put on one. Its triangles are written as a Wavefront
+`.obj`, registered as a block whose model NeoForge's built-in OBJ loader draws,
+and placed by a `minecraft:block_display` entity carrying the prop's own
+rotation as a quaternion — so a car is a car rather than a lump of mismatched
+cubes. Two conventions bite here and both are handled: one OBJ unit is one
+block, not the 1/16 a vanilla JSON model means, and a pack texture is a sprite
+on a shared atlas where UVs past `0..1` read whatever was stitched next door
+rather than wrapping, so a model that tiles its sheet gets the texture repeated
+into a larger image and its coordinates divided to match.
+
+The entities are written into the schematics' `Entities` list, which needs
+`//paste -e`, *and* as a `.mcfunction` of `summon` commands at the same absolute
+coordinates — the specification says an implementation must keep everything in
+an entity's `Data`, but display-entity NBT is unusual enough to be worth a
+second route. Everything tagged `src2mc_<map>`, so a bad paste is one `/kill`
+away.
+
+Display entities have no collision, so props at least `collision_min_size` units
+across (48 by default) also get invisible barriers behind the mesh: you can
+stand on a container and walk through a traffic cone. Anything that cannot be
+drawn as a mesh — a model heavier than `max_triangles`, a material with no
+texture, or vanilla output, which has no pack to register meshes in — falls back
+to the old behaviour of voxelizing the triangles, where a prop's material is a
+material like any other and gets the same rules, colour matching and generated
+block. Voxelized props are surfaces rather than solids, so a fence stays one
+block thick.
+
+`[props] min_size` drops anything under 12 units — maps are full of pebbles and
+cans — and `max_size` is the lever for backdrop scenery, which is placed as
+ordinary props thousands of units across and can be tens of thousands of blocks
+of one dark material. It is off by default, because that scenery really is
+there.
 
 **The 3D skybox** is a map's model of its own horizon: a sealed room off in a
 corner holding a miniature of the skyline, which the engine renders scaled up
