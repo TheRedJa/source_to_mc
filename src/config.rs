@@ -401,9 +401,13 @@ pub struct Props {
     /// Light the prop fully rather than by the block it stands in. A large
     /// mesh is lit at one point, so a bright object in a dark cell goes black.
     pub full_bright: bool,
-    /// Flip the V texture axis when writing OBJ files. Source and Minecraft
-    /// disagree about which way V runs; if every prop's texture comes out
-    /// upside down, this is the switch.
+    /// Mirror the V texture axis.
+    ///
+    /// Off, because Source and Minecraft agree: both run V downwards from the
+    /// top of the image. The loader offers the flip for models authored in an
+    /// OpenGL tool, and turning it on here mirrors every sheet — which on a
+    /// model texture with unused areas shows up as half a prop wearing blank
+    /// texture and the rest wearing pieces of something else.
     pub flip_v: bool,
 }
 

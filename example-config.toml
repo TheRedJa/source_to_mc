@@ -187,8 +187,9 @@ max_triangles = 4000
 # Light the mesh fully rather than by the single cell it stands in. A large prop
 # in a dark cell otherwise goes black.
 full_bright = false
-# Source and Minecraft disagree about which way the V texture axis runs. If every
-# prop's texture comes out upside down, this is the switch.
+# Mirror the V texture axis. Off, because Source and Minecraft agree: both run V
+# downwards from the top of the image. The OBJ loader offers the flip for models
+# authored in an OpenGL tool, and turning it on mirrors every sheet.
 flip_v = false
 
 [entities]

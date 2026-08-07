@@ -352,10 +352,17 @@ pub fn build(
             for (slot, (vertex, coord)) in corners.iter_mut().zip(triangle.iter().zip(uv)) {
                 let p = to_model_space(*vertex, units);
                 let [u, v] = repeat.apply(*coord);
-                // Source's V axis runs downwards, Minecraft's up.
+                // Written as they are. Both conventions run V downwards from
+                // the top of the image: Source's because it is a Direct3D
+                // engine, Minecraft's because `TextureAtlasSprite.getV` maps 0
+                // to the sprite's top edge. Flipping to "correct" for OpenGL —
+                // which is what the loader's `flip_v` is for — mirrors the
+                // sheet, and on a model sheet with unused areas that shows up
+                // as half a prop wearing blank texture and the rest wearing
+                // pieces of something else.
                 *slot = (
                     positions.intern("v", &[p.x, p.y, p.z]),
-                    coords.intern("vt", &[u, 1.0 - v]),
+                    coords.intern("vt", &[u, v]),
                 );
             }
             faces.push_str(&format!(

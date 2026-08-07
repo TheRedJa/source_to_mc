@@ -413,3 +413,4 @@ mod tests {
         assert_eq!(models.stats().0, 1);
     }
 }
+
