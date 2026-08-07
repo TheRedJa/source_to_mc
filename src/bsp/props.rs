@@ -66,24 +66,27 @@ impl Prop {
 }
 
 /// Every static prop in the map, in placement order.
-pub fn extract(bsp: &vbsp::Bsp) -> Vec<Prop> {
-    let names = &bsp.static_props.dict.name;
-    bsp.static_props
-        .props
+///
+/// Read from [`crate::bsp::rawprops`] rather than from `vbsp`, which takes the
+/// wrong four bytes as the flags on the later lump versions and so hides
+/// almost every prop behind a `NO_DRAW` that is not there.
+pub fn extract(map: &crate::bsp::Map) -> Vec<Prop> {
+    let props = &map.static_props;
+    props
         .props
         .iter()
-        .filter(|prop| !prop.flags.contains(vbsp::data::StaticPropLumpFlags::NO_DRAW))
+        .filter(|prop| !prop.no_draw())
         .filter_map(|prop| {
-            let model = names.get(prop.prop_type as usize)?.as_str();
+            let model = props.models.get(prop.prop_type as usize)?.as_str();
             (!model.is_empty()).then(|| Prop {
                 model: model.replace('\\', "/").to_ascii_lowercase(),
-                origin: Vec3::from(prop.origin),
-                angles: [
-                    prop.angles.pitch as f64,
-                    prop.angles.yaw as f64,
-                    prop.angles.roll as f64,
-                ],
-                scale: 1.0,
+                origin: Vec3::new(
+                    f64::from(prop.origin[0]),
+                    f64::from(prop.origin[1]),
+                    f64::from(prop.origin[2]),
+                ),
+                angles: prop.angles.map(f64::from),
+                scale: f64::from(prop.scale),
                 classname: "prop_static".to_string(),
             })
         })
@@ -220,5 +223,33 @@ mod tests {
         p.origin = Vec3::new(100.0, 0.0, 0.0);
         p.scale = 2.0;
         assert!(close(p.place(Vec3::new(1.0, 0.0, 0.0)), Vec3::new(102.0, 0.0, 0.0)));
+    }
+
+    /// The regression that started the raw-lump reader. Portal 2's static prop
+    /// lump is version 9, and reading its flags out of the wrong four bytes
+    /// made every prop look like `NO_DRAW`: this map has 288 of them and used
+    /// to yield none. A map's props vanishing is invisible in the output — you
+    /// get an empty room, not an error — so it is worth a test that counts.
+    #[test]
+    fn a_version_9_map_keeps_its_static_props() {
+        let path = std::path::Path::new(
+            "/mnt/games/SteamLibrary/steamapps/common/Portal 2/portal2/maps/sp_a2_bridge_intro.bsp",
+        );
+        if !path.exists() {
+            return;
+        }
+        let map = crate::bsp::Map::load(path).expect("Portal 2 map should load");
+        assert_eq!(map.static_props.version, 9);
+        assert_eq!(map.static_props.stride, 72, "the record size decides the branch");
+
+        let hidden = map.static_props.props.iter().filter(|p| p.no_draw()).count();
+        let total = map.static_props.props.len();
+        assert!(total > 250, "only {total} static props in the lump");
+        assert!(
+            hidden * 10 < total,
+            "{hidden} of {total} props read as NO_DRAW; the flags are being taken \
+             from the wrong bytes again"
+        );
+        assert!(extract(&map).len() > 250, "the props did not survive extraction");
     }
 }

@@ -13,6 +13,40 @@ pub const LUMP_COUNT: usize = 64;
 
 pub const LUMP_ENTITIES: usize = 0;
 pub const LUMP_LEAFS: usize = 10;
+pub const LUMP_GAME_LUMP: usize = 35;
+
+/// Byte offset of the BSP version word, straight after the `VBSP` magic.
+const VERSION_OFFSET: usize = 4;
+
+/// The version a BSP declares.
+pub fn version(data: &[u8]) -> Result<i32> {
+    ensure!(data.len() >= 8, "file is too small to be a BSP");
+    ensure!(&data[0..4] == b"VBSP", "not a Source BSP file (bad magic)");
+    read_i32(data, VERSION_OFFSET)
+}
+
+/// Present a version `vbsp` refuses as the nearest one it accepts, in place.
+///
+/// `vbsp` reads the version into an enum of 19, 20 and 21 and fails the whole
+/// header on anything else. Version 22 is INFRA's custom Source branch, and it
+/// is a branch marker rather than a format: the header is the usual 1036 bytes
+/// of 64 lump entries and a revision, and every lump structure the conversion
+/// reads is the same size it is in a version 21 map — planes 20 bytes, brushes
+/// 12, brush sides 8, faces 56, texinfo 72, nodes 32, leaves 32, displacement
+/// info 176, models 48, all dividing exactly into their lump lengths.
+///
+/// So the version word is rewritten rather than the parser taught a new
+/// variant, in the same place and for the same reason the entity lump is
+/// repaired: a byte the reader would refuse, edited before it sees it.
+///
+/// Returns the version the file actually declared.
+pub fn present_as_known_version(data: &mut [u8]) -> Result<i32> {
+    let declared = version(data)?;
+    if declared == 22 {
+        data[VERSION_OFFSET..VERSION_OFFSET + 4].copy_from_slice(&21i32.to_le_bytes());
+    }
+    Ok(declared)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct LumpEntry {
@@ -125,6 +159,56 @@ mod tests {
     fn entity_text(data: &[u8]) -> String {
         let entry = lump_entry(data, LUMP_ENTITIES).unwrap();
         String::from_utf8(data[entry.range()].to_vec()).unwrap()
+    }
+
+    #[test]
+    fn a_version_22_map_is_presented_as_one_the_parser_knows() {
+        let mut data = bsp_with_entities(b"{}");
+        data[4..8].copy_from_slice(&22i32.to_le_bytes());
+        assert_eq!(present_as_known_version(&mut data).unwrap(), 22);
+        assert_eq!(version(&data).unwrap(), 21, "the parser still sees 22");
+    }
+
+    /// Everything the parser already accepts has to pass through untouched.
+    #[test]
+    fn a_version_it_already_accepts_is_left_alone() {
+        for declared in [19i32, 20, 21] {
+            let mut data = bsp_with_entities(b"{}");
+            data[4..8].copy_from_slice(&declared.to_le_bytes());
+            assert_eq!(present_as_known_version(&mut data).unwrap(), declared);
+            assert_eq!(version(&data).unwrap(), declared);
+        }
+    }
+
+    /// Presenting a map as version 21 puts it in reach of `vbsp`'s Left 4 Dead
+    /// 2 lump-order heuristic, which reinterprets every lump entry. It decides
+    /// by looking for a lump whose first word is too small to be a file offset,
+    /// so a real map's first lump — always far into the file — settles it.
+    #[test]
+    fn a_rewritten_map_does_not_look_like_left_4_dead_2() {
+        let mut data = bsp_with_entities(b"{}");
+        data[4..8].copy_from_slice(&22i32.to_le_bytes());
+        present_as_known_version(&mut data).unwrap();
+
+        let mut small = 0;
+        for index in 0..LUMP_COUNT {
+            let offset = read_i32(&data, DIRECTORY_OFFSET + index * ENTRY_SIZE).unwrap();
+            if offset > 20 {
+                return; // The heuristic bails here, which is the point.
+            }
+            if offset != 0 && offset % 4 != 0 {
+                small += 1;
+            }
+        }
+        assert_eq!(small, 0, "the lump table would be read as Left 4 Dead 2's order");
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_bsp_is_refused() {
+        let mut data = bsp_with_entities(b"{}");
+        data[0..4].copy_from_slice(b"NOPE");
+        assert!(present_as_known_version(&mut data).is_err());
+        assert!(present_as_known_version(&mut Vec::new()).is_err());
     }
 
     #[test]

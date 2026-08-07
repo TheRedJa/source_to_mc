@@ -8,6 +8,7 @@ pub mod entities;
 pub mod lumps;
 pub mod props;
 pub mod rawleaves;
+pub mod rawprops;
 pub mod skybox;
 pub mod texcoord;
 
@@ -19,6 +20,63 @@ use vbsp::{Bsp, BrushFlags, TextureFlags};
 
 /// Slop allowed when testing points against brush planes, in Source units.
 const PLANE_EPSILON: f64 = 1e-3;
+
+/// Separates an archive from a path inside it: `pak02_dir.vpk:maps/x.bsp`.
+const PACKED: &str = ".vpk:";
+
+/// Split a map argument into the archive it lives in and the path within it,
+/// or `None` if it names an ordinary file.
+///
+/// Some games ship no loose maps at all. INFRA keeps every one of its 49 inside
+/// `infra/pak02_dir.vpk`, 40 to 285 MB apiece, so unpacking them to convert one
+/// costs several gigabytes of disk for no reason: the archive can be read
+/// directly, exactly as the textures and models already are.
+pub fn packed(path: &Path) -> Option<(PathBuf, String)> {
+    let text = path.to_str()?;
+    // From the right, so a directory with `.vpk:` in its name cannot capture
+    // the split.
+    let at = text.rfind(PACKED)?;
+    let (archive, inner) = text.split_at(at + PACKED.len() - 1);
+    Some((PathBuf::from(archive), inner[1..].replace('\\', "/")))
+}
+
+/// Read one file out of a VPK.
+fn read_from_vpk(archive: &Path, inner: &str) -> Result<Vec<u8>> {
+    let vpk = vpk::from_path(archive)
+        .map_err(|e| anyhow::anyhow!("{e:?}"))
+        .with_context(|| format!("opening {}", archive.display()))?;
+    let wanted = inner.to_ascii_lowercase();
+    let key = vpk
+        .tree
+        .keys()
+        .find(|k| k.replace('\\', "/").eq_ignore_ascii_case(&wanted))
+        .ok_or_else(|| {
+            anyhow::anyhow!("{} holds no {inner}; try `src2mc maps {}`", archive.display(), archive.display())
+        })?
+        .clone();
+    let entry = vpk.tree.get(&key).expect("the key came from the tree");
+    Ok(entry
+        .get()
+        .map_err(|e| anyhow::anyhow!("{e:?}"))
+        .with_context(|| format!("reading {inner} from {}", archive.display()))?
+        .into_owned())
+}
+
+/// Every map an archive holds, in the form [`Map::load`] accepts.
+pub fn maps_in_vpk(archive: &Path) -> Result<Vec<String>> {
+    let vpk = vpk::from_path(archive)
+        .map_err(|e| anyhow::anyhow!("{e:?}"))
+        .with_context(|| format!("opening {}", archive.display()))?;
+    let mut maps: Vec<String> = vpk
+        .tree
+        .keys()
+        .map(|k| k.replace('\\', "/"))
+        .filter(|k| k.to_ascii_lowercase().ends_with(".bsp"))
+        .map(|k| format!("{}:{k}", archive.display()))
+        .collect();
+    maps.sort();
+    Ok(maps)
+}
 
 /// One side of a brush: its plane plus the material on that face.
 #[derive(Debug, Clone)]
@@ -123,6 +181,11 @@ pub struct Map {
     pub name: String,
     /// Leaf brush ranges in original BSP order, which `vbsp` does not preserve.
     leaf_brushes: Vec<rawleaves::LeafBrushRange>,
+    /// Static props, read from the lump rather than from `vbsp`'s view of it.
+    /// See [`rawprops`] for why.
+    pub static_props: rawprops::StaticProps,
+    /// The version the file declared, which is not always one `vbsp` accepts.
+    pub version: i32,
     /// One entry per texture-data lump entry, in lump order.
     materials: Vec<Material>,
     /// Bytes repaired in the entity lump because they were not valid UTF-8.
@@ -132,11 +195,39 @@ pub struct Map {
 }
 
 impl Map {
+    /// Load a map, either from a file or out of a VPK archive.
+    ///
+    /// See [`packed`] for the archive form, which is how a game that ships no
+    /// loose `.bsp` — INFRA keeps all 49 of its maps inside `pak02_dir.vpk` —
+    /// is converted without unpacking gigabytes first.
     pub fn load(path: &Path) -> Result<Map> {
-        let mut data =
-            std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        if let Some((archive, inner)) = packed(path) {
+            let data = read_from_vpk(&archive, &inner)?;
+            // A map inside an archive has no file of its own, but everything
+            // downstream only wants its name and the game directory to search
+            // from — and that is the directory holding the archive. So it is
+            // given the path it would have had if it were loose.
+            let name = inner.rsplit('/').next().unwrap_or(&inner);
+            let pretend = archive.parent().unwrap_or(&archive).join("maps").join(name);
+            return Map::from_bytes(data, &pretend);
+        }
+        let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        Map::from_bytes(data, path)
+    }
+
+    /// Build a map from bytes that are already in hand.
+    ///
+    /// `path` is where the map is taken to live: it decides the map's name and
+    /// the game directory the content search starts from. For a map read out
+    /// of a VPK there is no such file, and the caller passes the path the map
+    /// would have had.
+    pub fn from_bytes(mut data: Vec<u8>, path: &Path) -> Result<Map> {
+        let version = lumps::present_as_known_version(&mut data)
+            .with_context(|| format!("reading the header of {}", path.display()))?;
         let leaf_brushes = rawleaves::leaf_brush_ranges(&data)
             .with_context(|| format!("reading leaf lump of {}", path.display()))?;
+        let static_props = rawprops::static_props(&data)
+            .with_context(|| format!("reading static props of {}", path.display()))?;
 
         // `vbsp` insists the entity lump is valid UTF-8; shipped maps are not
         // always. Repair in place before handing it over.
@@ -168,6 +259,8 @@ impl Map {
             path: path.to_path_buf(),
             name,
             leaf_brushes,
+            static_props,
+            version,
             materials,
             repaired_bytes,
             skybox: std::sync::OnceLock::new(),
@@ -349,6 +442,69 @@ mod tests {
             "/Entropy Zero/EntropyZero/maps/az_c4_4.bsp"
         ));
         path.exists().then(|| Map::load(path).unwrap())
+    }
+
+    #[test]
+    fn an_ordinary_path_is_not_taken_for_an_archive() {
+        assert_eq!(packed(Path::new("/games/hl2/maps/d1_trainstation_02.bsp")), None);
+        assert_eq!(packed(Path::new("/games/infra/pak02_dir.vpk")), None);
+    }
+
+    #[test]
+    fn a_map_inside_an_archive_splits_into_the_two_halves() {
+        let (archive, inner) =
+            packed(Path::new("/games/infra/pak02_dir.vpk:maps/infra_c1_m1_office.bsp")).unwrap();
+        assert_eq!(archive, Path::new("/games/infra/pak02_dir.vpk"));
+        assert_eq!(inner, "maps/infra_c1_m1_office.bsp");
+    }
+
+    /// The archive's own directory is the game directory, so the map has to be
+    /// given a path whose parent is `maps` — that is what `vfs::game_dir`
+    /// looks for, and without it no content is found at all.
+    #[test]
+    fn a_packed_map_gets_a_path_the_content_search_understands() {
+        let (archive, inner) =
+            packed(Path::new("/games/infra/pak02_dir.vpk:maps/office.bsp")).unwrap();
+        let name = inner.rsplit('/').next().unwrap();
+        let pretend = archive.parent().unwrap().join("maps").join(name);
+        assert_eq!(
+            crate::source::vfs::game_dir(&pretend).as_deref(),
+            Some(Path::new("/games/infra"))
+        );
+    }
+
+    /// A separator inside a directory name must not capture the split.
+    #[test]
+    fn the_split_is_taken_from_the_right() {
+        let (archive, inner) =
+            packed(Path::new("/odd.vpk:dir/pak01_dir.vpk:maps/x.bsp")).unwrap();
+        assert_eq!(archive, Path::new("/odd.vpk:dir/pak01_dir.vpk"));
+        assert_eq!(inner, "maps/x.bsp");
+    }
+
+    /// INFRA is version 22 and keeps every map inside a VPK; both halves have
+    /// to work at once for any of it to convert.
+    #[test]
+    fn a_version_22_map_loads_out_of_its_archive() {
+        let spec = Path::new(concat!(
+            "/mnt/games/SteamLibrary/steamapps/common/infra/infra/pak02_dir.vpk",
+            ":maps/infra_c1_m1_office.bsp"
+        ));
+        let Some((archive, _)) = packed(spec) else { panic!("not recognised as packed") };
+        if !archive.exists() {
+            return;
+        }
+        let map = Map::load(spec).expect("INFRA map should load");
+        assert_eq!(map.version, 22, "the file's own version is still reported");
+        assert_eq!(map.name, "infra_c1_m1_office");
+        assert_eq!(map.static_props.version, 9);
+        assert_eq!(map.static_props.stride, 72);
+        assert_eq!(map.static_props.props.len(), 8386);
+        assert_eq!(map.static_props.models.len(), 661);
+        // The bug this all turned on: nearly every one of these read as hidden.
+        let visible = props::extract(&map).len();
+        assert!(visible > 8000, "only {visible} of 8386 props survived");
+        assert!(!map.solids(0).is_empty(), "no brushes came out of a version 22 map");
     }
 
     #[test]

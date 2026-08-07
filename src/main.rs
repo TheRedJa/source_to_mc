@@ -18,6 +18,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// List the maps inside a VPK archive, ready to pass to any other command.
+    ///
+    /// Some games ship no loose maps: INFRA keeps all of its inside
+    /// `infra/pak02_dir.vpk`. Every command takes an archive path and a map
+    /// inside it, joined by a colon.
+    Maps {
+        /// The archive, e.g. `.../infra/pak02_dir.vpk`.
+        vpk: PathBuf,
+    },
     /// Summarize a map: bounds, counts, and what converting it would cost.
     Inspect {
         map: PathBuf,
@@ -624,6 +633,15 @@ fn batch(
 
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Command::Maps { vpk } => {
+            let maps = src2mc::bsp::maps_in_vpk(&vpk)?;
+            if maps.is_empty() {
+                eprintln!("{} holds no maps", vpk.display());
+            }
+            for map in maps {
+                println!("{map}");
+            }
+        }
         Command::Inspect { map, common, json } => {
             let config = common.resolve()?;
             let map = load(&map)?;

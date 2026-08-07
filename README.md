@@ -10,7 +10,8 @@ against every stock map in both, plus Half-Life 2.
 
 Working today:
 
-- Loads Source BSP v19/20/21 and extracts world and brush-entity geometry.
+- Loads Source BSP v19/20/21, and v22 as used by INFRA's branch, from a file or
+  from inside a VPK — some games ship no loose maps at all.
 - Voxelizes brushes at a configurable scale (default 16 Source units per block).
 - Maps brush contents to blocks: water, glass, grates, ladders; clip, areaportal
   and tool brushes are dropped.
@@ -138,6 +139,21 @@ and their relatives stay in the entity lump as ordinary entities with a `model`
 key, so anything naming a `.mdl` counts. `d1_trainstation_02` places 345
 between them. Each model's `.mdl`, `.vvd` and `.dx90.vtx` are read off the same
 search path the textures come from and LOD 0 is flattened to triangles.
+
+The `sprp` lump is read out of the file directly rather than through `vbsp`,
+because `vbsp`'s version table is wrong for the later versions: from version 7
+up it takes the four bytes at offset 64 as a word of flags, and in the maps that
+actually exist those bytes are the minimum and maximum CPU and GPU levels, which
+are `0xFF` apiece when unset. Every flag then reads as set, `NO_DRAW` included,
+and the map's static props are thrown away — all 328 of a Portal 2 map, and 6691
+of INFRA's 8386 in `infra_c1_m1_office`. The real flags are the byte at offset
+31 and have not moved since version 4; neither have the origin, the angles or
+the model index, which are the first 26 bytes of every version. Everything that
+differs between versions and between branches comes after them, so none of it
+has to be understood — only stepped over, at a stride measured from the lump's
+own count and length rather than looked up from a version. That is also the only
+thing that reliably separates branches which share a version number and disagree
+about the record.
 
 A prop is the one thing in a Source map that was never designed for a grid, so
 by default it is not put on one. Its triangles are written as a Wavefront

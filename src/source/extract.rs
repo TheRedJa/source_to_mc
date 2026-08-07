@@ -310,7 +310,7 @@ pub fn layouts(map: &Map, config: &Config) -> std::collections::BTreeMap<String,
         let skip = globset(&config.props.skip).unwrap_or_else(|_| globset(&[]).unwrap());
         let skybox = map.skybox().filter(|_| config.contents.skip_3d_skybox);
         let mut models = Models::new(&vfs);
-        for prop in crate::bsp::props::extract(&map.bsp) {
+        for prop in crate::bsp::props::extract(map) {
             if skybox.is_some_and(|room| room.contains_point(prop.origin))
                 || skip.is_match(&prop.model)
             {
@@ -402,7 +402,7 @@ fn place_props(
     mut pending: Option<&mut Vec<Pending>>,
     assets: &mut Assets,
 ) {
-    let mut props = crate::bsp::props::extract(&map.bsp);
+    let mut props = crate::bsp::props::extract(map);
     if config.props.entity_props {
         // Crates, barrels, doors and cars are entities, not `sprp` records.
         props.extend(crate::bsp::props::extract_entities(&map.bsp));

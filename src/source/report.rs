@@ -101,7 +101,7 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
     if config.props.enabled {
         let mut models = crate::source::mdl::Models::new(&vfs);
         let mut seen: Vec<String> = Vec::new();
-        for prop in crate::bsp::props::extract(&map.bsp) {
+        for prop in crate::bsp::props::extract(map) {
             let Some(model) = models.get(&prop.model) else { continue };
             for part in &model.parts {
                 if seen.contains(&part.material) {
