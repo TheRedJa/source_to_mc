@@ -131,6 +131,13 @@ struct Data {
     id: String,
     #[serde(rename = "Pos")]
     pos: Vec<f64>,
+    /// Yaw and pitch. Every entity has them and a display entity leaves them
+    /// at zero, but WorldEdit's Sponge v3 reader does not treat them as
+    /// optional: it reads `Rotation` straight out of `Data` and throws
+    /// `NoSuchElementException` if it is absent, which fails the whole load
+    /// rather than the one entity. Writing it costs two floats.
+    #[serde(rename = "Rotation")]
+    rotation: Vec<f32>,
     block_state: BlockState,
     transformation: Transformation,
     width: f32,
@@ -177,6 +184,7 @@ impl Placement {
             data: Data {
                 id: KIND.to_string(),
                 pos: self.pos.to_vec(),
+                rotation: vec![0.0, 0.0],
                 block_state: BlockState { name: self.block.clone() },
                 transformation: self.transformation(),
                 width: self.width,
@@ -374,6 +382,18 @@ mod tests {
         assert_eq!(entity.data.pos, vec![10.5, 64.0, -20.25]);
         assert_eq!(entity.id, KIND);
         assert_eq!(entity.data.block_state.name, "kubejs:prop_x");
+    }
+
+    /// WorldEdit reads `Rotation` out of `Data` without checking whether it is
+    /// there, and one missing tag fails the whole schematic load — not the one
+    /// entity — with `NoSuchElementException`.
+    #[test]
+    fn every_entity_carries_the_tags_worldedit_demands() {
+        let entity = placement().entity([0, 0, 0]);
+        assert_eq!(entity.data.rotation, vec![0.0, 0.0], "Rotation must be present");
+        assert_eq!(entity.pos.len(), 3, "Pos must be a triple");
+        assert!(!entity.id.is_empty(), "Id names the entity type");
+        assert!(!entity.data.id.is_empty(), "Data carries the id too");
     }
 
     /// A culling box of zero means "never cull", which would render every prop
