@@ -2,21 +2,49 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+
+# A second push to the same branch makes the first run pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  # Backtraces cost nothing here and turn a bare "test failed" into something
+  # you can act on without pushing another commit to find out where.
+  RUST_BACKTRACE: 1
 
 jobs:
-  build:
-
+  check:
+    name: Format, lints and tests
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Without this, every run rebuilds all 138 dependencies from scratch.
+      - name: Cache cargo registry and build directory
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked --all-features
+
+      # The tool is only ever used as a release build, and the two profiles do
+      # not fail the same way: release turns overflow checks off and optimizes,
+      # so a debug-only test run does not speak for it.
+      - name: Release build
+        run: cargo build --locked --release
