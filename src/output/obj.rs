@@ -57,6 +57,10 @@ pub struct PropAsset {
     /// The `.mdl` path this came from.
     pub model: String,
     pub obj: String,
+    /// Stem of the `.mtl` file this refers to. Every variant of one model
+    /// wears the same materials, so they share one file rather than writing
+    /// tens of thousands of identical copies.
+    pub mtl_id: String,
     pub mtl: String,
     /// Model JSON texture slot (`texture0`) to the texture it refers to.
     pub textures: BTreeMap<String, String>,
@@ -107,6 +111,12 @@ impl PropAsset {
         json.push_str(&format!("  \"flip_v\": {flip_v},\n"));
         // Props are open shells, and culling faces of an open shell eats them.
         json.push_str("  \"automatic_culling\": false,\n  \"shade_quads\": true,\n");
+        // Ambient occlusion is computed from the neighbours of the block a
+        // model belongs to, on the assumption that its faces line up with that
+        // block. A prop's do not — a baked one reaches metres past its own
+        // cell — so the shading it derives is banding that follows the grid
+        // rather than the mesh.
+        json.push_str("  \"ambientocclusion\": false,\n");
         json.push_str(&format!("  \"textures\": {{\n{}\n  }}\n}}\n", textures.join(",\n")));
         json
     }
@@ -117,6 +127,122 @@ impl PropAsset {
             "{{\n  \"variants\": {{\n    \"\": {{ \"model\": \"{NAMESPACE}:block/{}\" }}\n  }}\n}}\n",
             self.id
         )
+    }
+}
+
+/// A prop's geometry, resolved once per `.mdl` and ready to be written out at
+/// whatever orientation a placement asks for.
+///
+/// Kept apart from [`PropAsset`] because the same mesh is written more than
+/// once: in model space for the display entities that carry their own
+/// rotation, and again with a placement's rotation and offset baked in for the
+/// prop that is drawn as an ordinary block. Resolving the materials, decoding
+/// the textures and working out the repeats is the expensive half and it is
+/// the same every time, so it happens here and once.
+#[derive(Debug, Clone)]
+pub struct PropMesh {
+    /// The `.mdl` path this came from.
+    pub model: String,
+    /// Id of the model-space asset, and the stem of the shared `.mtl`.
+    pub id: String,
+    pub parts: Vec<MeshPart>,
+    pub mtl: String,
+    pub textures: BTreeMap<String, String>,
+    pub render_type: RenderType,
+    pub surface_prop: Option<String>,
+    pub width: f32,
+    pub height: f32,
+    pub triangles: usize,
+}
+
+/// The triangles of one mesh wearing one material.
+#[derive(Debug, Clone)]
+pub struct MeshPart {
+    /// Name of the OBJ material, as the `.mtl` declares it.
+    pub material: String,
+    /// Model space, in blocks: one unit is one Minecraft block.
+    pub triangles: Vec<[Vec3; 3]>,
+    /// Already mapped into the sprite's `0..1` by [`Repeat`].
+    pub uvs: Vec<[[f64; 2]; 3]>,
+}
+
+/// Where a baked copy of a mesh sits, relative to the block it is placed in.
+///
+/// The same transform a display entity would carry, resolved once instead of
+/// every frame: `basis` is the rotation's columns in Minecraft axes, and
+/// `translation` is the prop's origin measured from the corner of its block.
+#[derive(Debug, Clone, Copy)]
+pub struct Place {
+    pub basis: [Vec3; 3],
+    pub scale: f64,
+    pub translation: Vec3,
+}
+
+impl Place {
+    /// A model-space vertex, in the coordinates its block's model wants.
+    pub fn apply(&self, v: Vec3) -> Vec3 {
+        self.basis[0] * (v.x * self.scale)
+            + self.basis[1] * (v.y * self.scale)
+            + self.basis[2] * (v.z * self.scale)
+            + self.translation
+    }
+}
+
+impl PropMesh {
+    /// Write this mesh out as the files one block needs.
+    ///
+    /// With no `place` the mesh is written in model space, for an entity to
+    /// orient. With one, the orientation is baked into the coordinates and the
+    /// result is a block that draws the prop where the map put it.
+    pub fn asset(&self, id: String, place: Option<&Place>) -> PropAsset {
+        let mut positions = Index::default();
+        let mut coords = Index::default();
+        let mut faces = String::new();
+
+        for part in &self.parts {
+            faces.push_str(&format!("usemtl {}\n", part.material));
+            for (triangle, uv) in part.triangles.iter().zip(&part.uvs) {
+                let mut corners = [(0usize, 0usize); 3];
+                for (slot, (vertex, coord)) in corners.iter_mut().zip(triangle.iter().zip(uv)) {
+                    let p = match place {
+                        Some(place) => place.apply(*vertex),
+                        None => *vertex,
+                    };
+                    *slot = (
+                        positions.intern("v", &[p.x, p.y, p.z]),
+                        coords.intern("vt", &[coord[0], coord[1]]),
+                    );
+                }
+                faces.push_str(&format!(
+                    "f {}/{} {}/{} {}/{}\n",
+                    corners[0].0,
+                    corners[0].1,
+                    corners[1].0,
+                    corners[1].1,
+                    corners[2].0,
+                    corners[2].1
+                ));
+            }
+        }
+
+        let obj = format!(
+            "# Generated by src2mc from {}\n# One unit is one Minecraft block.\nmtllib {}.mtl\n\n{}\n{}\n{faces}",
+            self.model, self.id, positions.lines, coords.lines
+        );
+
+        PropAsset {
+            id,
+            model: self.model.clone(),
+            obj,
+            mtl_id: self.id.clone(),
+            mtl: self.mtl.clone(),
+            textures: self.textures.clone(),
+            render_type: self.render_type,
+            surface_prop: self.surface_prop.clone(),
+            width: self.width,
+            height: self.height,
+            triangles: self.triangles,
+        }
     }
 }
 
@@ -273,7 +399,7 @@ impl Index {
     }
 }
 
-/// Build every file one prop model needs.
+/// Resolve one prop model into geometry and the textures it needs.
 ///
 /// Returns `None` when the model has no usable geometry, or when it is heavier
 /// than the configured triangle budget — in which case the caller falls back to
@@ -284,7 +410,7 @@ pub fn build(
     config: &Config,
     materials: &Materials,
     textures: &mut Textures,
-) -> Option<(PropAsset, Vec<PropTexture>)> {
+) -> Option<(PropMesh, Vec<PropTexture>)> {
     let triangles = model.triangle_count();
     if triangles == 0 {
         return None;
@@ -294,9 +420,7 @@ pub fn build(
     }
 
     let units = config.scale.units_per_block.max(f64::MIN_POSITIVE);
-    let mut positions = Index::default();
-    let mut coords = Index::default();
-    let mut faces = String::new();
+    let mut mesh_parts: Vec<MeshPart> = Vec::new();
     let mut mtl = String::new();
     let mut slots: BTreeMap<String, String> = BTreeMap::new();
     // Texture path to the OBJ material already declared for it.
@@ -346,47 +470,27 @@ pub fn build(
         }
         surface_prop = surface_prop.or_else(|| assets.surface_prop.clone());
 
-        faces.push_str(&format!("usemtl {material_name}\n"));
+        let mut mesh_part =
+            MeshPart { material: material_name, triangles: Vec::new(), uvs: Vec::new() };
         for (triangle, uv) in part.triangles.iter().zip(&part.uvs) {
-            let mut corners = [(0usize, 0usize); 3];
-            for (slot, (vertex, coord)) in corners.iter_mut().zip(triangle.iter().zip(uv)) {
-                let p = to_model_space(*vertex, units);
-                let [u, v] = repeat.apply(*coord);
-                // Written as they are. Both conventions run V downwards from
-                // the top of the image: Source's because it is a Direct3D
-                // engine, Minecraft's because `TextureAtlasSprite.getV` maps 0
-                // to the sprite's top edge. Flipping to "correct" for OpenGL —
-                // which is what the loader's `flip_v` is for — mirrors the
-                // sheet, and on a model sheet with unused areas that shows up
-                // as half a prop wearing blank texture and the rest wearing
-                // pieces of something else.
-                *slot = (
-                    positions.intern("v", &[p.x, p.y, p.z]),
-                    coords.intern("vt", &[u, v]),
-                );
-            }
-            faces.push_str(&format!(
-                "f {}/{} {}/{} {}/{}\n",
-                corners[0].0,
-                corners[0].1,
-                corners[1].0,
-                corners[1].1,
-                corners[2].0,
-                corners[2].1
-            ));
+            mesh_part.triangles.push(triangle.map(|v| to_model_space(v, units)));
+            // Texture coordinates written as they are. Both conventions run V
+            // downwards from the top of the image: Source's because it is a
+            // Direct3D engine, Minecraft's because `TextureAtlasSprite.getV`
+            // maps 0 to the sprite's top edge. Flipping to "correct" for
+            // OpenGL — which is what the loader's `flip_v` is for — mirrors
+            // the sheet, and on a model sheet with unused areas that shows up
+            // as half a prop wearing blank texture and the rest wearing pieces
+            // of something else.
+            mesh_part.uvs.push(uv.map(|coord| repeat.apply(coord)));
             written += 1;
         }
+        mesh_parts.push(mesh_part);
     }
 
     if written == 0 || slots.is_empty() {
         return None;
     }
-
-    let id = prop_id(path);
-    let obj = format!(
-        "# Generated by src2mc from {path}\n# One unit is one Minecraft block.\nmtllib {id}.mtl\n\n{}\n{}\n{faces}",
-        positions.lines, coords.lines
-    );
 
     // The culling box, in blocks from the model's own origin.
     let size = model.bounds.size() / units;
@@ -394,10 +498,10 @@ pub fn build(
     let height = (model.bounds.max.z / units).max(size.z / 2.0) as f32;
 
     Some((
-        PropAsset {
-            id,
+        PropMesh {
+            id: prop_id(path),
             model: path.to_string(),
-            obj,
+            parts: mesh_parts,
             mtl,
             textures: slots,
             render_type,
@@ -568,6 +672,7 @@ mod tests {
             id: "prop_x".into(),
             model: "models/x.mdl".into(),
             obj: String::new(),
+            mtl_id: "prop_x".into(),
             mtl: String::new(),
             textures: [("texture0".to_string(), "kubejs:props/y_1x1".to_string())]
                 .into_iter()

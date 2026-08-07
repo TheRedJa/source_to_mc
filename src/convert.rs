@@ -86,6 +86,9 @@ pub struct Stats {
     pub prop_models: usize,
     /// Props moved vertically to stand on the floor rather than in it.
     pub props_settled: usize,
+    /// Props drawn as a block with their rotation baked in, which the chunk
+    /// mesh absorbs, rather than as an entity redrawn every frame.
+    pub props_baked: usize,
     /// Invisible blocks placed to make the big ones solid.
     pub prop_barriers: usize,
     /// Voxels emitted as a slab or stair instead of a full cube.
@@ -952,7 +955,62 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             barriers += 1;
         }
     }
+    // Props drawn as blocks rather than as entities. Last, so it sees the
+    // world exactly as it will be pasted: a prop's block may only take a cell
+    // that is air, since taking one of the map's own would punch a hole in
+    // whatever the prop stands against, and taking another prop's would delete
+    // that prop.
+    let mut baked = Vec::new();
+    let mut taken: std::collections::HashSet<IVec3> = std::collections::HashSet::new();
+    let mut assets = assets;
+    // Held apart from `assets` for the loop, which reads the placements it is
+    // registering meshes for.
+    let mut pack = std::mem::take(&mut assets.pack);
+    if config.props.bake {
+        for (index, placement) in assets.placements.iter().enumerate() {
+            let bounds = transform.transform_bounds(placement.bounds);
+            let bounds = Aabb::new(
+                bounds.min + Vec3::new(0.0, settle[index], 0.0),
+                bounds.max + Vec3::new(0.0, settle[index], 0.0),
+            );
+            let size = placement.bounds.size();
+            let longest = size.x.max(size.y).max(size.z);
+            if config.props.bake_max_size > 0.0 && longest > config.props.bake_max_size {
+                continue;
+            }
+            let Some(mesh) = assets.prop_meshes.get(placement.mesh) else { continue };
+            let Some(cell) = crate::output::bake::anchor(&grid, bounds, &taken) else { continue };
+
+            let origin = transform.to_block_space(placement.prop.origin);
+            let key = crate::output::bake::Key::new(
+                &mesh.id,
+                crate::output::display::rotation(&placement.prop, &transform),
+                Vec3::new(origin.x, origin.y + settle[index], origin.z),
+                cell,
+                placement.prop.scale,
+                config.props.bake_grid,
+                config.props.bake_angle_steps,
+            );
+            let id = key.id();
+            if pack.prop(&id).is_none() {
+                let place = key.place(config.props.bake_grid);
+                let asset = mesh.asset(id.clone(), Some(&place));
+                pack.insert_prop(asset, Vec::new());
+            }
+            taken.insert(cell);
+            baked.push((index, cell, format!("{}:{id}", crate::output::kubejs::NAMESPACE)));
+        }
+    }
+    assets.pack = pack;
+
+    for (_, cell, block) in &baked {
+        let id = palette.intern(block);
+        grid.set(*cell, id);
+    }
     let grid = grid;
+    let props_baked = baked.len();
+    let is_baked: std::collections::HashSet<usize> =
+        baked.iter().map(|(index, _, _)| *index).collect();
 
     let palette = palette;
     let mut block_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -962,13 +1020,17 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
 
     let skipped = skipped.into_inner();
 
-    // Props drawn as themselves. The mesh is registered in the pack; what is
-    // left is one entity per placement, carrying the map's own rotation.
+    // The props that could not be baked into a block: too large for it, or
+    // with no free cell to stand the block in. These keep the old route — one
+    // display entity each, carrying the map's own rotation — which costs frame
+    // rate but is never wrong, and there are few of them.
     let props: Vec<crate::output::display::Placement> = assets
         .placements
         .iter()
         .zip(&settle)
-        .map(|(placement, shift)| {
+        .enumerate()
+        .filter(|(index, _)| !is_baked.contains(index))
+        .map(|(_, (placement, shift))| {
             let origin = transform.to_block_space(placement.prop.origin);
             crate::output::display::Placement {
                 block: placement.block.clone(),
@@ -997,6 +1059,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             props_modelled: assets.stats.props_modelled,
             prop_models: assets.stats.prop_models,
             props_settled: settled,
+            props_baked,
             prop_barriers: barriers,
             shapes_fitted,
             blocks_before_hollow,
@@ -1454,8 +1517,10 @@ mod tests {
     }
 
     /// The failure the user sees as a hole in a wall: a barrier is invisible,
-    /// so putting one where a block already was is the same as deleting it.
-    /// Adding a map's props must not take a single one of its own blocks away.
+    /// so putting one where a block already was is the same as deleting it. A
+    /// prop's own block is nearly as bad — it is a mesh floating where a wall
+    /// used to be. Adding a map's props must not take a single one of its own
+    /// blocks away, by either route.
     #[test]
     fn prop_collision_never_replaces_a_block_of_the_map() {
         let Some(map) = sample_map() else { return };
@@ -1464,16 +1529,25 @@ mod tests {
         without.props.enabled = false;
         let without = convert(&map, &without).unwrap();
         let with = convert(&map, &kubejs_config()).unwrap();
-        if with.stats.prop_barriers == 0 {
+        if with.stats.prop_barriers == 0 && with.stats.props_baked == 0 {
             return;
         }
 
         for (pos, id) in without.grid.iter() {
             let before = without.palette.name(id);
             let after = with.palette.name(with.grid.get(pos));
+            // A prop is allowed to put its own visible geometry where a block
+            // was — that is only a swap you can see. What it may never do is
+            // replace one with something invisible: a barrier, or the block a
+            // baked mesh hangs off, which draws nothing in its own cell. Both
+            // read as a hole through the wall.
             assert_ne!(
                 after, BARRIER,
                 "{pos:?} was {before} and a prop turned it into an invisible barrier"
+            );
+            assert!(
+                !after.contains(":prop_"),
+                "{pos:?} was {before} and a baked prop took the cell"
             );
         }
     }
@@ -1502,6 +1576,65 @@ mod tests {
         );
     }
 
+    /// What the whole change is for: props stop being entities. Almost all of
+    /// them should end up as blocks the chunk mesh absorbs, and only the ones
+    /// with nowhere to put a block stay as entities redrawn every frame.
+    #[test]
+    fn baking_turns_props_into_blocks_instead_of_entities() {
+        let Some(map) = sample_map() else { return };
+
+        let mut off = kubejs_config();
+        off.props.bake = false;
+        let off = convert(&map, &off).unwrap();
+        if off.props.is_empty() {
+            return;
+        }
+        let on = convert(&map, &kubejs_config()).unwrap();
+
+        assert_eq!(off.stats.props_baked, 0, "baking was off");
+        assert_eq!(
+            on.stats.props_baked + on.props.len(),
+            off.props.len(),
+            "a prop was lost between the two routes"
+        );
+        assert!(
+            on.props.len() * 4 < off.props.len(),
+            "{} of {} props are still entities",
+            on.props.len(),
+            off.props.len()
+        );
+
+        // Every baked prop is a block in the grid naming a mesh the pack
+        // registers, which is the drift that makes a paste silently empty.
+        let mut blocks = 0;
+        for (_, id) in on.grid.iter() {
+            let name = on.palette.name(id);
+            if name.contains(":prop_") {
+                assert!(on.pack.prop(name).is_some(), "{name} is placed but not registered");
+                blocks += 1;
+            }
+        }
+        assert_eq!(blocks, on.stats.props_baked, "a baked prop has no block");
+    }
+
+    /// Two props must never be given the same cell, or the second block
+    /// replaces the first and that prop is simply not drawn.
+    #[test]
+    fn no_two_baked_props_share_a_block() {
+        let Some(map) = sample_map() else { return };
+        let converted = convert(&map, &kubejs_config()).unwrap();
+        if converted.stats.props_baked == 0 {
+            return;
+        }
+        // One block per baked prop is exactly what the count above asserts;
+        // this is the same statement from the other side, that the meshes
+        // registered are distinct enough to be worth registering.
+        assert!(
+            converted.pack.props().count() > 1,
+            "a whole map of props collapsed to one mesh"
+        );
+    }
+
     /// Props sink into the ground because they are placed to a fraction of a
     /// block and the floor under them is rounded to whole ones. Settling has
     /// to actually move some of them, and never by more than the limit.
@@ -1509,10 +1642,15 @@ mod tests {
     fn settling_lifts_props_out_of_the_floor() {
         let Some(map) = sample_map() else { return };
 
-        let mut off = kubejs_config();
+        // Baking is off so that every placement shows up in `props` and can be
+        // compared position for position. What settling does is the same
+        // either way; only where the answer is written down differs.
+        let mut on = kubejs_config();
+        on.props.bake = false;
+        let mut off = on.clone();
         off.props.settle = false;
         let off = convert(&map, &off).unwrap();
-        let on = convert(&map, &kubejs_config()).unwrap();
+        let on = convert(&map, &on).unwrap();
         if on.props.is_empty() {
             return;
         }

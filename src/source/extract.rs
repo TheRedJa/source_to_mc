@@ -60,8 +60,12 @@ pub struct PropSurface {
 #[derive(Debug, Clone)]
 pub struct PropPlacement {
     pub prop: crate::bsp::props::Prop,
-    /// Namespaced id of the generated block whose model is this mesh.
+    /// Namespaced id of the generated block whose model is this mesh, in model
+    /// space — what a display entity names.
     pub block: String,
+    /// Index into [`Assets::prop_meshes`], for baking the mesh at this
+    /// placement's own rotation instead.
+    pub mesh: usize,
     /// Culling box of the model, in blocks.
     pub width: f32,
     pub height: f32,
@@ -88,6 +92,13 @@ pub struct Assets {
     pub props: Vec<PropSurface>,
     /// Props rendered as their own mesh rather than voxelized.
     pub placements: Vec<PropPlacement>,
+    /// The geometry behind those placements, one entry per distinct `.mdl`.
+    ///
+    /// Kept because the same mesh is written out more than once: once in model
+    /// space for the entities to orient, and again with each placement's own
+    /// rotation baked in for the props drawn as blocks. Which of those happens
+    /// depends on the world the conversion built, which is not known here.
+    pub prop_meshes: Vec<crate::output::obj::PropMesh>,
     pub stats: Extracted,
 }
 
@@ -178,7 +189,13 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
     }
 
     let layouts: Vec<Layout> = pending.iter().map(|p| p.layout).collect();
-    let cap = choose_cap(&layouts, config);
+    // Props register blocks too, and a baked one registers a block per
+    // distinct placement rather than per model. That is the same startup cost
+    // a split texture's tiles are, so it comes out of the same budget: what is
+    // left over is what the textures may be cut into.
+    let reserved = assets.prop_meshes.len()
+        + if config.props.bake { assets.placements.len() } else { 0 };
+    let cap = choose_cap(&layouts, config, reserved);
     assets.stats.tile_cap = cap;
 
     for item in &pending {
@@ -315,8 +332,13 @@ pub fn layouts(map: &Map, config: &Config) -> std::collections::BTreeMap<String,
 
 /// The cap a set of materials should be cut at, for callers that gathered
 /// them with [`layouts`].
-pub fn cap_for(layouts: &[Layout], config: &Config) -> u32 {
-    choose_cap(layouts, config)
+///
+/// `reserved` is what the pack owes before any texture is cut. `batch` plans a
+/// cap across every map at once, before any of them has been read for props,
+/// so it has nothing to reserve and passes 0; the props it then registers are
+/// on top of the budget rather than inside it.
+pub fn cap_for(layouts: &[Layout], config: &Config, reserved: usize) -> u32 {
+    choose_cap(layouts, config, reserved)
 }
 
 /// How many blocks a set of materials would register at a given cap.
@@ -335,10 +357,12 @@ pub fn blocks_at(layouts: &[Layout], config: &Config, cap: u32) -> usize {
 /// The resolution limit in [`Layout::split`] means this usually saturates well
 /// before the ceiling — past a certain point a finer cut costs nothing because
 /// the source texture has no more detail to give.
-fn choose_cap(layouts: &[Layout], config: &Config) -> u32 {
+/// `reserved` is what the pack owes before a single texture is cut — the
+/// blocks the map's props will register.
+fn choose_cap(layouts: &[Layout], config: &Config, reserved: usize) -> u32 {
     let ceiling = config.materials.tile_max.max(1);
-    let budget = config.materials.max_blocks;
-    if budget == 0 || !config.materials.tile_textures {
+    let budget = config.materials.max_blocks.saturating_sub(reserved);
+    if config.materials.max_blocks == 0 || !config.materials.tile_textures {
         return ceiling;
     }
     let blocks = |cap: u32| -> usize {
@@ -400,7 +424,7 @@ fn place_props(
     let mut models = Models::new(vfs);
     // Model path to the mesh built for it, so a fence repeated a dozen times
     // is one OBJ and one attempt at building it.
-    let mut meshes: std::collections::HashMap<String, Option<(String, f32, f32)>> =
+    let mut meshes: std::collections::HashMap<String, Option<(String, usize, f32, f32)>> =
         std::collections::HashMap::new();
     // Material name to its index in the combined list. The map's own
     // materials come first and keep the indices the BSP gave them.
@@ -448,16 +472,23 @@ fn place_props(
                         materials,
                         &mut prop_textures,
                     )
-                    .map(|(asset, textures)| {
-                        let (width, height) = (asset.width, asset.height);
-                        (assets.pack.insert_prop(asset, textures), width, height)
+                    .map(|(mesh, textures)| {
+                        let (width, height) = (mesh.width, mesh.height);
+                        // The model-space asset, which is what a display
+                        // entity places and what a baked variant falls back
+                        // to. Registering it costs one block per model.
+                        let block = assets
+                            .pack
+                            .insert_prop(mesh.asset(mesh.id.clone(), None), textures);
+                        assets.prop_meshes.push(mesh);
+                        (block, assets.prop_meshes.len() - 1, width, height)
                     });
                     meshes.insert(prop.model.clone(), built.clone());
                     built
                 }
             };
 
-            if let Some((block, width, height)) = mesh {
+            if let Some((block, mesh, width, height)) = mesh {
                 // Big props are solid, small ones are scenery you walk
                 // through. A display entity has no collision of its own, so
                 // being solid means invisible barriers behind the mesh.
@@ -487,6 +518,7 @@ fn place_props(
                 assets.placements.push(PropPlacement {
                     prop: prop.clone(),
                     block,
+                    mesh,
                     width: width * prop.scale as f32,
                     height: height * prop.scale as f32,
                     bounds,

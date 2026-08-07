@@ -126,6 +126,10 @@ struct ConvertOptions {
     /// gets invisible barriers behind it. 0 makes every prop solid.
     #[arg(long)]
     prop_collision: Option<f64>,
+    /// Place prop meshes as display entities rather than baking them into the
+    /// chunk mesh as blocks. Registers far fewer blocks and costs frame rate.
+    #[arg(long)]
+    no_prop_baking: bool,
     /// Also write a datapack defining a dimension tall enough for the map.
     #[arg(long)]
     emit_dimension: bool,
@@ -180,6 +184,9 @@ impl ConvertOptions {
         }
         if let Some(size) = self.prop_collision {
             config.props.collision_min_size = size;
+        }
+        if self.no_prop_baking {
+            config.props.bake = false;
         }
         if self.emit_dimension {
             config.output.emit_dimension = true;
@@ -324,6 +331,11 @@ fn convert_into(
         eprintln!(
             "  {} settled onto the floor, {} barrier blocks behind the big ones",
             stats.props_settled, stats.prop_barriers,
+        );
+        eprintln!(
+            "  {} baked into the chunk mesh as blocks, {} left as display entities",
+            stats.props_baked,
+            stats.props_modelled - stats.props_baked,
         );
     }
     eprintln!(
@@ -492,7 +504,7 @@ fn batch(
             }
         }
         let layouts: Vec<_> = all.into_values().collect();
-        let cap = src2mc::source::extract::cap_for(&layouts, &config);
+        let cap = src2mc::source::extract::cap_for(&layouts, &config, 0);
         let blocks = src2mc::source::extract::blocks_at(&layouts, &config, cap);
         eprintln!(
             "planning one pack for {} maps: {} materials, about {blocks} blocks at up to \

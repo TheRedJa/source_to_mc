@@ -407,14 +407,46 @@ pub struct Props {
     /// invisible barrier blocks so they are solid. Smaller clutter is left
     /// walk-through; 0 makes everything solid, and a huge value nothing.
     pub collision_min_size: f64,
+    /// Draw props as blocks with their rotation baked in, rather than as
+    /// display entities.
+    ///
+    /// A display entity is redrawn every frame instead of being baked into the
+    /// chunk mesh, so a few hundred props in view costs real frame rate. A
+    /// block costs nothing once its chunk is built, and its faces are lit
+    /// individually rather than the whole prop taking the light of one cell.
+    /// The price is a registered block per distinct placement.
+    pub bake: bool,
+    /// Steps per block that a baked prop's position within its block is
+    /// rounded to. Higher is more faithful and shares fewer blocks between
+    /// placements. At the default 16 units per block this represents every
+    /// whole Hammer unit exactly, so props on Source's own grid do not move.
+    pub bake_grid: i64,
+    /// Steps a baked prop's rotation is rounded to, per quaternion component.
+    ///
+    /// 256 is about a fifth of a degree, which moves the far end of even a
+    /// large prop by a couple of centimetres. Coarser rounding shares blocks
+    /// between placements at odd angles, but hardly any: a prop turned by a
+    /// whole number of degrees rounds to itself at any setting, and that is
+    /// nearly all of them.
+    pub bake_angle_steps: i64,
+    /// Props longer than this many Source units stay display entities however
+    /// `bake` is set; 0 bakes every size.
+    ///
+    /// A block's model is filed under the chunk section holding that block, so
+    /// a mesh reaching far beyond it appears and disappears with a section it
+    /// is barely in. For anything of a normal prop's size that is invisible.
+    pub bake_max_size: f64,
     /// `view_range` on the generated entities: distances beyond this times 64
     /// blocks stop rendering. Below 1.0 trades draw distance for frame rate.
+    /// Only reaches the props left as entities; a baked one is part of its
+    /// chunk and is drawn whenever the chunk is.
     pub view_range: f32,
     /// Models with more triangles than this are voxelized instead of rendered.
     /// 0 keeps every model however heavy.
     pub max_triangles: usize,
-    /// Light the prop fully rather than by the block it stands in. A large
-    /// mesh is lit at one point, so a bright object in a dark cell goes black.
+    /// Light the prop fully rather than by the block it stands in. A display
+    /// entity is lit at one point, so a large mesh in a dark cell goes black.
+    /// A baked prop is lit face by face by the chunk mesher and ignores this.
     pub full_bright: bool,
     /// Mirror the V texture axis.
     ///
@@ -443,6 +475,10 @@ impl Default for Props {
             settle: true,
             settle_max: 1.0,
             collision_min_size: 48.0,
+            bake: true,
+            bake_grid: 16,
+            bake_angle_steps: 256,
+            bake_max_size: 0.0,
             view_range: 1.0,
             max_triangles: 4_000,
             full_bright: false,
