@@ -184,19 +184,45 @@ settle = true
 # grid's own rounding, so a block covers it; further than that is a prop over a
 # hole the conversion did not build, and moving it there would invent a position.
 settle_max = 1.0
+# Draw props as blocks with their rotation baked into the mesh, rather than as
+# display entities. An entity is redrawn through the entity renderer every
+# frame and is never baked into a chunk's vertex buffer, so a few hundred props
+# in view costs real frame rate however good your culling mods are. A block
+# costs nothing once its chunk is built, and the chunk mesher lights each of its
+# faces instead of the whole prop taking the light of the one cell it stands in.
+# The price is a registered block per distinct placement rather than per model,
+# which comes out of `[materials] max_blocks`.
+bake = true
+# Steps per block that a baked prop's position inside its block is rounded to.
+# Placements that round to the same rotation and offset share one block, so a
+# row of identical fence posts is one registration. Higher is more faithful and
+# shares less. At the default 16 units per block this represents every whole
+# Hammer unit exactly, so props on Source's own grid are not moved at all.
+bake_grid = 16
+# Steps a baked prop's rotation is rounded to, per quaternion component. 256 is
+# about a fifth of a degree. Coarser sharing gains almost nothing: a prop turned
+# by a whole number of degrees rounds to itself at any setting, and that is
+# nearly all of them.
+bake_angle_steps = 256
+# Props longer than this many Source units stay display entities however `bake`
+# is set; 0 bakes every size. A block's model is filed under the chunk section
+# holding that block, so a mesh reaching far past it appears and disappears with
+# a section it is barely in.
+bake_max_size = 0.0
 # Props at least this many Source units across get invisible barrier blocks, so
 # you can stand on a container and walk through a traffic cone. 0 makes
 # everything solid; a huge value nothing.
 collision_min_size = 48.0
-# Beyond view_range * 64 blocks a prop stops rendering. Display entities are
-# drawn every frame rather than baked into the chunk mesh, so this is the lever
-# if a busy map costs frames.
+# Beyond view_range * 64 blocks a prop stops rendering. Only applies to props
+# left as display entities: a baked one is part of the chunk and is drawn at
+# whatever distance the chunk is.
 view_range = 1.0
 # Models heavier than this are voxelized instead; 0 renders every model however
 # many triangles it has.
 max_triangles = 4000
-# Light the mesh fully rather than by the single cell it stands in. A large prop
-# in a dark cell otherwise goes black.
+# Light the mesh fully rather than by the single cell it stands in. Only applies
+# to props left as display entities, which are lit at one point; a baked prop is
+# lit face by face by the chunk mesher and does not need it.
 full_bright = false
 # Mirror the V texture axis. Off, because Source and Minecraft agree: both run V
 # downwards from the top of the image. The OBJ loader offers the flip for models

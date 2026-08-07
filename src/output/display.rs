@@ -51,6 +51,16 @@ pub struct Placement {
 /// column from the basis vectors does, without any of it having to be written
 /// out as a matrix product.
 pub fn rotation(prop: &Prop, transform: &Transform) -> [f64; 4] {
+    quaternion(basis(prop, transform))
+}
+
+/// That same rotation as the columns of its matrix.
+///
+/// A prop drawn as a block rather than as an entity needs the rotation applied
+/// to its vertices rather than handed to Minecraft, and this is the form that
+/// does that. Sharing it with [`rotation`] is what keeps the two ways of
+/// placing a prop from drifting apart.
+pub fn basis(prop: &Prop, transform: &Transform) -> [Vec3; 3] {
     let units = transform.units_per_block();
     let mut columns = [Vec3::ZERO; 3];
     for (axis, column) in columns.iter_mut().enumerate() {
@@ -63,7 +73,46 @@ pub fn rotation(prop: &Prop, transform: &Transform) -> [f64; 4] {
         let source = Vec3::new(model.x, -model.z, model.y) * units;
         *column = transform.transform_direction(prop.rotate(source));
     }
-    quaternion(columns)
+    columns
+}
+
+/// The columns of the rotation matrix a quaternion `[x, y, z, w]` describes.
+///
+/// The inverse of [`quaternion`], and the way a rotation that has been rounded
+/// to a coarser set of angles gets turned back into something vertices can be
+/// multiplied by.
+pub fn basis_of(q: [f64; 4]) -> [Vec3; 3] {
+    let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+    [
+        Vec3::new(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w)),
+        Vec3::new(2.0 * (x * y - z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + x * w)),
+        Vec3::new(2.0 * (x * z + y * w), 2.0 * (y * z - x * w), 1.0 - 2.0 * (x * x + y * y)),
+    ]
+}
+
+/// Round a rotation onto a coarser set of angles, as the whole numbers that
+/// identify it.
+///
+/// Baking a prop's rotation into its mesh means one generated block per
+/// distinct rotation, so rotations that differ by less than anyone can see
+/// should be the same block. Rounding the quaternion's own components is
+/// enough: at the default 64 steps two rotations sharing a key are within
+/// about a degree of each other.
+///
+/// `q` and `-q` are the same rotation, so the sign is settled first or the two
+/// spellings would become two blocks.
+pub fn quantize(q: [f64; 4], steps: i64) -> [i64; 4] {
+    let steps = steps.max(1);
+    let flip = q.iter().find(|c| **c != 0.0).is_some_and(|c| *c < 0.0);
+    let sign = if flip { -1.0 } else { 1.0 };
+    q.map(|c| (c * sign * steps as f64).round() as i64)
+}
+
+/// The unit quaternion a [`quantize`] key stands for.
+pub fn dequantize(key: [i64; 4]) -> [f64; 4] {
+    let q = key.map(|c| c as f64);
+    let length = q.iter().map(|c| c * c).sum::<f64>().sqrt();
+    if length > 0.0 { q.map(|c| c / length) } else { [0.0, 0.0, 0.0, 1.0] }
 }
 
 /// A rotation matrix, given as its columns, as a quaternion `[x, y, z, w]`.

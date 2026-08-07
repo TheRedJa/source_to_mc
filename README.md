@@ -22,8 +22,10 @@ Working today:
   railings, catwalks, crates, cars, doors and lamps that fill a map's rooms,
   none of which is in any brush lump.
 - Draws those props as their **real triangle mesh**, not as cubes, through
-  NeoForge's OBJ model loader and one display entity per placement — so a
-  forklift is a forklift. Large ones get invisible barriers to stand on.
+  NeoForge's OBJ model loader — so a forklift is a forklift. The map's rotation
+  is baked into the mesh so the prop can be an ordinary block the chunk
+  absorbs, rather than an entity redrawn every frame. Large ones get invisible
+  barriers to stand on.
 - Leaves out the **3D skybox room**, the scale model of the horizon that would
   otherwise convert into a second, wrongly-sized map.
 - Optionally extracts the map's **real textures** and emits them as Minecraft
@@ -139,23 +141,39 @@ search path the textures come from and LOD 0 is flattened to triangles.
 
 A prop is the one thing in a Source map that was never designed for a grid, so
 by default it is not put on one. Its triangles are written as a Wavefront
-`.obj`, registered as a block whose model NeoForge's built-in OBJ loader draws,
-and placed by a `minecraft:block_display` entity carrying the prop's own
-rotation as a quaternion — so a car is a car rather than a lump of mismatched
-cubes. Two conventions bite here and both are handled: one OBJ unit is one
-block, not the 1/16 a vanilla JSON model means, and a pack texture is a sprite
-on a shared atlas where UVs past `0..1` read whatever was stitched next door
-rather than wrapping, so a model that tiles its sheet gets the texture repeated
-into a larger image and its coordinates divided to match.
+`.obj` and registered as a block whose model NeoForge's built-in OBJ loader
+draws — so a car is a car rather than a lump of mismatched cubes. Two
+conventions bite here and both are handled: one OBJ unit is one block, not the
+1/16 a vanilla JSON model means, and a pack texture is a sprite on a shared
+atlas where UVs past `0..1` read whatever was stitched next door rather than
+wrapping, so a model that tiles its sheet gets the texture repeated into a
+larger image and its coordinates divided to match.
 
-The entities are written into the schematics' `Entities` list, which needs
-`//paste -e`, *and* as a `.mcfunction` of `summon` commands at the same absolute
-coordinates — the specification says an implementation must keep everything in
-an entity's `Data`, but display-entity NBT is unusual enough to be worth a
-second route. Everything tagged `src2mc_<map>`, so a bad paste is one `/kill`
-away.
+Placing it at the map's own angle is a separate problem, since a block sits on
+the grid facing one of four ways. A `minecraft:block_display` entity solves it
+by rendering a blockstate under a free transformation, and that is what src2mc
+used to do — at a cost that turned out to be the whole frame budget. A display
+entity goes through the entity renderer every frame and is never baked into a
+chunk's vertex buffer, so a few hundred props in view is a few hundred thousand
+triangles resubmitted per frame, whatever culling mods are installed.
 
-Display entities have no collision, so props at least `collision_min_size` units
+So the rotation is baked into the mesh instead. Each placement gets a model
+whose coordinates already carry the map's angle and its position within a
+block, and the prop becomes an ordinary block placed in a free cell inside its
+own geometry — chunk-baked, free per frame, and lit face by face rather than by
+the single cell it stands in. Placements that round to the same angle and
+offset share one block, so a row of identical fence posts is one registration.
+`d1_trainstation_02`'s 325 meshes come to 258 of them.
+
+The block never replaces anything: it only ever takes a cell that is already
+air, since taking one of the map's own would be a hole in whatever the prop
+stands against. A prop with nowhere to put a block — and anything over
+`bake_max_size` — keeps the old route, a display entity written into the
+schematics' `Entities` list and into a `.mcfunction` of `summon` commands at
+the same absolute coordinates, everything tagged `src2mc_<map>` so a bad paste
+is one `/kill` away. `bake = false` puts every prop back on it.
+
+Neither route has collision of its own, so props at least `collision_min_size` units
 across (48 by default) also get invisible barriers behind the mesh: you can
 stand on a container and walk through a traffic cone. Anything that cannot be
 drawn as a mesh — a model heavier than `max_triangles`, a material with no

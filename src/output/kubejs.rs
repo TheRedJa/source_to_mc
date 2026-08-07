@@ -402,13 +402,19 @@ impl Pack {
                     .with_context(|| format!("creating {}", dir.display()))?;
             }
 
+            let mut libraries: std::collections::HashSet<String> = std::collections::HashSet::new();
             for asset in self.props.values() {
                 let write = |path: std::path::PathBuf, contents: &str| -> Result<()> {
                     std::fs::write(&path, contents)
                         .with_context(|| format!("writing {}", path.display()))
                 };
                 write(models.join(format!("{}.obj", asset.id)), &asset.obj)?;
-                write(models.join(format!("{}.mtl", asset.id)), &asset.mtl)?;
+                // Every baked variant of a model wears the same materials, so
+                // the `.mtl` is written once per model rather than once per
+                // variant — a campaign has tens of thousands of the latter.
+                if libraries.insert(asset.mtl_id.clone()) {
+                    write(models.join(format!("{}.mtl", asset.mtl_id)), &asset.mtl)?;
+                }
                 write(
                     block_models.join(format!("{}.json", asset.id)),
                     &asset.model_json(self.flip_v),
@@ -496,9 +502,7 @@ impl Pack {
 
         // Prop models. Registered the same way, and drawn by the model files
         // written alongside; nothing here says "mesh" because as far as the
-        // registry is concerned these are ordinary blocks. They are never
-        // placed as blocks, only rendered by the display entities that carry
-        // their rotation.
+        // registry is concerned these are ordinary blocks.
         for asset in self.props.values() {
             let mut chain = vec![
                 format!("event.create('{}')", asset.block_id()),
@@ -513,6 +517,17 @@ impl Pack {
                 format!("  .soundType('{}')", sound_for(asset.surface_prop.as_deref())),
                 "  .hardness(1.5)".to_string(),
                 "  .resistance(6.0)".to_string(),
+                // A baked prop is placed as a real block sitting inside its own
+                // mesh, so what the block does in its cell matters. Left as an
+                // ordinary cube it would be a solid metre of nothing you walk
+                // into, it would cull the faces of the map blocks touching it
+                // — holes in the wall behind every crate — and it would stop
+                // light. The mesh is what you see and the barriers are what you
+                // stand on; the block itself should be neither.
+                "  .noCollision()".to_string(),
+                "  .notSolid()".to_string(),
+                "  .opaque(false)".to_string(),
+                "  .fullBlock(false)".to_string(),
             ];
             if asset.render_type != RenderType::Solid {
                 chain.push(format!("  .renderType('{}')", asset.render_type.name()));
