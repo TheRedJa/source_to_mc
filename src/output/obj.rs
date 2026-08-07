@@ -86,8 +86,12 @@ impl PropAsset {
             textures.push(format!("    \"particle\": \"{first}\""));
         }
         let mut json = String::from("{\n  \"loader\": \"neoforge:obj\",\n");
+        // Relative to the namespace root, not to `models/` — unlike every
+        // other model reference in the game, which is why this is spelled out.
+        // A path missing the folder resolves to nothing and the prop renders
+        // as the missing-model checkerboard.
         json.push_str(&format!(
-            "  \"model\": \"{NAMESPACE}:{MODEL_DIR}/{}.obj\",\n",
+            "  \"model\": \"{NAMESPACE}:models/{MODEL_DIR}/{}.obj\",\n",
             self.id
         ));
         json.push_str(&format!("  \"flip_v\": {flip_v},\n"));
@@ -510,7 +514,13 @@ mod tests {
         };
         let json = asset.model_json(false);
         assert!(json.contains("\"loader\": \"neoforge:obj\""));
-        assert!(json.contains("\"model\": \"kubejs:props/prop_x.obj\""));
+        // From the namespace root: `assets/kubejs/models/props/prop_x.obj`.
+        // Without the `models/` the loader finds nothing and the prop renders
+        // as the missing-model checkerboard.
+        assert!(
+            json.contains("\"model\": \"kubejs:models/props/prop_x.obj\""),
+            "the OBJ path is relative to the namespace root: {json}"
+        );
         assert!(json.contains("\"texture0\": \"kubejs:props/y_1x1\""));
         assert!(json.contains("\"particle\""), "a missing particle logs warnings");
         assert!(asset.blockstate_json().contains("kubejs:block/prop_x"));
