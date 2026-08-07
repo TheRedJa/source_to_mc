@@ -53,7 +53,19 @@ jobs:
           zip -0 -r "$name.zip" "$name"
           echo "archive=$name.zip" >> "$GITHUB_OUTPUT"
 
+      # Run from the Actions tab rather than from a tag: there is no release to
+      # attach anything to, so the archive is left as a build artifact. This is
+      # the dry run — everything above it has already happened by here.
+      - name: Upload the archive
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.archive }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
       - name: Publish
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.package.outputs.archive }}
