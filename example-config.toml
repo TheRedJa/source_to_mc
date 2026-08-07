@@ -173,6 +173,17 @@ texture_size = 128
 # repeated into a larger image instead, up to this many times per axis. Past it
 # the coordinates wrap and a seam appears where they do.
 texture_repeat_max = 4
+# Move a prop vertically so it stands on the floor the conversion built rather
+# than in it. A prop is placed to a fraction of a block; the floor under it is
+# voxelized to whole ones, so the two disagree by up to a block and a crate sinks
+# into the ground. Cubing the prop hid that, because the cubes were rounded by
+# the same grid. A prop with nothing under it is left exactly where it was — a
+# hanging lamp should not fall — and lifting never pushes a prop into a ceiling.
+settle = true
+# How far settling may move a prop, in blocks. The correction exists to undo the
+# grid's own rounding, so a block covers it; further than that is a prop over a
+# hole the conversion did not build, and moving it there would invent a position.
+settle_max = 1.0
 # Props at least this many Source units across get invisible barrier blocks, so
 # you can stand on a container and walk through a traffic cone. 0 makes
 # everything solid; a huge value nothing.

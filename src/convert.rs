@@ -5,12 +5,16 @@ use crate::config::{Config, FillMode};
 use crate::geom::{Aabb, Vec3};
 use crate::palette::{Decision, Resolver};
 use crate::voxel::brush::BlockSolid;
-use crate::voxel::grid::{BlockId, IVec3, Palette, VoxelGrid};
+use crate::voxel::grid::{AIR, BlockId, IVec3, Palette, VoxelGrid};
 use crate::voxel::shell;
 use crate::voxel::transform::Transform;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+
+/// What a prop drawn as its own mesh leaves behind to stand on: solid, and
+/// invisible, so the mesh in front of it is all you see.
+const BARRIER: &str = "minecraft:barrier";
 
 pub struct Conversion {
     pub grid: VoxelGrid,
@@ -80,8 +84,16 @@ pub struct Stats {
     pub props_modelled: usize,
     /// Distinct meshes generated for them.
     pub prop_models: usize,
+    /// Props moved vertically to stand on the floor rather than in it.
+    pub props_settled: usize,
+    /// Invisible blocks placed to make the big ones solid.
+    pub prop_barriers: usize,
     /// Voxels emitted as a slab or stair instead of a full cube.
     pub shapes_fitted: usize,
+    /// Brush and terrain blocks before hollowing removed the interiors.
+    ///
+    /// The world only: props are added after hollowing, deliberately, so they
+    /// cannot seal a wall's air side and have that wall taken for interior.
     pub blocks_before_hollow: usize,
     pub blocks: usize,
     /// Voxel count per block type, for sourcing materials.
@@ -819,34 +831,75 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     }
     let displacements_skipped = displacements_skipped.into_inner();
 
+    // How far each modelled prop has to move to meet the floor. Measured here,
+    // against the world as brushes and terrain left it and before any prop has
+    // been added to it, so props cannot end up standing on each other.
+    let settle: Vec<f64> = assets
+        .placements
+        .iter()
+        .map(|placement| {
+            if !config.props.settle {
+                return 0.0;
+            }
+            crate::voxel::settle::offset(
+                &grid,
+                transform.transform_bounds(placement.bounds),
+                config.props.settle_max,
+            )
+        })
+        .collect();
+    let settled = settle.iter().filter(|shift| **shift != 0.0).count();
+
+    // The solid backing behind a mesh, kept apart from the world's own blocks
+    // until the very end. Merging it in now would let hollowing see a wall
+    // whose air side is sealed by a barrier as interior and carve it away.
+    let collision = assets
+        .placements
+        .par_iter()
+        .zip(&settle)
+        .filter(|(placement, _)| !placement.collision.is_empty())
+        .fold(VoxelGrid::new, |mut grid, (placement, shift)| {
+            let barrier = palette.lock().unwrap().intern(BARRIER);
+            // The mesh moved, so what you can stand on moves with it.
+            let lift = Vec3::new(0.0, 0.0, shift * transform.units_per_block());
+            let surface = crate::source::extract::PropSurface {
+                triangles: placement
+                    .collision
+                    .iter()
+                    .map(|tri| tri.map(|v| v + lift))
+                    .collect(),
+                uvs: Vec::new(),
+                material: 0,
+            };
+            grid.merge(voxelize_prop(&surface, &transform, config.props.solidify, barrier, None));
+            grid
+        })
+        .reduce(VoxelGrid::new, |mut a, b| {
+            a.merge(b);
+            a
+        });
+
     // Static props: everything a map puts *in* its rooms. Fences, railings,
     // catwalks, crates, signs and lamps are all models, none of which is in
     // any brush lump, which is why a map converted from brushes alone is an
     // accurate but empty shell.
-    if !assets.props.is_empty() {
-        let props = assets
+    let voxelized = if assets.props.is_empty() {
+        VoxelGrid::new()
+    } else {
+        assets
             .props
             .par_iter()
             .fold(VoxelGrid::new, |mut grid, surface| {
-                // A surface with no material is the solid backing of a prop
-                // drawn as its own mesh: something to stand on and lean
-                // against, which must not be seen.
-                let block = match surface.material {
-                    Some(material) => resolver
-                        .block_for_material(material)
-                        .map(|name| palette.lock().unwrap().intern(name)),
-                    None => Some(palette.lock().unwrap().intern("minecraft:barrier")),
-                };
+                let block = resolver
+                    .block_for_material(surface.material)
+                    .map(|name| palette.lock().unwrap().intern(name));
                 if let Some(block) = block {
                     grid.merge(voxelize_prop(
                         surface,
                         &transform,
                         config.props.solidify,
                         block,
-                        surface
-                            .material
-                            .and_then(|m| tiles.get(m))
-                            .and_then(Option::as_ref),
+                        tiles.get(surface.material).and_then(Option::as_ref),
                     ));
                 }
                 grid
@@ -854,13 +907,18 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             .reduce(VoxelGrid::new, |mut a, b| {
                 a.merge(b);
                 a
-            });
-        grid.merge(props);
-    }
+            })
+    };
 
+    // Hollowing removes what nothing can see, and it decides that by asking
+    // whether a block touches air. Props are put in *after* it, not before,
+    // because a prop standing against a wall seals that wall's air side and
+    // hollowing then takes the wall for interior and carves it out — which is
+    // how a crate in a corridor turns into a hole through the corridor.
+    // Props have no interior of their own to lose: they are already surfaces.
     let blocks_before_hollow = grid.count();
     let mut shapes_fitted = 0;
-    let grid = match config.fill.mode {
+    let mut grid = match config.fill.mode {
         FillMode::Solid => grid,
         FillMode::Hollow => shell::hollow(
             &grid,
@@ -868,6 +926,8 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             config.fill.shell_neighborhood,
         ),
     };
+    grid.merge(voxelized);
+    let grid = grid;
 
     // Shapes are fitted last, after hollowing: the mask grid outlives the
     // brushes precisely so this can happen here, on the voxels that survived.
@@ -879,6 +939,20 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     } else {
         grid
     };
+
+    // Collision goes in last, and only where there is nothing already. A
+    // barrier is invisible, so overwriting a wall with one opens a hole you
+    // can see straight through; and coming after hollowing means it cannot
+    // make the map's own blocks look like interior worth removing.
+    let mut grid = grid;
+    let mut barriers = 0;
+    for (pos, block) in collision.iter() {
+        if grid.get(pos) == AIR {
+            grid.set(pos, block);
+            barriers += 1;
+        }
+    }
+    let grid = grid;
 
     let palette = palette;
     let mut block_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -893,11 +967,12 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let props: Vec<crate::output::display::Placement> = assets
         .placements
         .iter()
-        .map(|placement| {
+        .zip(&settle)
+        .map(|(placement, shift)| {
             let origin = transform.to_block_space(placement.prop.origin);
             crate::output::display::Placement {
                 block: placement.block.clone(),
-                pos: [origin.x, origin.y, origin.z],
+                pos: [origin.x, origin.y + shift, origin.z],
                 rotation: crate::output::display::rotation(&placement.prop, &transform),
                 scale: placement.prop.scale,
                 width: placement.width,
@@ -921,6 +996,8 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             props_skipped: assets.stats.props_skipped,
             props_modelled: assets.stats.props_modelled,
             prop_models: assets.stats.prop_models,
+            props_settled: settled,
+            prop_barriers: barriers,
             shapes_fitted,
             blocks_before_hollow,
             blocks: grid.count(),
@@ -1081,7 +1158,11 @@ mod tests {
     #[test]
     fn converts_a_real_map_to_blocks() {
         let Some(map) = sample_map() else { return };
-        let result = convert(&map, &Config::default()).unwrap();
+        // Props are added after hollowing and would make the two counts
+        // measure different things, so this compares the world with itself.
+        let mut config = Config::default();
+        config.props.enabled = false;
+        let result = convert(&map, &config).unwrap();
 
         assert!(result.stats.blocks > 10_000, "got {}", result.stats.blocks);
         assert!(result.stats.solids_voxelized > 0);
@@ -1364,6 +1445,97 @@ mod tests {
             hollow.stats.blocks,
             solid.stats.blocks
         );
+    }
+
+    fn kubejs_config() -> Config {
+        let mut config = Config::default();
+        config.materials.mode = crate::config::MaterialMode::Kubejs;
+        config
+    }
+
+    /// The failure the user sees as a hole in a wall: a barrier is invisible,
+    /// so putting one where a block already was is the same as deleting it.
+    /// Adding a map's props must not take a single one of its own blocks away.
+    #[test]
+    fn prop_collision_never_replaces_a_block_of_the_map() {
+        let Some(map) = sample_map() else { return };
+
+        let mut without = kubejs_config();
+        without.props.enabled = false;
+        let without = convert(&map, &without).unwrap();
+        let with = convert(&map, &kubejs_config()).unwrap();
+        if with.stats.prop_barriers == 0 {
+            return;
+        }
+
+        for (pos, id) in without.grid.iter() {
+            let before = without.palette.name(id);
+            let after = with.palette.name(with.grid.get(pos));
+            assert_ne!(
+                after, BARRIER,
+                "{pos:?} was {before} and a prop turned it into an invisible barrier"
+            );
+        }
+    }
+
+    /// The other half of the same complaint: a barrier sealing the air side of
+    /// a wall must not make hollowing mistake that wall for interior and carve
+    /// it out. Every block the map had without props it still has with them.
+    #[test]
+    fn props_never_cause_the_map_behind_them_to_be_carved_away() {
+        let Some(map) = sample_map() else { return };
+
+        let mut without = kubejs_config();
+        without.props.enabled = false;
+        let without = convert(&map, &without).unwrap();
+        let with = convert(&map, &kubejs_config()).unwrap();
+
+        let lost = without
+            .grid
+            .iter()
+            .filter(|(pos, _)| with.grid.get(*pos) == crate::voxel::grid::AIR)
+            .count();
+        assert_eq!(
+            lost, 0,
+            "{lost} of {} blocks vanished once props were added",
+            without.stats.blocks
+        );
+    }
+
+    /// Props sink into the ground because they are placed to a fraction of a
+    /// block and the floor under them is rounded to whole ones. Settling has
+    /// to actually move some of them, and never by more than the limit.
+    #[test]
+    fn settling_lifts_props_out_of_the_floor() {
+        let Some(map) = sample_map() else { return };
+
+        let mut off = kubejs_config();
+        off.props.settle = false;
+        let off = convert(&map, &off).unwrap();
+        let on = convert(&map, &kubejs_config()).unwrap();
+        if on.props.is_empty() {
+            return;
+        }
+
+        assert_eq!(off.stats.props_settled, 0);
+        assert!(
+            on.stats.props_settled > on.props.len() / 10,
+            "only {} of {} props were settled",
+            on.stats.props_settled,
+            on.props.len()
+        );
+
+        let limit = Config::default().props.settle_max;
+        for (a, b) in off.props.iter().zip(&on.props) {
+            assert_eq!(a.block, b.block, "settling reordered the props");
+            assert_eq!([a.pos[0], a.pos[2]], [b.pos[0], b.pos[2]], "moved sideways");
+            assert!(
+                (b.pos[1] - a.pos[1]).abs() <= limit + 1e-9,
+                "{} moved {} blocks",
+                a.block,
+                b.pos[1] - a.pos[1]
+            );
+        }
     }
 
     /// The claim the whole tiling feature rests on: at Hammer's default
