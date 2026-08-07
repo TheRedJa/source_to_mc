@@ -498,13 +498,22 @@ when it is absent.
 
 A prebuilt x86-64 Linux binary is on the
 [releases page](https://github.com/TheRedJa/source_to_mc/releases), zipped with
-the licence, this README and `example-config.toml`.
+the licence, the third-party notices, this README and `example-config.toml`.
 
 ## License
 
 Copyright 2026 TheRedJa. [PolyForm Noncommercial 1.0.0](LICENSE): free to use,
 modify and share for any noncommercial purpose. Redistributing any part of it
 means passing on the licence and the notice in [NOTICE](NOTICE).
+
+The crates src2mc is built from are compiled into its executable and keep their
+own licences — all permissive, none copyleft. Their terms are collected in
+[THIRD-PARTY.md](THIRD-PARTY.md), regenerated for every release by:
+
+```sh
+cargo install cargo-about --locked --features cli
+cargo about generate about.hbs -o THIRD-PARTY.md
+```
 
 src2mc ships no game content. Textures, models and maps are read out of your own
 installation of the game, and nothing of Valve's is redistributed with the tool

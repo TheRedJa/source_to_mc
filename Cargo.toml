@@ -6,6 +6,9 @@ authors = ["TheRedJa"]
 description = "Convert Source Engine maps into Minecraft schematics"
 repository = "https://github.com/TheRedJa/source_to_mc"
 license = "PolyForm-Noncommercial-1.0.0"
+# Not a crates.io crate: the licence is not an open-source one, and the tool is
+# published as a binary. Also what tells `cargo about` this crate is ours.
+publish = false
 
 [dependencies]
 anyhow = "1.0.104"

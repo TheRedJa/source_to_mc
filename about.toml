@@ -1,0 +1,36 @@
+# Which licences the dependencies of a released binary may carry.
+#
+# A Rust binary statically links its dependencies, so their code really is
+# inside the executable that gets published, and their terms come with it.
+# `cargo about generate` collects them into THIRD-PARTY.md; anything not listed
+# here fails the run rather than being folded in quietly.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0",
+    # `lzma`, which vbsp uses for compressed pakfile entries. Permissive and
+    # asks for nothing, but it has to be named or the run fails.
+    "WTFPL",
+]
+
+# Neither is compiled into what is released: build scripts run on the machine
+# doing the building, and dev-dependencies exist only for `cargo test`.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# The target the release workflow builds for. Without this, crates that only
+# ever apply to Windows or macOS are collected too, and the notice lists code
+# that is not in the binary.
+targets = ["x86_64-unknown-linux-gnu"]
+
+# src2mc's own licence is not a third-party one. `publish = false` in Cargo.toml
+# is what marks the crate as ours.
+[private]
+ignore = true

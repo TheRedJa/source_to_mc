@@ -30,6 +30,14 @@ jobs:
       - name: Build
         run: cargo build --locked --release
 
+      # Regenerated here rather than trusted from the repository, so the notice
+      # in the archive describes the crates that are actually in the binary
+      # beside it, whatever the lock file said when it was last committed.
+      - name: Collect third-party licences
+        run: |
+          cargo install cargo-about --locked --features cli
+          cargo about generate about.hbs -o THIRD-PARTY.md
+
       # The binary is published on its own, so the archive has to carry the
       # terms with it: whoever downloads it may never see the repository.
       - name: Package
@@ -39,7 +47,7 @@ jobs:
           name="src2mc-${version}-x86_64-linux"
           mkdir "$name"
           cp target/release/src2mc "$name/"
-          cp LICENSE NOTICE README.md example-config.toml "$name/"
+          cp LICENSE NOTICE THIRD-PARTY.md README.md example-config.toml "$name/"
           # Stored, not deflated: the archive is a container for the terms and
           # the config, and 7 MB over HTTP is not worth a decompression step.
           zip -0 -r "$name.zip" "$name"
