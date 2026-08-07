@@ -364,6 +364,24 @@ impl Default for Displacement {
     }
 }
 
+/// What carries a prop's collision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollisionMode {
+    /// An invisible generated block per cell, shaped like the part of the mesh
+    /// that passes through it. A catwalk floor is a floor rather than a metre
+    /// of solid air, and physics mods that resolve against block shapes get
+    /// something resembling the prop. Needs the generated pack, so vanilla
+    /// output falls back to `barrier`.
+    Shaped,
+    /// A full cube of `minecraft:barrier` per cell. What every prop used to
+    /// get, and what a prop still gets when there is no pack to register a
+    /// shape in.
+    Barrier,
+    /// Nothing: every prop is walk-through, whatever its size.
+    None,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Props {
@@ -426,10 +444,26 @@ pub struct Props {
     /// the conversion did not build — and moving it there would invent a
     /// position rather than recover one.
     pub settle_max: f64,
-    /// Props whose longest dimension is at least this many Source units get
-    /// invisible barrier blocks so they are solid. Smaller clutter is left
-    /// walk-through; 0 makes everything solid, and a huge value nothing.
+    /// Props whose longest dimension is at least this many Source units are
+    /// solid. Smaller clutter is left walk-through; 0 makes everything solid,
+    /// and a huge value nothing.
     pub collision_min_size: f64,
+    /// What a solid prop is solid as.
+    pub collision: CollisionMode,
+    /// Distinct collision shapes the pack may register; 0 for no limit.
+    ///
+    /// Every distinct box is one registered block, shared by every prop and
+    /// every map in the pack, so this is a ceiling on shapes rather than on
+    /// props. Past it the boxes are rounded to a coarser grid — eighths, then
+    /// quarters, then whole cells — always outward, so collision only ever gets
+    /// more generous and never opens a hole.
+    ///
+    /// A safety valve rather than a budget: `d1_trainstation_02` uses about
+    /// 9000 shapes at full precision, and registrations are cheap — 27000 of
+    /// them load in a fifth of a second. These do not come out of
+    /// `[materials] max_blocks`, since a texture cut coarser to make room for
+    /// shapes a map might not need is a visible loss for an invisible gain.
+    pub collision_max_shapes: usize,
     /// Draw props as blocks with their rotation baked in, rather than as
     /// display entities.
     ///
@@ -508,6 +542,8 @@ impl Default for Props {
             settle: true,
             settle_max: 1.0,
             collision_min_size: 48.0,
+            collision: CollisionMode::Shaped,
+            collision_max_shapes: 16_384,
             bake: true,
             bake_grid: 16,
             bake_angle_steps: 256,

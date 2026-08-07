@@ -220,10 +220,38 @@ bake_reach = 8.0
 # holding that block, so a mesh reaching far past it appears and disappears with
 # a section it is barely in.
 bake_max_size = 0.0
-# Props at least this many Source units across get invisible barrier blocks, so
-# you can stand on a container and walk through a traffic cone. 0 makes
-# everything solid; a huge value nothing.
+# Props at least this many Source units across are solid, so you can stand on a
+# container and walk through a traffic cone. 0 makes everything solid; a huge
+# value nothing.
 collision_min_size = 48.0
+# What a solid prop is solid as.
+#
+# "shaped" gives each cell an invisible generated block shaped like the part of
+# the mesh passing through it, measured by clipping the triangles to the cell.
+# A catwalk floor is three pixels thick rather than a metre of solid air, and
+# physics mods that resolve against block shapes — Sable, Create: Aeronautics —
+# see something resembling the prop instead of a stack of boxes.
+#
+# "barrier" is the old behaviour: one full cube of minecraft:barrier per cell.
+# It is also what "shaped" falls back to without a pack to register shapes in,
+# and what the few props that stay display entities keep either way, having no
+# block of their own. "none" leaves every prop walk-through.
+#
+# The shape covers one cell and no more: Minecraft only tests blocks within a
+# block of what is moving, so a shape describing geometry further away is never
+# consulted.
+collision = "shaped"
+# Distinct collision shapes the pack may register; 0 for no limit. Every
+# distinct box is one registered block shared by every prop in the pack, so this
+# bounds shapes rather than props: d1_trainstation_02 uses about 9000 for 45000
+# cells. Past the limit the boxes are rounded to a coarser grid — eighths, then
+# quarters, then whole cells — always outward, so collision only ever becomes
+# more generous and never opens a hole to fall through.
+#
+# These do not come out of `[materials] max_blocks`: cutting every texture
+# coarser to make room for shapes a map might not need would be a visible loss
+# for an invisible gain.
+collision_max_shapes = 16384
 # Beyond view_range * 64 blocks a prop stops rendering. Only applies to props
 # left as display entities: a baked one is part of the chunk and is drawn at
 # whatever distance the chunk is.

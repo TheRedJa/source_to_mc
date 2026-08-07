@@ -199,6 +199,12 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
         } else {
             0
         };
+    // Collision shapes are registered blocks too, but they are not reserved
+    // for here: how many a map needs is not known until it has been voxelized,
+    // and reserving their cap instead would cut every texture coarser to make
+    // room for shapes the map may never use. They sit on top of the budget,
+    // as `batch`'s props already do, and `collision_max_shapes` is what bounds
+    // them.
     let cap = choose_cap(&layouts, config, reserved);
     assets.stats.tile_cap = cap;
 

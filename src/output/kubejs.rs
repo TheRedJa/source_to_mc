@@ -153,6 +153,10 @@ pub struct Pack {
     tiling: BTreeMap<String, crate::bsp::texcoord::Split>,
     /// Prop models rendered as their own mesh, keyed by id.
     props: BTreeMap<String, crate::output::obj::PropAsset>,
+    /// Invisible blocks that are nothing but a collision box, one per distinct
+    /// shape. Shared by every prop in the pack, since a shape is just six
+    /// numbers and thousands of cells round to the same ones.
+    collisions: std::collections::BTreeSet<crate::output::collision::Shape>,
     /// The textures those meshes wear, keyed by path under `textures/`.
     prop_textures: BTreeMap<String, RgbaImage>,
     /// Whether the OBJ files were written for a flipped V axis.
@@ -179,9 +183,20 @@ pub fn block_id(material: &str) -> String {
     if id.is_empty() { "material".into() } else { id }
 }
 
+/// A block model that draws nothing.
+///
+/// No parent to inherit a cube from and no elements of its own, only the
+/// texture Minecraft takes break and footstep particles from. This is exactly
+/// the shape of vanilla's own invisible models — `block/barrier`,
+/// `block/structure_void`, `block/light_14` — rather than something invented:
+/// an empty `elements` list would probably work too, and nothing vanilla does
+/// it.
+const EMPTY_MODEL: &str =
+    "{\n  \"textures\": {\n    \"particle\": \"minecraft:block/stone\"\n  }\n}\n";
+
 impl Pack {
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty() && self.props.is_empty()
+        self.blocks.is_empty() && self.props.is_empty() && self.collisions.is_empty()
     }
 
     /// Add a prop model and the textures it wears.
@@ -201,6 +216,20 @@ impl Pack {
         }
         self.props.entry(asset.id.clone()).or_insert(asset);
         id
+    }
+
+    /// Add an invisible block shaped like `shape`, returning its block id.
+    ///
+    /// What a prop is solid as. Registering the same shape again is a no-op:
+    /// the id is the shape's own numbers, so a campaign's thousands of thin
+    /// floors share one block.
+    pub fn insert_collision(&mut self, shape: crate::output::collision::Shape) -> String {
+        self.collisions.insert(shape);
+        format!("{NAMESPACE}:{}", shape.id())
+    }
+
+    pub fn collisions(&self) -> impl Iterator<Item = &crate::output::collision::Shape> {
+        self.collisions.iter()
     }
 
     /// Record how the prop meshes were written, so the model JSON agrees.
@@ -328,7 +357,7 @@ impl Pack {
     /// How many blocks the pack registers, which is what a KubeJS instance
     /// pays for at startup.
     pub fn registered(&self) -> usize {
-        self.blocks.len() + self.props.len()
+        self.blocks.len() + self.props.len() + self.collisions.len()
     }
 
     /// The block for one tile of a material, wrapping out-of-range indices so
@@ -372,6 +401,7 @@ impl Pack {
         for (name, image) in other.prop_textures {
             self.prop_textures.entry(name).or_insert(image);
         }
+        self.collisions.extend(other.collisions);
         self.flip_v |= other.flip_v;
     }
 
@@ -449,6 +479,34 @@ impl Pack {
             }
         }
 
+        // Collision blocks: a blockstate and a model with no elements, which is
+        // how a block draws nothing at all. Their whole job is the shape the
+        // script gives them; letting KubeJS generate a model from the same box
+        // would make every one of them a visible grey slab.
+        if !self.collisions.is_empty() {
+            let assets = root.join("assets").join(NAMESPACE);
+            let block_models = assets.join("models").join("block");
+            let blockstates = assets.join("blockstates");
+            for dir in [&block_models, &blockstates] {
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
+            }
+            for shape in &self.collisions {
+                let id = shape.id();
+                let model = block_models.join(format!("{id}.json"));
+                std::fs::write(&model, EMPTY_MODEL)
+                    .with_context(|| format!("writing {}", model.display()))?;
+                let state = blockstates.join(format!("{id}.json"));
+                std::fs::write(
+                    &state,
+                    format!(
+                        "{{\n  \"variants\": {{\n    \"\": {{ \"model\": \"{NAMESPACE}:block/{id}\" }}\n  }}\n}}\n"
+                    ),
+                )
+                .with_context(|| format!("writing {}", state.display()))?;
+            }
+        }
+
         let script = scripts.join("src2mc_blocks.js");
         std::fs::write(&script, self.script())
             .with_context(|| format!("writing {}", script.display()))?;
@@ -457,6 +515,7 @@ impl Pack {
             root,
             blocks: self.blocks.len(),
             props: self.props.len(),
+            collisions: self.collisions.len(),
             texture_bytes: bytes,
         })
     }
@@ -476,9 +535,10 @@ impl Pack {
         );
         let _ = writeln!(
             s,
-            "// {} blocks and {} prop models\n",
+            "// {} blocks, {} prop models and {} collision shapes\n",
             self.blocks.len(),
-            self.props.len()
+            self.props.len(),
+            self.collisions.len()
         );
         s.push_str("StartupEvents.registry('block', event => {\n");
 
@@ -553,6 +613,43 @@ impl Pack {
             s.push('\n');
         }
 
+        // What the props are solid as. Invisible, unlit, and shaped like the
+        // part of a prop's mesh that passes through the cell — which is the
+        // whole point: `noCollision` is absent here, so Minecraft asks the
+        // block for its shape and gets the box rather than a metre cube.
+        for shape in &self.collisions {
+            let id = shape.id();
+            let chain = [
+                format!("event.create('{NAMESPACE}:{id}')"),
+                format!("  .displayName('Prop Collision {}')", shape.box_args()),
+                // Never drawn — the blockstate written alongside points at a
+                // model with no elements — but a block still has to name a
+                // texture, and naming one of its own would be thousands of
+                // missing-texture warnings at startup for an image no one
+                // ever sees.
+                "  .texture('minecraft:block/stone')".to_string(),
+                format!("  .box({})", shape.box_args()),
+                // No item either: these are placed by a schematic, and a
+                // creative menu with thousands of invisible blocks in it is
+                // worse than one without them.
+                "  .noItem()".to_string(),
+                "  .soundType('metal')".to_string(),
+                "  .hardness(1.5)".to_string(),
+                "  .resistance(6.0)".to_string(),
+                // Invisible, so it must not cull its neighbours' faces or take
+                // light out of the room the prop stands in.
+                "  .notSolid()".to_string(),
+                "  .opaque(false)".to_string(),
+                "  .fullBlock(false)".to_string(),
+                "  .renderType('cutout')".to_string(),
+            ];
+            for (i, line) in chain.iter().enumerate() {
+                let last = i + 1 == chain.len();
+                let _ = writeln!(s, "  {line}{}", if last { ";" } else { "" });
+            }
+            s.push('\n');
+        }
+
         s.push_str("});\n");
         s
     }
@@ -585,6 +682,8 @@ pub struct Written {
     pub blocks: usize,
     /// Prop models written as meshes rather than as textured cubes.
     pub props: usize,
+    /// Invisible blocks registered for the shapes props are solid as.
+    pub collisions: usize,
     pub texture_bytes: usize,
 }
 
@@ -775,6 +874,24 @@ mod tests {
         ] {
             assert!(script.contains(method), "{method} missing");
         }
+
+        // The methods a collision block is made of. All of them are on
+        // `BlockBuilder` in 2101 — checked against the installed jar — and a
+        // script that calls one that is not fails at startup with the whole
+        // registration, not just that block.
+        let mut shaped = Pack::default();
+        shaped.insert_collision(crate::output::collision::Shape([0, 0, 0, 16, 2, 16]));
+        let script = shaped.script();
+        for method in [
+            ".box(",
+            ".noItem()",
+            ".notSolid()",
+            ".opaque(false)",
+            ".fullBlock(false)",
+            ".renderType(",
+        ] {
+            assert!(script.contains(method), "{method} missing");
+        }
     }
 
     #[test]
@@ -806,6 +923,52 @@ mod tests {
             assert_eq!(&std::fs::read(&png).unwrap()[1..4], b"PNG");
         }
         assert!(dir.join("kubejs/startup_scripts/src2mc_blocks.js").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A collision block is three files and a registration, and it is wrong
+    /// without any one of them: no blockstate and it is a magenta cube, no
+    /// `box` and it is a full one, `noCollision` and it is nothing at all.
+    #[test]
+    fn a_collision_shape_is_registered_shaped_and_invisible() {
+        let dir = std::env::temp_dir().join("src2mc-kubejs-collision");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut pack = Pack::default();
+        let shape = crate::output::collision::Shape([0, 0, 0, 16, 3, 16]);
+        let id = pack.insert_collision(shape);
+        assert_eq!(id, "kubejs:collision_0_0_0_16_3_16");
+        // Registering it again is the same block, which is what lets thousands
+        // of cells share one.
+        assert_eq!(pack.insert_collision(shape), id);
+        assert_eq!(pack.collisions().count(), 1);
+
+        let written = pack.write(&dir).unwrap();
+        assert_eq!(written.collisions, 1);
+
+        let root = dir.join("kubejs/assets/kubejs");
+        let model = root.join("models/block/collision_0_0_0_16_3_16.json");
+        let state = root.join("blockstates/collision_0_0_0_16_3_16.json");
+        assert!(model.exists() && state.exists());
+        let model = std::fs::read_to_string(&model).unwrap();
+        assert!(
+            !model.contains("elements") && model.contains("particle"),
+            "the model draws something: {model}"
+        );
+        assert!(
+            std::fs::read_to_string(&state)
+                .unwrap()
+                .contains("kubejs:block/collision_0_0_0_16_3_16")
+        );
+
+        let script = pack.script();
+        assert!(script.contains("event.create('kubejs:collision_0_0_0_16_3_16')"));
+        assert!(script.contains(".box(0, 0, 0, 16, 3, 16)"));
+        assert!(
+            !script.contains(".noCollision()"),
+            "a collision block that does not collide"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

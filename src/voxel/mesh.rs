@@ -141,6 +141,80 @@ pub fn voxelize_triangle(tri: &Triangle, mut emit: impl FnMut(IVec3)) {
     }
 }
 
+/// The bounds of the part of `tri` that lies inside `voxel`, or `None` if it
+/// does not reach into it at all.
+///
+/// [`voxelize_triangle`] answers whether a triangle is in a voxel; this answers
+/// *where* in it, which is what a collision shape needs. A catwalk floor
+/// crosses a cell three pixels above its bottom face, and a block shaped to
+/// those three pixels is one you can stand on without the cell below being
+/// solid too.
+///
+/// The triangle is clipped against the cell's six planes, Sutherland–Hodgman,
+/// keeping the polygon that survives. Clipping rather than sampling for the
+/// same reason the overlap test is exact rather than sampled: a box that came
+/// out even slightly short would be a surface you fall through.
+pub fn clip_triangle_to_voxel(tri: &Triangle, voxel: IVec3) -> Option<Aabb> {
+    if tri.is_degenerate() {
+        return None;
+    }
+    let min = Vec3::new(voxel[0] as f64, voxel[1] as f64, voxel[2] as f64);
+    let max = min + Vec3::splat(1.0);
+
+    let mut polygon = vec![tri.a, tri.b, tri.c];
+    for axis in 0..3 {
+        // Keep what is above the low face, then what is below the high one.
+        polygon = keep(&polygon, axis, min.axis(axis), true);
+        polygon = keep(&polygon, axis, max.axis(axis), false);
+        if polygon.is_empty() {
+            return None;
+        }
+    }
+
+    let mut bounds = Aabb::empty();
+    for point in polygon {
+        // Clipping is exact in theory and floating point in practice, so pin
+        // the result inside the cell rather than letting rounding put a box a
+        // hair outside the block that carries it.
+        bounds.extend(Vec3::new(
+            point.x.clamp(min.x, max.x),
+            point.y.clamp(min.y, max.y),
+            point.z.clamp(min.z, max.z),
+        ));
+    }
+    Some(bounds)
+}
+
+/// The part of `polygon` on the kept side of the plane `axis = at`.
+fn keep(polygon: &[Vec3], axis: usize, at: f64, above: bool) -> Vec<Vec3> {
+    let inside = |p: &Vec3| {
+        if above {
+            p.axis(axis) >= at
+        } else {
+            p.axis(axis) <= at
+        }
+    };
+
+    let mut out = Vec::with_capacity(polygon.len() + 1);
+    for (index, current) in polygon.iter().enumerate() {
+        let previous = &polygon[(index + polygon.len() - 1) % polygon.len()];
+        let (here, there) = (inside(current), inside(previous));
+        if here != there {
+            let (a, b) = (previous.axis(axis), current.axis(axis));
+            let t = if (b - a).abs() > f64::EPSILON {
+                (at - a) / (b - a)
+            } else {
+                0.0
+            };
+            out.push(*previous + (*current - *previous) * t);
+        }
+        if here {
+            out.push(*current);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +358,78 @@ mod tests {
             found.contains(&[0, 0, 0]) && found.contains(&[0, 1, 0]),
             "{found:?}"
         );
+    }
+
+    /// A triangle that stays inside one voxel is its own bounds there: nothing
+    /// was clipped, so nothing may be lost or gained.
+    #[test]
+    fn clipping_inside_one_voxel_keeps_the_triangle() {
+        let tri = Triangle::new(
+            Vec3::new(0.25, 0.5, 0.25),
+            Vec3::new(0.75, 0.5, 0.25),
+            Vec3::new(0.25, 0.5, 0.75),
+        );
+        let box_ = clip_triangle_to_voxel(&tri, [0, 0, 0]).expect("overlaps");
+        assert_eq!(box_.min, Vec3::new(0.25, 0.5, 0.25));
+        assert_eq!(box_.max, Vec3::new(0.75, 0.5, 0.75));
+    }
+
+    /// The point of clipping: a cell gets the part of the surface that is in
+    /// it, not the whole triangle's bounds. A floor crossing four cells three
+    /// pixels up is three pixels thick in each of them.
+    #[test]
+    fn clipping_gives_each_voxel_only_its_own_part() {
+        let tri = Triangle::new(
+            Vec3::new(0.0, 0.2, 0.0),
+            Vec3::new(4.0, 0.2, 0.0),
+            Vec3::new(0.0, 0.2, 4.0),
+        );
+        let first = clip_triangle_to_voxel(&tri, [0, 0, 0]).expect("overlaps");
+        assert_eq!(first.min, Vec3::new(0.0, 0.2, 0.0));
+        assert_eq!(first.max, Vec3::new(1.0, 0.2, 1.0));
+
+        let along = clip_triangle_to_voxel(&tri, [2, 0, 0]).expect("overlaps");
+        assert_eq!(along.min.x, 2.0);
+        assert!(along.max.x <= 3.0, "{along:?} left its cell");
+        assert!(along.max.z <= 2.0, "{along:?} past the hypotenuse");
+    }
+
+    /// A voxel the triangle misses has no box, and must not be given the
+    /// bounding box's answer instead.
+    #[test]
+    fn clipping_a_voxel_the_triangle_misses_gives_nothing() {
+        let tri = Triangle::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(8.0, 0.0, 0.0),
+            Vec3::new(0.0, 8.0, 0.0),
+        );
+        assert!(clip_triangle_to_voxel(&tri, [7, 7, 0]).is_none());
+        assert!(clip_triangle_to_voxel(&tri, [1, 1, 5]).is_none());
+    }
+
+    /// Clipping must agree with the overlap test: a box for every voxel that
+    /// test emits, and every box inside the voxel it belongs to.
+    #[test]
+    fn every_voxelized_cell_has_a_box_inside_it() {
+        let tri = Triangle::new(
+            Vec3::new(-1.3, 0.4, 2.2),
+            Vec3::new(7.9, 5.6, -3.1),
+            Vec3::new(2.5, -4.2, 6.8),
+        );
+        for voxel in voxels(&tri) {
+            let Some(box_) = clip_triangle_to_voxel(&tri, voxel) else {
+                // A triangle grazing a face exactly is a legitimate empty clip;
+                // what would be wrong is a box outside its cell.
+                continue;
+            };
+            for axis in 0..3 {
+                let low = f64::from(voxel[axis]);
+                assert!(
+                    box_.min.axis(axis) >= low - 1e-9 && box_.max.axis(axis) <= low + 1.0 + 1e-9,
+                    "{box_:?} escaped voxel {voxel:?} on axis {axis}"
+                );
+            }
+        }
     }
 
     #[test]

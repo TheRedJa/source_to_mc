@@ -98,8 +98,17 @@ pub struct Stats {
     /// Blocks those props needed. More than `props_baked` when a prop reached
     /// too far to be drawn from one block and had to be split across several.
     pub prop_blocks: usize,
-    /// Invisible blocks placed to make the big ones solid.
+    /// Invisible barrier cubes placed to make the big ones solid.
     pub prop_barriers: usize,
+    /// Cells given a generated block shaped like the mesh passing through them,
+    /// instead of a barrier cube.
+    pub prop_collision_blocks: usize,
+    /// Distinct shapes those cells needed, which is what the pack registers.
+    pub prop_collision_shapes: usize,
+    /// Sixteenths of a block the shapes were rounded to. 1 unless there were
+    /// more distinct shapes than `collision_max_shapes` allowed, in which case
+    /// they were rounded outward more coarsely until they fit.
+    pub prop_collision_step: i64,
     /// Voxels emitted as a slab or stair instead of a full cube.
     pub shapes_fitted: usize,
     /// Brush and terrain blocks before hollowing removed the interiors.
@@ -584,6 +593,28 @@ fn interpolate(tri: &crate::voxel::mesh::Triangle, corners: &[[f64; 2]; 3], p: V
     std::array::from_fn(|axis| a * corners[0][axis] + b * corners[1][axis] + c * corners[2][axis])
 }
 
+/// Whether props should be solid as shaped blocks rather than barrier cubes.
+///
+/// A shape has to be registered somewhere, so this needs the generated pack:
+/// vanilla output has no pack and falls back to barriers, which is also what
+/// `collision = "barrier"` asks for outright.
+fn shaped_collision_wanted(config: &Config) -> bool {
+    config.props.collision == crate::config::CollisionMode::Shaped
+        && config.materials.mode == crate::config::MaterialMode::Kubejs
+}
+
+/// Whether props should be solid as barrier cubes.
+fn barriers_wanted(config: &Config) -> bool {
+    match config.props.collision {
+        crate::config::CollisionMode::None => false,
+        crate::config::CollisionMode::Barrier => true,
+        // Shaped collision falls back to barriers without a pack to register
+        // shapes in. With one, the only barriers left are for the props that
+        // stayed display entities, and those are placed separately.
+        crate::config::CollisionMode::Shaped => !shaped_collision_wanted(config),
+    }
+}
+
 /// Voxelize a set of brushes into one grid, interning blocks into `palette`.
 // Every argument here is one of the conversion's inputs; bundling them into a
 // struct would only move the same list somewhere else.
@@ -877,13 +908,42 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         .collect();
     let settled = settle.iter().filter(|shift| **shift != 0.0).count();
 
-    // The solid backing behind a mesh, kept apart from the world's own blocks
+    // What the props are solid as, kept apart from the world's own blocks
     // until the very end. Merging it in now would let hollowing see a wall
-    // whose air side is sealed by a barrier as interior and carve it away.
+    // whose air side is sealed by a collision block as interior and carve it
+    // away.
+    //
+    // Shaped collision measures the mesh per cell instead of filling the cell:
+    // where the barrier shell put a metre cube, this puts a box the size of
+    // what actually passes through. Which cells is the same question either
+    // way, and the same exact test answers it.
+    let shaped_collision: Vec<(usize, std::collections::HashMap<IVec3, Aabb>)> =
+        if shaped_collision_wanted(config) {
+            assets
+                .placements
+                .par_iter()
+                .enumerate()
+                .zip(&settle)
+                .filter(|((_, placement), _)| !placement.collision.is_empty())
+                .map(|((index, placement), shift)| {
+                    let lift = Vec3::new(0.0, 0.0, shift * transform.units_per_block());
+                    let triangles: Vec<[Vec3; 3]> = placement
+                        .collision
+                        .iter()
+                        .map(|tri| tri.map(|v| transform.to_block_space(v + lift)))
+                        .collect();
+                    (index, crate::output::collision::cells(triangles.iter()))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
     let collision = assets
         .placements
         .par_iter()
         .zip(&settle)
+        .filter(|_| barriers_wanted(config))
         .filter(|(placement, _)| !placement.collision.is_empty())
         .fold(VoxelGrid::new, |mut grid, (placement, shift)| {
             let barrier = palette.lock().unwrap().intern(BARRIER);
@@ -1090,8 +1150,11 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         grid.set(*cell, id);
     }
 
-    // Collision last, and only where there is nothing already. A barrier is
-    // invisible, so overwriting a wall with one opens a hole you can see
+    let is_baked: std::collections::HashSet<usize> =
+        baked.iter().map(|(index, _, _)| *index).collect();
+
+    // Collision last, and only where there is nothing already. It is
+    // invisible, so overwriting a wall with it opens a hole you can see
     // straight through; and coming after hollowing means it cannot make the
     // map's own blocks look like interior worth removing.
     let mut barriers = 0;
@@ -1101,9 +1164,56 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             barriers += 1;
         }
     }
+
+    // Shaped collision, for the props that were baked into blocks. A prop that
+    // stayed a display entity keeps the barrier shell: it has no block of its
+    // own, and cubes are what it always had.
+    let mut collision_blocks = 0;
+    let mut collision_shapes = 0;
+    let mut collision_step = 1;
+    if !shaped_collision.is_empty() {
+        let mut wanted: std::collections::HashMap<IVec3, Aabb> = std::collections::HashMap::new();
+        let mut fallback: std::collections::HashSet<IVec3> = std::collections::HashSet::new();
+        for (index, cells) in &shaped_collision {
+            for (cell, bounds) in cells {
+                if is_baked.contains(index) {
+                    // Two props sharing a cell share its block, so the box has
+                    // to cover both. Whichever reaches further decides.
+                    let entry = wanted.entry(*cell).or_insert_with(Aabb::empty);
+                    entry.extend(bounds.min);
+                    entry.extend(bounds.max);
+                } else {
+                    fallback.insert(*cell);
+                }
+            }
+        }
+
+        let (shapes, step) =
+            crate::output::collision::quantize(&wanted, config.props.collision_max_shapes);
+        collision_step = step;
+        let mut distinct: std::collections::HashSet<crate::output::collision::Shape> =
+            std::collections::HashSet::new();
+        for (cell, shape) in shapes {
+            if grid.get(cell) != AIR {
+                continue;
+            }
+            let id = assets.pack.insert_collision(shape);
+            let block = palette.intern(&id);
+            grid.set(cell, block);
+            distinct.insert(shape);
+            collision_blocks += 1;
+        }
+        collision_shapes = distinct.len();
+
+        let barrier = palette.intern(BARRIER);
+        for cell in fallback {
+            if grid.get(cell) == AIR {
+                grid.set(cell, barrier);
+                barriers += 1;
+            }
+        }
+    }
     let grid = grid;
-    let is_baked: std::collections::HashSet<usize> =
-        baked.iter().map(|(index, _, _)| *index).collect();
     // Props, not blocks: one that had to be split is still one prop.
     let props_baked = is_baked.len();
     let prop_blocks = baked.len();
@@ -1160,6 +1270,9 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             props_baked,
             prop_blocks,
             prop_barriers: barriers,
+            prop_collision_blocks: collision_blocks,
+            prop_collision_shapes: collision_shapes,
+            prop_collision_step: collision_step,
             shapes_fitted,
             blocks_before_hollow,
             blocks: grid.count(),
@@ -1666,7 +1779,92 @@ mod tests {
                 !after.contains(":prop_"),
                 "{pos:?} was {before} and a baked prop took the cell"
             );
+            assert!(
+                !after.contains(":collision_"),
+                "{pos:?} was {before} and a prop's collision took the cell"
+            );
         }
+    }
+
+    /// What the shaped route is for: a prop is solid as its own shape rather
+    /// than as a stack of metre cubes. The shapes have to cover what the cubes
+    /// covered — a cell that used to be solid must still be solid — and they
+    /// have to be shapes, not full cubes wearing a new name.
+    #[test]
+    fn shaped_collision_covers_what_barriers_covered() {
+        let Some(map) = sample_map() else { return };
+
+        let mut cubes = kubejs_config();
+        cubes.props.collision = crate::config::CollisionMode::Barrier;
+        let cubes = convert(&map, &cubes).unwrap();
+        if cubes.stats.prop_barriers == 0 {
+            return; // no game install, or nothing big enough to be solid
+        }
+        let shaped = convert(&map, &kubejs_config()).unwrap();
+
+        assert!(
+            shaped.stats.prop_collision_blocks > 0,
+            "no cell got a shape"
+        );
+        assert!(
+            shaped.stats.prop_barriers * 20 < cubes.stats.prop_barriers,
+            "{} barriers left of {}",
+            shaped.stats.prop_barriers,
+            cubes.stats.prop_barriers
+        );
+
+        // Every cell that was solid is still solid. Losing one is a floor you
+        // fall through, which is the whole risk of measuring a box instead of
+        // filling the cell.
+        for (pos, id) in cubes.grid.iter() {
+            if cubes.palette.name(id) != BARRIER {
+                continue;
+            }
+            assert_ne!(
+                shaped.grid.get(pos),
+                crate::voxel::grid::AIR,
+                "{pos:?} was solid with barriers and is empty with shapes"
+            );
+        }
+
+        // And they really are shaped: a map of full cubes under another name
+        // would pass everything above.
+        let partial = shaped
+            .pack
+            .collisions()
+            .filter(|shape| !shape.is_full())
+            .count();
+        assert!(
+            partial * 2 > shaped.stats.prop_collision_shapes,
+            "only {partial} of {} shapes are smaller than a whole cell",
+            shaped.stats.prop_collision_shapes
+        );
+    }
+
+    /// Vanilla output has no pack to register a shape in. Its props are
+    /// voxelized into ordinary blocks and are solid by being there, so what
+    /// must not happen is a conversion asking for shapes and getting neither
+    /// those nor blocks.
+    #[test]
+    fn vanilla_output_needs_no_shapes_to_be_solid() {
+        let Some(map) = sample_map() else { return };
+        let result = convert(&map, &Config::default()).unwrap();
+        assert_eq!(result.stats.prop_collision_blocks, 0, "no pack to use");
+        assert_eq!(result.stats.props_modelled, 0, "vanilla drew a mesh");
+        assert!(result.stats.props_placed > 0, "the props went missing");
+    }
+
+    /// Turning collision off leaves the props there and walk-through, rather
+    /// than dropping them.
+    #[test]
+    fn collision_can_be_turned_off_without_losing_the_props() {
+        let Some(map) = sample_map() else { return };
+        let mut config = kubejs_config();
+        config.props.collision = crate::config::CollisionMode::None;
+        let result = convert(&map, &config).unwrap();
+        assert_eq!(result.stats.prop_barriers, 0);
+        assert_eq!(result.stats.prop_collision_blocks, 0);
+        assert!(result.stats.props_baked > 0, "the props went too");
     }
 
     /// The other half of the same complaint: a barrier sealing the air side of
@@ -2094,6 +2292,11 @@ mod tests {
             let Some(rest) = name.strip_prefix("kubejs:") else {
                 continue;
             };
+            // Collision shapes are named for their six numbers, which reads
+            // exactly like a tile index and is not one.
+            if rest.starts_with("collision_") {
+                continue;
+            }
             let Some((base, _)) = rest.rsplit_once('_').and_then(|(a, b)| {
                 b.parse::<u32>().ok()?;
                 a.rsplit_once('_')

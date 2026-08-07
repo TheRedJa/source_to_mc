@@ -218,9 +218,30 @@ schematics' `Entities` list and into a `.mcfunction` of `summon` commands at
 the same absolute coordinates, everything tagged `src2mc_<map>` so a bad paste
 is one `/kill` away. `bake = false` puts every prop back on it.
 
-Neither route has collision of its own, so props at least `collision_min_size` units
-across (48 by default) also get invisible barriers behind the mesh: you can
-stand on a container and walk through a traffic cone. Anything that cannot be
+Neither route has collision of its own, so props at least `collision_min_size`
+units across (48 by default) are made solid separately: you can stand on a
+container and walk through a traffic cone. That used to be a shell of invisible
+barriers, one full cube per cell the surface passes through, which walks well
+enough and is wrong in every detail — a catwalk floor three pixels thick
+collides as a whole block, a railing as a wall. Physics mods make that worse
+than untidy: Sable and Create: Aeronautics resolve contacts against block
+shapes, so a map of cube-shelled props is a map of invisible boxes to catch on.
+
+So each of those cells now gets a generated block shaped like the part of the
+mesh inside it, found by clipping the prop's triangles to the cell and taking
+what is left. Per cell rather than per prop, because Minecraft only tests blocks
+within one block of whatever is moving: a shape describing geometry ten blocks
+away is never consulted. The blocks are invisible — a blockstate pointing at a
+model with no elements — and shared, since a shape is six numbers and thousands
+of cells round to the same ones. `d1_trainstation_02` covers 44,762 cells with
+8954 of them. Rounding is always outward, so a box is never smaller than the
+geometry it stands for, and `collision_max_shapes` bounds how many distinct ones
+a pack may register by rounding to a coarser grid until they fit — coarser being
+more generous, never thinner. `[props] collision = "barrier"` asks for the old
+cubes, `"none"` for nothing at all, and vanilla output uses cubes regardless,
+having no pack to register a shape in.
+
+Anything that cannot be
 drawn as a mesh — a model heavier than `max_triangles`, a material with no
 texture, or vanilla output, which has no pack to register meshes in — falls back
 to the old behaviour of voxelizing the triangles, where a prop's material is a

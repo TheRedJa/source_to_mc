@@ -152,9 +152,14 @@ struct ConvertOptions {
     #[arg(long)]
     no_prop_models: bool,
     /// Longest dimension, in Source units, at which a prop drawn as a mesh
-    /// gets invisible barriers behind it. 0 makes every prop solid.
+    /// becomes solid. 0 makes every prop solid.
     #[arg(long)]
     prop_collision: Option<f64>,
+    /// What a solid prop is solid as: a generated block shaped like the mesh
+    /// in each cell, a full barrier cube per cell, or nothing at all. Shaped
+    /// collision needs the generated pack and falls back to barriers without.
+    #[arg(long, value_enum)]
+    prop_collision_mode: Option<Collision>,
     /// Place prop meshes as display entities rather than baking them into the
     /// chunk mesh as blocks. Registers far fewer blocks and costs frame rate.
     #[arg(long)]
@@ -178,6 +183,17 @@ struct ConvertOptions {
     /// across the blocks it covers.
     #[arg(long)]
     no_tile_textures: bool,
+}
+
+/// What a solid prop is solid as.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Collision {
+    /// A generated block shaped like the part of the mesh in each cell.
+    Shaped,
+    /// A full cube of `minecraft:barrier` per cell.
+    Barrier,
+    /// Nothing: every prop is walk-through.
+    None,
 }
 
 /// Where a surface's block comes from.
@@ -213,6 +229,13 @@ impl ConvertOptions {
         }
         if let Some(size) = self.prop_collision {
             config.props.collision_min_size = size;
+        }
+        if let Some(mode) = self.prop_collision_mode {
+            config.props.collision = match mode {
+                Collision::Shaped => src2mc::config::CollisionMode::Shaped,
+                Collision::Barrier => src2mc::config::CollisionMode::Barrier,
+                Collision::None => src2mc::config::CollisionMode::None,
+            };
         }
         if self.no_prop_baking {
             config.props.bake = false;
@@ -355,10 +378,28 @@ fn convert_into(map: &Map, config: &Config, out: &Path, write_pack: bool) -> Res
             "  {} of them drawn as their own mesh, from {} models",
             stats.props_modelled, stats.prop_models,
         );
-        eprintln!(
-            "  {} settled onto the floor, {} barrier blocks behind the big ones",
-            stats.props_settled, stats.prop_barriers,
-        );
+        eprintln!("  {} settled onto the floor", stats.props_settled);
+        if stats.prop_collision_blocks > 0 {
+            eprintln!(
+                "  {} cells of collision from {} shapes{}, {} barrier cubes",
+                stats.prop_collision_blocks,
+                stats.prop_collision_shapes,
+                if stats.prop_collision_step > 1 {
+                    format!(
+                        " (rounded to {}ths of a block: too many distinct shapes)",
+                        16 / stats.prop_collision_step
+                    )
+                } else {
+                    String::new()
+                },
+                stats.prop_barriers,
+            );
+        } else if stats.prop_barriers > 0 {
+            eprintln!(
+                "  {} barrier cubes behind the big ones",
+                stats.prop_barriers
+            );
+        }
         eprintln!(
             "  {} baked into the chunk mesh as blocks, {} left as display entities",
             stats.props_baked,
