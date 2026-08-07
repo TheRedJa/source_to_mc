@@ -370,6 +370,41 @@ pub struct Props {
     /// normal, as displacements get. Props are usually closed shells already,
     /// so the default is none.
     pub solidify: u32,
+    /// Render props as their real triangle mesh instead of voxelizing them.
+    ///
+    /// A forklift, a car or a rock was never designed for a grid, so cubing it
+    /// is where conversion looks worst. NeoForge's OBJ model loader takes an
+    /// arbitrary mesh, and a `block_display` entity places it at any angle, so
+    /// the prop can simply be itself. Needs the generated pack, so this only
+    /// applies in `kubejs` material mode.
+    pub models: bool,
+    /// Also read props out of the entity lump — `prop_physics`, `prop_dynamic`
+    /// and anything else naming a `.mdl` — rather than only the `sprp` lump.
+    pub entity_props: bool,
+    /// Resolution of a prop's own textures. Far above the 16x16 a block face
+    /// gets, because a mesh shows its texture at real scale rather than
+    /// squeezed onto one cube.
+    pub texture_size: u32,
+    /// How many times a texture may be repeated into one image so that a
+    /// model's tiling UVs stay inside the atlas sprite. See `output::obj`.
+    pub texture_repeat_max: u32,
+    /// Props whose longest dimension is at least this many Source units get
+    /// invisible barrier blocks so they are solid. Smaller clutter is left
+    /// walk-through; 0 makes everything solid, and a huge value nothing.
+    pub collision_min_size: f64,
+    /// `view_range` on the generated entities: distances beyond this times 64
+    /// blocks stop rendering. Below 1.0 trades draw distance for frame rate.
+    pub view_range: f32,
+    /// Models with more triangles than this are voxelized instead of rendered.
+    /// 0 keeps every model however heavy.
+    pub max_triangles: usize,
+    /// Light the prop fully rather than by the block it stands in. A large
+    /// mesh is lit at one point, so a bright object in a dark cell goes black.
+    pub full_bright: bool,
+    /// Flip the V texture axis when writing OBJ files. Source and Minecraft
+    /// disagree about which way V runs; if every prop's texture comes out
+    /// upside down, this is the switch.
+    pub flip_v: bool,
 }
 
 impl Default for Props {
@@ -382,6 +417,15 @@ impl Default for Props {
             // and there are thousands of them in an outdoor map.
             skip: vec!["*props_foliage*".into(), "*/foliage/*".into()],
             solidify: 0,
+            models: true,
+            entity_props: true,
+            texture_size: 128,
+            texture_repeat_max: 4,
+            collision_min_size: 48.0,
+            view_range: 1.0,
+            max_triangles: 4_000,
+            full_bright: false,
+            flip_v: false,
         }
     }
 }

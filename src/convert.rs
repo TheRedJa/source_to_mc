@@ -23,6 +23,9 @@ pub struct Conversion {
     /// Generated blocks carrying the map's own textures, when
     /// `[materials] mode = "kubejs"`.
     pub pack: crate::output::kubejs::Pack,
+    /// Props drawn as their real mesh, as the display entities that place
+    /// them. Empty unless `[props] models` is on.
+    pub props: Vec<crate::output::display::Placement>,
 }
 
 /// One brush entity converted on its own.
@@ -73,6 +76,10 @@ pub struct Stats {
     pub props_placed: usize,
     /// Props skipped: model missing, too small, or matched by a skip rule.
     pub props_skipped: usize,
+    /// Props drawn as their real mesh instead of being voxelized.
+    pub props_modelled: usize,
+    /// Distinct meshes generated for them.
+    pub prop_models: usize,
     /// Voxels emitted as a slab or stair instead of a full cube.
     pub shapes_fitted: usize,
     pub blocks_before_hollow: usize,
@@ -821,16 +828,25 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             .props
             .par_iter()
             .fold(VoxelGrid::new, |mut grid, surface| {
-                let block = resolver
-                    .block_for_material(surface.material)
-                    .map(|name| palette.lock().unwrap().intern(name));
+                // A surface with no material is the solid backing of a prop
+                // drawn as its own mesh: something to stand on and lean
+                // against, which must not be seen.
+                let block = match surface.material {
+                    Some(material) => resolver
+                        .block_for_material(material)
+                        .map(|name| palette.lock().unwrap().intern(name)),
+                    None => Some(palette.lock().unwrap().intern("minecraft:barrier")),
+                };
                 if let Some(block) = block {
                     grid.merge(voxelize_prop(
                         surface,
                         &transform,
                         config.props.solidify,
                         block,
-                        tiles.get(surface.material).and_then(Option::as_ref),
+                        surface
+                            .material
+                            .and_then(|m| tiles.get(m))
+                            .and_then(Option::as_ref),
                     ));
                 }
                 grid
@@ -871,6 +887,28 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     }
 
     let skipped = skipped.into_inner();
+
+    // Props drawn as themselves. The mesh is registered in the pack; what is
+    // left is one entity per placement, carrying the map's own rotation.
+    let props: Vec<crate::output::display::Placement> = assets
+        .placements
+        .iter()
+        .map(|placement| {
+            let origin = transform.to_block_space(placement.prop.origin);
+            crate::output::display::Placement {
+                block: placement.block.clone(),
+                pos: [origin.x, origin.y, origin.z],
+                rotation: crate::output::display::rotation(&placement.prop, &transform),
+                scale: placement.prop.scale,
+                width: placement.width,
+                height: placement.height,
+                view_range: config.props.view_range,
+                full_bright: config.props.full_bright,
+                tag: crate::output::display::tag_for(&map.name),
+            }
+        })
+        .collect();
+
     Ok(Conversion {
         stats: Stats {
             solids_voxelized: solids.len() - skipped,
@@ -881,6 +919,8 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             tile_cap: assets.stats.tile_cap,
             props_placed: assets.stats.props_placed,
             props_skipped: assets.stats.props_skipped,
+            props_modelled: assets.stats.props_modelled,
+            prop_models: assets.stats.prop_models,
             shapes_fitted,
             blocks_before_hollow,
             blocks: grid.count(),
@@ -890,6 +930,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         palette,
         transform,
         separate,
+        props,
         pack: assets.pack,
     })
 }
