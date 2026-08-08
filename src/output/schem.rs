@@ -11,7 +11,7 @@ use fastnbt::{ByteArray, IntArray};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
@@ -55,8 +55,10 @@ struct Schematic {
 
 #[derive(Serialize)]
 struct Blocks {
+    /// Ordered, not hashed: the same input has to produce the same bytes, or
+    /// the committed fixtures would differ on every run.
     #[serde(rename = "Palette")]
-    palette: HashMap<String, i32>,
+    palette: BTreeMap<String, i32>,
     #[serde(rename = "Data")]
     data: ByteArray,
 }
@@ -67,6 +69,10 @@ struct Metadata {
     name: String,
     #[serde(rename = "Author")]
     author: String,
+    /// Namespaced so it cannot collide with another tool's metadata, and read
+    /// by the companion mod to decide whether it understands this file.
+    #[serde(rename = "src2mc:FormatVersion")]
+    format_version: i32,
 }
 
 /// Append `value` as an unsigned LEB128 varint.
@@ -176,6 +182,7 @@ pub fn encode_all(
             metadata: Metadata {
                 name: name.to_string(),
                 author: "src2mc".to_string(),
+                format_version: crate::FORMAT_VERSION,
             },
         },
     };
@@ -240,6 +247,7 @@ pub fn write_all(
 mod tests {
     use super::*;
     use fastnbt::Value;
+    use std::collections::HashMap;
 
     fn read_varints(data: &[i8], count: usize) -> Vec<u32> {
         let mut out = Vec::new();

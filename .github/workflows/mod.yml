@@ -1,0 +1,65 @@
+name: Mod
+
+# The mod's tests read the converter's committed fixtures, so this job is what
+# catches the two halves drifting apart. It runs on any change to either side of
+# the contract, not just to the mod.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "mod/**"
+      - "tests/fixtures/**"
+      - "src/lib.rs"
+      - "docs/format.md"
+      - ".github/workflows/mod.yml"
+  pull_request:
+    paths:
+      - "mod/**"
+      - "tests/fixtures/**"
+      - "src/lib.rs"
+      - "docs/format.md"
+      - ".github/workflows/mod.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      # The whole tree, not just mod/: the tests read ../tests/fixtures and
+      # ../src/lib.rs.
+      - uses: actions/checkout@v4
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Decompiling Minecraft is the expensive part and it is keyed on the
+      # NeoForge version, so it survives between runs.
+      - name: Cache the NeoForm runtime
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches/neoformruntime
+          key: neoformruntime-${{ runner.os }}-${{ hashFiles('mod/build.gradle') }}
+          restore-keys: neoformruntime-${{ runner.os }}-
+
+      - name: Build
+        working-directory: mod
+        run: ./gradlew build --no-daemon
+
+      - name: Upload the jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: src2mc-mod
+          path: mod/build/libs/*.jar
+          if-no-files-found: error

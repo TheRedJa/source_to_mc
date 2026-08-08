@@ -1,0 +1,18 @@
+pluginManagement {
+    repositories {
+        mavenCentral()
+        maven {
+            name = 'NeoForged'
+            url = 'https://maven.neoforged.net/releases'
+        }
+        gradlePluginPortal()
+    }
+}
+
+plugins {
+    // Downloads a matching JDK if the machine has none, so a fresh checkout
+    // builds without a manual Java install.
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.8.0'
+}
+
+rootProject.name = 'src2mc-mod'

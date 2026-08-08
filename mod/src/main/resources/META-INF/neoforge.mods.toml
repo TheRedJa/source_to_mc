@@ -1,0 +1,29 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "PolyForm-Noncommercial-1.0.0"
+issueTrackerURL = "https://github.com/TheRedJa/source_to_mc/issues"
+
+[[mods]]
+modId = "src2mc"
+version = "${version}"
+displayName = "src2mc"
+authors = "TheRedJa"
+description = '''
+Reads maps converted by src2mc: surfaces as pool blocks, props as data, with
+textures and meshes mounted from a bundle rather than registered. Ships no game
+content of its own.
+'''
+
+[[dependencies.src2mc]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1.231,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.src2mc]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1,1.21.2)"
+ordering = "NONE"
+side = "BOTH"

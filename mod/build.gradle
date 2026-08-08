@@ -1,0 +1,74 @@
+plugins {
+    id 'java'
+    id 'net.neoforged.moddev' version '2.0.143'
+}
+
+group = 'io.github.theredja'
+version = '0.1.0'
+base { archivesName = 'src2mc' }
+
+java {
+    // NeoForge for 1.21.1 is a Java 21 platform.
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
+}
+
+repositories {
+    mavenCentral()
+}
+
+neoForge {
+    // Compiled against the version the author actually runs. NeoForge is
+    // forward compatible within a 21.1.x line, so building against an older
+    // patch and running on a newer one is safe; the reverse is not.
+    version = '21.1.231'
+
+    runs {
+        client {
+            client()
+        }
+        server {
+            server()
+        }
+    }
+
+    mods {
+        src2mc {
+            sourceSet sourceSets.main
+        }
+    }
+
+    // Puts Minecraft on the test classpath, which is what lets the format
+    // fixtures be read with the game's own NBT reader rather than a
+    // reimplementation that could agree with us while disagreeing with
+    // Minecraft.
+    unitTest {
+        enable()
+        testedMod = mods.src2mc
+    }
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    // The fixtures live beside the converter that generates them, not in this
+    // project, deliberately: there is one copy and it cannot go stale.
+    systemProperty 'src2mc.fixtures', rootDir.parentFile.toPath().resolve('tests/fixtures').toString()
+    systemProperty 'src2mc.repo', rootDir.parentFile.toString()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 21
+}
+
+processResources {
+    inputs.property 'version', version
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand version: version
+    }
+}
