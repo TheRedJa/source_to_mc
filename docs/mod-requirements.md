@@ -154,6 +154,16 @@ A prop placement must not create a model, a file or a registry entry.
   rotation (quaternion), sub-block offset, uniform scale, and a stable id.
 - Geometry is produced by a dynamic model from that block entity's model data,
   so it lands in the chunk mesh and costs nothing per frame.
+- The block entity must register no `BlockEntityTicker` and no
+  `BlockEntityRenderer`. Both are where block entities earn their reputation:
+  a ticker runs every tick for every loaded instance, and a renderer draws
+  outside the chunk mesh, unbatched and unculled, which is the cost this design
+  exists to avoid. What is left is an NBT payload attached to a position — one
+  entry in the chunk's block entity map, serialized with the region file, read
+  once on chunk load. A map holds a few hundred of them, against the thousands
+  of chests and signs a vanilla world carries without trouble.
+- Surfaces, which are the bulk of a map, are never block entities. They are
+  pool blocks (§R1), so the per-position cost applies only to props.
 - Because a mesh may reach further than a chunk vertex can encode (§4), the mod
   splits a prop's geometry across carrier cells **at bake time, in memory**.
   Carrier cells are derived state: the mod places and removes them, they are
@@ -313,6 +323,14 @@ point of the exercise, so they should be measured, not assumed:
 - **Surfaces as pool blocks or as block entities.** The pool keeps blockstate
   transport free; block entities would remove the pool limit entirely but at
   millions of block entities per map. The pool is the recommendation.
+- **Prop placements as block entities or as chunk attachments.** A NeoForge
+  `AttachmentType` on `LevelChunk` would hold placements as sparse per-chunk
+  data and create no block entities at all. It costs the transport: WorldEdit
+  copies blocks and block entities, not attachments, so a copied region would
+  arrive without its props and R7 would have no carrier. Block entities are the
+  recommendation because pasting a converted map is the workflow. An attachment
+  is worth revisiting only if a few hundred non-ticking block entities per map
+  measure badly, which is not expected.
 - **Physics properties.** Sable reads
   `data/<ns>/physics_block_properties/*.json` with `sable:mass`,
   `sable:volume`, `sable:friction`, `sable:restitution` and others, selected by
