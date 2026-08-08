@@ -261,6 +261,12 @@ Numbers to design against, taken from what the current output achieves:
   placements are non-ticking, non-rendered block entities feeding the chunk
   mesh (§R3) rather than entities: the count that matters there is entities and
   tickers, and this design contributes none.
+- Triangle count is not a budget. Measured: a map with over 3000 props, running
+  into millions of triangles, rendered with no meaningful frame cost under
+  Sodium. Geometry that reaches the chunk mesh is effectively free, so the mod
+  should not decimate meshes, merge props or build levels of detail for
+  performance reasons. Spend the complexity on keeping work out of the entity
+  and tick paths instead.
 - Memory: per-section collision caches and model data must be bounded; a map is
   hundreds of thousands of prop cells.
 - Load: mounting a campaign's bundle should be seconds, not minutes.
