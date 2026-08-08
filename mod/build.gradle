@@ -25,9 +25,17 @@ neoForge {
     runs {
         client {
             client()
+            // The dev harness in io.github.theredja.src2mc.dev, off unless asked
+            // for: -Psrc2mc.dev builds a wall of surface blocks to look at, and
+            // -Psrc2mc.autoshot screenshots it either side of a reload.
+            systemProperties.put('src2mc.dev', providers.gradleProperty('src2mc.dev').orElse('false'))
+            systemProperties.put('src2mc.autoshot', providers.gradleProperty('src2mc.autoshot').orElse('false'))
+            systemProperties.put('src2mc.world', providers.gradleProperty('src2mc.world').orElse(''))
+            systemProperties.put('src2mc.wall', providers.gradleProperty('src2mc.wall').orElse(''))
         }
         server {
             server()
+            systemProperties.put('src2mc.dev', providers.gradleProperty('src2mc.dev').orElse('false'))
         }
     }
 
