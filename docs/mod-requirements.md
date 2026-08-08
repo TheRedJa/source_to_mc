@@ -253,6 +253,14 @@ Numbers to design against, taken from what the current output achieves:
 - Chunk bake: prop geometry in the chunk mesh, no per-frame entity rendering.
   The regression this project already suffered — 45 fps from display entities —
   must not come back.
+- Nothing per-placement may render or tick per frame. Measured on the author's
+  machine, roughly 300 block displays cost about 10 fps, and past roughly 500
+  loaded entities the loss stops being linear and grows sharply. A single map
+  already holds a few hundred props and maps are stacked, so any per-placement
+  per-frame cost puts a campaign past that knee immediately. This is the reason
+  placements are non-ticking, non-rendered block entities feeding the chunk
+  mesh (§R3) rather than entities: the count that matters there is entities and
+  tickers, and this design contributes none.
 - Memory: per-section collision caches and model data must be bounded; a map is
   hundreds of thousands of prop cells.
 - Load: mounting a campaign's bundle should be seconds, not minutes.
