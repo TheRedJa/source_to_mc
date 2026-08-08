@@ -1,0 +1,9 @@
+{
+  "format_version": 1,
+  "name": "tiny",
+  "scale": {
+    "units_per_block": 16.0
+  },
+  "materials": "materials.json",
+  "models": "models.json"
+}

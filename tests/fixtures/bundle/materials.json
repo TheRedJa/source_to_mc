@@ -1,0 +1,24 @@
+[
+  {
+    "material": "concrete/concretewall001a",
+    "texture": "textures/concrete_concretewall001a.png",
+    "blocks_per_repeat": [
+      8.0,
+      4.0
+    ],
+    "render_type": "solid",
+    "surface_prop": "concrete",
+    "sound": "stone"
+  },
+  {
+    "material": "metal/metalwall048a",
+    "texture": "textures/metal_metalwall048a.png",
+    "blocks_per_repeat": [
+      1.0,
+      1.0
+    ],
+    "render_type": "solid",
+    "surface_prop": "metal",
+    "sound": "metal"
+  }
+]

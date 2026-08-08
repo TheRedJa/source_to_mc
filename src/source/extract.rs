@@ -14,6 +14,7 @@ use crate::bsp::texcoord::{MaterialScale, Split, material_scales};
 use crate::bsp::{Map, Material};
 use crate::config::Config;
 use crate::geom::Vec3;
+use crate::output::bundle::Bundle;
 use crate::output::kubejs::Pack;
 use crate::source::mdl::Models;
 use crate::source::vfs::Vfs;
@@ -87,6 +88,12 @@ pub struct Assets {
     /// Generated blocks carrying the map's own textures. Empty outside
     /// `kubejs` mode.
     pub pack: Pack,
+    /// The same textures as a bundle the companion mod reads, one entry per
+    /// material rather than one per tile. Empty outside `bundle` mode.
+    pub bundle: Bundle,
+    /// Materials the bundle could not take, with why. Fatal to the run, but
+    /// collected rather than thrown so the report can name all of them.
+    pub bundle_errors: Vec<String>,
     /// Materials that only props use, to be appended after the map's own.
     pub prop_materials: Vec<Material>,
     pub props: Vec<PropSurface>,
@@ -121,8 +128,12 @@ impl Assets {
 /// and the palette falls back to rules and colour matching for those.
 pub fn extract(map: &Map, config: &Config) -> Assets {
     let want_pack = config.materials.mode == crate::config::MaterialMode::Kubejs;
+    let want_bundle = config.materials.mode == crate::config::MaterialMode::Bundle;
+    // Both modes want the map's real textures; they differ only in what is
+    // done with them afterwards.
+    let want_textures = want_pack || want_bundle;
     let want_props = config.props.enabled;
-    if !want_pack && !want_props {
+    if !want_textures && !want_props {
         return Assets::default();
     }
 
@@ -131,6 +142,7 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
     let mut textures = Textures::new(&vfs, config.materials.texture_size);
 
     let mut assets = Assets {
+        bundle: Bundle::new(&map.name, config.scale.units_per_block),
         stats: Extracted {
             search_path: vfs.describe(),
             ..Extracted::default()
@@ -140,7 +152,10 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
 
     // How many blocks each texture really covers in this map, so it can be
     // cut into that many pieces rather than shrunk onto one block face.
-    let scales = if config.materials.tile_textures {
+    // A bundle never splits a texture — repetition is a number the mod
+    // projects, not more blocks — but the measurement behind the split is
+    // exactly what that number is, so it is taken either way.
+    let scales = if config.materials.tile_textures || want_bundle {
         material_scales(map)
     } else {
         vec![None; map.materials().len()]
@@ -163,7 +178,7 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
 
         // Tool textures are dropped before any of this matters, and nodraw is
         // the single most-used material in every map.
-        if !want_pack || material.name.starts_with("tools/") {
+        if !want_textures || material.name.starts_with("tools/") {
             continue;
         }
         pending.push(Pending {
@@ -183,7 +198,7 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
             &vfs,
             &materials,
             &mut textures,
-            want_pack.then_some(&mut pending),
+            want_textures.then_some(&mut pending),
             &mut assets,
         );
     }
@@ -209,6 +224,23 @@ pub fn extract(map: &Map, config: &Config) -> Assets {
     assets.stats.tile_cap = cap;
 
     for item in &pending {
+        if want_bundle {
+            // One entry, one whole texture. The measurement that would have
+            // decided a split becomes `blocks_per_repeat` instead.
+            match insert_material(
+                &mut assets.bundle,
+                &materials,
+                &mut textures,
+                &item.name,
+                item.raw_name.as_deref(),
+                item.layout.blocks_per_repeat(config.scale.units_per_block),
+            ) {
+                Ok(true) => assets.stats.resolved += 1,
+                Ok(false) => {}
+                Err(e) => assets.bundle_errors.push(format!("{e:#}")),
+            }
+            continue;
+        }
         let split = item.layout.split(config, cap);
         let resolved = insert_block(
             &mut assets.pack,
@@ -258,6 +290,19 @@ pub enum Layout {
 }
 
 impl Layout {
+    /// How many blocks one repeat of this texture covers, for the bundle.
+    ///
+    /// The bundle does not cut textures, so this is the same measurement a
+    /// split would have been based on, kept as a number instead.
+    pub fn blocks_per_repeat(&self, units_per_block: f64) -> [f64; 2] {
+        match self {
+            Layout::World(scale) => scale.blocks_spanned(units_per_block),
+            // A sheet's UVs are an unwrap, not a repeat: the whole texture maps
+            // once across the model, so there is nothing to tile.
+            Layout::Sheet { .. } | Layout::Unknown => [1.0, 1.0],
+        }
+    }
+
     /// How to cut this texture at a given cap on tiles per axis.
     pub fn split(&self, config: &Config, cap: u32) -> Split {
         if !config.materials.tile_textures {
@@ -422,6 +467,37 @@ fn insert_block(
     true
 }
 
+/// Add a material to the bundle as one whole texture.
+///
+/// Returns whether the material resolved to a real texture. A full pool is an
+/// error rather than a miss: it means a map would have been painted with
+/// another map's textures.
+fn insert_material(
+    bundle: &mut Bundle,
+    materials: &Materials,
+    textures: &mut Textures,
+    name: &str,
+    raw_name: Option<&str>,
+    blocks_per_repeat: [f64; 2],
+) -> anyhow::Result<bool> {
+    let Some(assets) = materials.assets(name, raw_name) else {
+        return Ok(false);
+    };
+    let Some(tiles) = textures.tiles(
+        &assets.base_texture,
+        assets.alpha_test,
+        [1, 1],
+        [u32::MAX; 2],
+    ) else {
+        return Ok(false);
+    };
+    let Some(texture) = tiles.first().cloned() else {
+        return Ok(false);
+    };
+    bundle.insert(name, texture, blocks_per_repeat, &assets)?;
+    Ok(true)
+}
+
 /// Load every static prop's model and place its triangles in world space.
 fn place_props(
     map: &Map,
@@ -440,7 +516,16 @@ fn place_props(
     // Whether props may be drawn as their own mesh. It needs the generated
     // pack, since that is what registers the models, so this is a `kubejs`
     // mode feature and vanilla output is unchanged.
-    let modelled = config.props.models && pending.is_some();
+    //
+    // Bundle mode is excluded for now as well: props belong in the bundle's
+    // model table, which does not exist yet (`docs/format.md` §4). Registering
+    // them through the KubeJS pack instead would put two namespaces in one
+    // schematic and quietly reintroduce the per-placement blocks the bundle
+    // exists to remove, so until then a bundle's props are voxelized like any
+    // other geometry.
+    let modelled = config.props.models
+        && pending.is_some()
+        && config.materials.mode == crate::config::MaterialMode::Kubejs;
     let mut prop_textures = Textures::new(vfs, config.props.texture_size);
     // A malformed pattern must not take the conversion down with it; the
     // config loader already reports one, so here it simply skips nothing.

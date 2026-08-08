@@ -49,7 +49,12 @@ ladder = { block = "minecraft:ladder" }
 # "vanilla" picks vanilla blocks by rules and average colour, and needs no
 # mods. "kubejs" generates a block per material carrying its real Source
 # texture and writes a KubeJS pack registering them, which the schematics then
-# require in order to paste. Textures are read from the game install; see the
+# require in order to paste. "bundle" writes the same textures for the
+# companion mod in `mod/` instead: one entry per material rather than one block
+# per tile of it, so a map costs a few hundred files rather than tens of
+# thousands. The mod cannot read a bundle yet, and bundle mode leaves props
+# voxelized rather than drawn as meshes, so "kubejs" is still what produces a
+# complete map today. Textures are read from the game install; see the
 # `textures` command if any turn up missing.
 mode = "vanilla"
 

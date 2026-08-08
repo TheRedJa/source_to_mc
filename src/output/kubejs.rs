@@ -41,7 +41,7 @@ pub enum RenderType {
 }
 
 impl RenderType {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             RenderType::Solid => "solid",
             RenderType::Cutout => "cutout",
@@ -111,7 +111,7 @@ impl Block {
 }
 
 /// Minecraft sound group closest to Source's `$surfaceprop`.
-fn sound_for(surface_prop: Option<&str>) -> &'static str {
+pub(crate) fn sound_for(surface_prop: Option<&str>) -> &'static str {
     let prop = surface_prop.unwrap_or("").to_ascii_lowercase();
     {
         for (needle, sound) in [

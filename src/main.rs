@@ -203,6 +203,10 @@ enum Textures {
     Vanilla,
     /// Blocks generated from the map's own textures, registered by KubeJS.
     Kubejs,
+    /// The map's own textures as a bundle for the companion mod: one entry per
+    /// material, not one block per tile. Needs the mod, which cannot read a
+    /// bundle yet.
+    Bundle,
 }
 
 impl ConvertOptions {
@@ -250,6 +254,7 @@ impl ConvertOptions {
             config.materials.mode = match textures {
                 Textures::Vanilla => src2mc::config::MaterialMode::Vanilla,
                 Textures::Kubejs => src2mc::config::MaterialMode::Kubejs,
+                Textures::Bundle => src2mc::config::MaterialMode::Bundle,
             };
         }
         if let Some(max) = self.tile_max {
@@ -472,6 +477,22 @@ fn convert_into(map: &Map, config: &Config, out: &Path, write_pack: bool) -> Res
         manifest.generated_blocks = result.pack.blocks().map(|b| b.block_id()).collect();
     }
 
+    if !result.bundle.is_empty() && write_pack {
+        let dir = out.join("bundle");
+        let written = result.bundle.write(&dir)?;
+        eprintln!(
+            "  {} materials in {} files ({} KB of textures) in {}",
+            written.materials,
+            written.files,
+            written.texture_bytes / 1024,
+            dir.display(),
+        );
+        eprintln!(
+            "  the mod registers {} blocks for this, whatever the map contains",
+            src2mc::output::bundle::POOL_SIZE,
+        );
+    }
+
     manifest.entities = tiling::write_entities(out, &result.separate, &result.palette)?;
     if !manifest.entities.is_empty() {
         eprintln!(
@@ -527,6 +548,21 @@ fn batch(
     layout: Layout,
     spacing: u32,
 ) -> Result<()> {
+    // A bundle's block ids are pool indices, assigned in the order materials
+    // are met. Converting each map with its own bundle and merging afterwards
+    // would renumber them, and every schematic already written would then be
+    // painted with some other material's texture. Sharing one bundle across the
+    // batch is the fix; until that is threaded through, refusing is better than
+    // producing a campaign that looks wrong everywhere.
+    if config.materials.mode == src2mc::config::MaterialMode::Bundle {
+        anyhow::bail!(
+            "`batch` cannot write a bundle yet: pool indices have to be assigned \
+             once for the whole campaign, and they are currently assigned per map. \
+             Convert maps one at a time with `convert`, or use \
+             `--textures kubejs` for a batch."
+        );
+    }
+
     // Sizes first, so the layout is known before anything is written.
     let mut loaded = Vec::with_capacity(maps.len());
     let mut footprints = Vec::with_capacity(maps.len());

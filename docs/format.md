@@ -61,7 +61,7 @@ A map larger than one schematic is split into tiles; every tile carries the same
 metadata and its own `Offset`. Tiles are independent — a prop never spans two of
 them, because a placement is a single block entity at its anchor cell.
 
-## 2. Surfaces — **specified**
+## 2. Surfaces — **shipped** on the converter side, **specified** on the mod side
 
 World geometry is plain blocks from a fixed pool registered by the mod:
 
@@ -107,7 +107,7 @@ converter must not emit them and a schematic containing them is malformed.
 An unknown `Data.model` is an error the mod surfaces once per bundle, not per
 placement, and the prop renders as a marker rather than crashing the chunk bake.
 
-## 4. The bundle — **specified**
+## 4. The bundle — **shipped** for materials, **specified** for models
 
 A bundle is a directory the mod mounts as a resource and data source. One bundle
 covers a campaign, not a map.
@@ -139,19 +139,44 @@ covers a campaign, not a map.
 ```json
 [
   {
-    "texture": "textures/concrete_floor_001a.png",
-    "uv_scale": [4.0, 4.0],
+    "material": "concrete/concretefloor001a",
+    "texture": "textures/concrete_concretefloor001a.png",
+    "blocks_per_repeat": [4.0, 4.0],
     "render_type": "solid",
-    "collision": "full",
-    "surface_prop": "concrete"
+    "surface_prop": "concrete",
+    "sound": "stone"
   }
 ]
 ```
 
-`render_type` is one of `solid`, `cutout`, `translucent`. `collision` is one of
-`full`, `none`. Texture repetition across a large surface is a UV scale, never a
-second texture and never a second block — this is the whole point of the format
-and a converter that emits per-tile materials is wrong.
+`material` is the original Source path, for diagnostics only. `render_type` is
+one of `solid`, `cutout`, `translucent`. `sound` is a vanilla sound group name,
+already mapped from `surface_prop` by the converter so the mod does not repeat
+that table.
+
+`blocks_per_repeat` is how many blocks one repeat of the texture covers along
+each axis, measured from the map's own texture vectors. It is the whole point of
+this format: a texture that spans eight blocks of wall is **one** texture with a
+scale of 8, never eight textures and never eight blocks.
+
+### Texture coordinates — **specified**
+
+A surface block carries no per-position data. Its texture coordinates are
+derived by the mod, from the block's world position and the face's normal:
+
+- The face's two axes are the two world axes it does not point along —
+  triplanar, picked by the largest component of the normal.
+- `u = world[axis0] / blocks_per_repeat[0]`,
+  `v = world[axis1] / blocks_per_repeat[1]`, taken across the face's own extent
+  so neighbouring blocks continue the same repeat rather than each restarting
+  it.
+
+This is what removes the duplication the format exists to remove. It also means
+alignment with the original Source UVs is approximate: the phase is taken from
+world position rather than from the face's `textureVecs`, so a wall may be
+offset from the original by up to one repeat. That trade is deliberate and
+recorded as D10 in `docs/decisions.md`. A converter must not compensate by
+emitting more materials.
 
 `models.json` is an array indexed by `Data.model`:
 
