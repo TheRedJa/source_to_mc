@@ -51,15 +51,15 @@ impl Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Scale {
-    /// Source units per Minecraft block. 16 is one Hammer grid square, which
-    /// makes the 72-unit player 4.5 blocks tall.
+    /// Source units per Minecraft block. 32 is two Hammer grid squares, which
+    /// makes the 72-unit player 2.25 blocks tall, close to Minecraft's ~1.8.
     pub units_per_block: f64,
 }
 
 impl Default for Scale {
     fn default() -> Self {
         Scale {
-            units_per_block: 16.0,
+            units_per_block: 32.0,
         }
     }
 }
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn empty_config_is_all_defaults() {
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.scale.units_per_block, 16.0);
+        assert_eq!(cfg.scale.units_per_block, 32.0);
         assert_eq!(cfg.fill.mode, FillMode::Hollow);
         assert_eq!(cfg.output.tile_size, Some(256));
     }
@@ -681,7 +681,7 @@ mod tests {
     fn defaults_round_trip_through_toml() {
         let text = toml::to_string(&Config::default()).unwrap();
         let cfg: Config = toml::from_str(&text).unwrap();
-        assert_eq!(cfg.scale.units_per_block, 16.0);
+        assert_eq!(cfg.scale.units_per_block, 32.0);
         assert_eq!(cfg.entities.brush_entities, BrushEntityMode::Include);
     }
 }

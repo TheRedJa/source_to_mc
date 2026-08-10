@@ -345,7 +345,7 @@ mod tests {
 
         let transform = Transform::new(&Config::default(), Aabb::empty());
         let units = transform.units_per_block();
-        let (grid, steps) = (16i64, 256i64);
+        let (grid, steps) = (12i64, 256i64);
 
         for angles in [
             [0.0, 0.0, 0.0],

@@ -2,10 +2,10 @@
 # default shown here. Pass with: src2mc convert map.bsp -c this-file.toml
 
 [scale]
-# Source units per Minecraft block. 16 is one Hammer grid square, making the
-# 72-unit player 4.5 blocks tall. 32 is closer to vanilla proportions but loses
-# fine trim; 8 doubles the detail and the block count.
-units_per_block = 16.0
+# Source units per Minecraft block. 32 is two Hammer grid squares, making the
+# 72-unit player 2.25 blocks tall, close to Minecraft's ~1.8. 16 doubles the
+# detail and the block count; 8 quadruples it.
+units_per_block = 32.0
 
 [transform]
 # "bounds_min" puts the map's lowest corner at (0, y_base, 0).

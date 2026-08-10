@@ -127,7 +127,7 @@ covers a campaign, not a map.
 {
   "format_version": 1,
   "name": "entropy-zero",
-  "scale": { "units_per_block": 16.0 },
+  "scale": { "units_per_block": 32.0 },
   "materials": "materials.json",
   "models": "models.json"
 }

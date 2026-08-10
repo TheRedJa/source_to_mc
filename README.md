@@ -13,7 +13,7 @@ Working today:
 
 - Loads Source BSP v19/20/21, and v22 as used by INFRA's branch, from a file or
   from inside a VPK — some games ship no loose maps at all.
-- Voxelizes brushes at a configurable scale (default 16 Source units per block).
+- Voxelizes brushes at a configurable scale (default 32 Source units per block).
 - Maps brush contents to blocks: water, glass, grates, ladders; clip, areaportal
   and tool brushes are dropped.
 - Chooses a block per surface from its material: glob rules first, then the
@@ -116,10 +116,10 @@ erase their neighbours.
 
 ## Scale and world height
 
-The default is 16 Source units per block, one Hammer grid square: the 72-unit
-player becomes 4.5 blocks, so the world reads as roughly 2.5x upscaled but keeps
-its detail. `--units-per-block 32` halves every dimension and looks closer to
-vanilla proportions, at the cost of fine trim.
+The default is 32 Source units per block, two Hammer grid squares: the 72-unit
+player becomes 2.25 blocks, close to vanilla Minecraft proportions.
+`--units-per-block 16` doubles the detail and the block count, at the cost of
+more blocks and coarser-scale textures needing larger tiles.
 
 Many E:Z2 maps are tall. At 16 units/block `ez2_c4_1` needs 1090 blocks of
 height and `ez2_c2_1` needs 1213 — far beyond vanilla's 384. This is not a

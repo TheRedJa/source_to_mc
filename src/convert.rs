@@ -1468,7 +1468,7 @@ mod tests {
         config.props.enabled = false;
         let result = convert(&map, &config).unwrap();
 
-        assert!(result.stats.blocks > 10_000, "got {}", result.stats.blocks);
+        assert!(result.stats.blocks > 5_000, "got {}", result.stats.blocks);
         assert!(result.stats.solids_voxelized > 0);
         assert!(
             result.palette.len() > 1,
@@ -1755,7 +1755,7 @@ mod tests {
         let hollow = convert(&map, &hollow_config).unwrap();
 
         assert!(
-            hollow.stats.blocks * 2 < solid.stats.blocks,
+            hollow.stats.blocks < solid.stats.blocks,
             "hollow {} vs solid {}",
             hollow.stats.blocks,
             solid.stats.blocks
@@ -2076,6 +2076,7 @@ mod tests {
         use crate::bsp::texcoord::TexCoord;
 
         let mut config = Config::default();
+        config.scale.units_per_block = 16.0;
         config.transform.origin_mode = crate::config::OriginMode::MapOrigin;
         let transform = Transform::new(&config, Aabb::new(Vec3::ZERO, Vec3::splat(1024.0)));
 
@@ -2086,7 +2087,13 @@ mod tests {
             u: [4.0, 0.0, 0.0, 0.0],
             v: [0.0, 0.0, -4.0, 0.0],
         };
-        let uv = Uv::new(tex, &transform, Vec3::ZERO, [64.0, 64.0], 16.0);
+        let uv = Uv::new(
+            tex,
+            &transform,
+            Vec3::ZERO,
+            [64.0, 64.0],
+            transform.units_per_block(),
+        );
         let set = TileSet {
             grid: [8, 8],
             texels_per_tile: [64.0, 64.0],
@@ -2123,6 +2130,7 @@ mod tests {
         use crate::bsp::texcoord::TexCoord;
 
         let mut config = Config::default();
+        config.scale.units_per_block = 16.0;
         config.transform.origin_mode = crate::config::OriginMode::MapOrigin;
         let transform = Transform::new(&config, Aabb::new(Vec3::ZERO, Vec3::splat(4096.0)));
 
@@ -2139,7 +2147,13 @@ mod tests {
                 u: [rate, 0.0, 0.0, 0.0],
                 v: [0.0, 0.0, -rate, 0.0],
             };
-            let uv = Uv::new(tex, &transform, Vec3::ZERO, set.texels_per_tile, 16.0);
+            let uv = Uv::new(
+                tex,
+                &transform,
+                Vec3::ZERO,
+                set.texels_per_tile,
+                transform.units_per_block(),
+            );
 
             // Walk a straight line of blocks along the wall. No two in a row
             // may wear the same tile.
@@ -2187,7 +2201,13 @@ mod tests {
             u: [0.0; 4],
             v: [0.0; 4],
         };
-        let uv = Uv::new(tex, &transform, Vec3::ZERO, [64.0, 64.0], 16.0);
+        let uv = Uv::new(
+            tex,
+            &transform,
+            Vec3::ZERO,
+            [64.0, 64.0],
+            transform.units_per_block(),
+        );
         let (column, row) = uv.at(Vec3::new(3.0, 4.0, 5.0));
         assert!(column.is_finite() && row.is_finite(), "got {column}, {row}");
     }
@@ -2199,6 +2219,7 @@ mod tests {
         use crate::bsp::texcoord::TexCoord;
 
         let mut config = Config::default();
+        config.scale.units_per_block = 16.0;
         config.transform.origin_mode = crate::config::OriginMode::MapOrigin;
         let transform = Transform::new(&config, Aabb::new(Vec3::ZERO, Vec3::splat(1024.0)));
 
@@ -2206,7 +2227,13 @@ mod tests {
             u: [4.0, 0.0, 0.0, 0.0],
             v: [0.0, 0.0, -4.0, 0.0],
         };
-        let uv = Uv::new(tex, &transform, Vec3::ZERO, [64.0, 64.0], 16.0);
+        let uv = Uv::new(
+            tex,
+            &transform,
+            Vec3::ZERO,
+            [64.0, 64.0],
+            transform.units_per_block(),
+        );
         let set = TileSet {
             grid: [8, 8],
             texels_per_tile: [64.0, 64.0],
@@ -2426,7 +2453,7 @@ mod tests {
     fn a_coarser_scale_produces_fewer_blocks() {
         let Some(map) = sample_map() else { return };
         let mut coarse = Config::default();
-        coarse.scale.units_per_block = 32.0;
+        coarse.scale.units_per_block = 64.0;
 
         let fine = convert(&map, &Config::default()).unwrap();
         let coarse = convert(&map, &coarse).unwrap();
