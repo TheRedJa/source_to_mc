@@ -14,12 +14,21 @@ must not invent a format before Phase 1 defines and tests all of these together:
 
 - the custom bundle extension and deterministic ZIP rules;
 - manifest and schema versioning;
-- stable content IDs and SHA-256 hashes;
+- stable content IDs, canonical entry payloads, per-entry SHA-256 hashes and a
+  sorted manifest fingerprint;
 - map, material, model, planar UV-region and diagnostics tables;
+- canonical per-visible-face records, sparse 16x16x16 section buckets, compact
+  material/UV-region references and overlap-resolution provenance;
 - texture entries and compact binary runtime meshes;
-- map-anchor and prop-root NBT in Sponge v3 schematics;
+- map-anchor and prop-root NBT in Sponge v3 schematics, including the root
+  storage cell separately from the prop's exact render transform;
 - client/server ownership of each datum;
-- validation limits and stable error codes;
+- texture-page dependency data needed for demand residency and targeted chunk
+  invalidation;
+- canonical byte encodings and content-ID rules; ZIP container metadata and
+  compressed bytes are explicitly outside bundle identity;
+- validation limits, ZIP expansion/path protections and stable error codes;
+- immutable generation identity for atomic reload;
 - fixtures for valid, malformed, corrupt and unsupported inputs.
 
 The fixed architectural constraints that the format must express are recorded
