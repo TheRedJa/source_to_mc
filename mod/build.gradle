@@ -1,82 +1,59 @@
 plugins {
-    id 'java'
-    id 'net.neoforged.moddev' version '2.0.143'
+    id 'java-library'
+    id 'net.neoforged.gradle.userdev' version '7.1.38'
 }
 
-group = 'io.github.theredja'
-version = '0.1.0'
-base { archivesName = 'src2mc' }
+group = mod_group_id
+version = mod_version
 
+base {
+    archivesName = mod_id
+}
+
+// Minecraft 1.21.1 ships Java 21 to players; compile and run against Java 21 only.
 java {
-    // NeoForge for 1.21.1 is a Java 21 platform.
-    toolchain.languageVersion = JavaLanguageVersion.of(21)
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
 }
 
 repositories {
     mavenCentral()
 }
 
-neoForge {
-    // Compiled against the version the author actually runs. NeoForge is
-    // forward compatible within a 21.1.x line, so building against an older
-    // patch and running on a newer one is safe; the reverse is not.
-    version = '21.1.231'
-
-    runs {
-        client {
-            client()
-            // The dev harness in io.github.theredja.src2mc.dev, off unless asked
-            // for: -Psrc2mc.dev builds a wall of surface blocks to look at, and
-            // -Psrc2mc.autoshot screenshots it either side of a reload.
-            systemProperties.put('src2mc.dev', providers.gradleProperty('src2mc.dev').orElse('false'))
-            systemProperties.put('src2mc.autoshot', providers.gradleProperty('src2mc.autoshot').orElse('false'))
-            systemProperties.put('src2mc.world', providers.gradleProperty('src2mc.world').orElse(''))
-            systemProperties.put('src2mc.wall', providers.gradleProperty('src2mc.wall').orElse(''))
-        }
-        server {
-            server()
-            systemProperties.put('src2mc.dev', providers.gradleProperty('src2mc.dev').orElse('false'))
-        }
+runs {
+    configureEach {
+        workingDirectory project.layout.projectDirectory.dir('runs').dir(name)
+        modSource sourceSets.main
     }
 
-    mods {
-        src2mc {
-            sourceSet sourceSets.main
-        }
-    }
-
-    // Puts Minecraft on the test classpath, which is what lets the format
-    // fixtures be read with the game's own NBT reader rather than a
-    // reimplementation that could agree with us while disagreeing with
-    // Minecraft.
-    unitTest {
-        enable()
-        testedMod = mods.src2mc
+    client {
     }
 }
 
 dependencies {
-    testImplementation platform('org.junit:junit-bom:5.10.2')
-    testImplementation 'org.junit.jupiter:junit-jupiter'
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    implementation "net.neoforged:neoforge:${neo_version}"
 }
 
-tasks.named('test') {
-    useJUnitPlatform()
-    // The fixtures live beside the converter that generates them, not in this
-    // project, deliberately: there is one copy and it cannot go stale.
-    systemProperty 'src2mc.fixtures', rootDir.parentFile.toPath().resolve('tests/fixtures').toString()
-    systemProperty 'src2mc.repo', rootDir.parentFile.toString()
+tasks.withType(ProcessResources).configureEach {
+    def properties = [
+        minecraft_version      : minecraft_version,
+        minecraft_version_range: minecraft_version_range,
+        neo_version            : neo_version,
+        loader_version_range   : loader_version_range,
+        mod_id                 : mod_id,
+        mod_name               : mod_name,
+        mod_license            : mod_license,
+        mod_version            : mod_version,
+    ]
+
+    inputs.properties(properties)
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand(properties)
+    }
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 21
-}
-
-processResources {
-    inputs.property 'version', version
-    filesMatching('META-INF/neoforge.mods.toml') {
-        expand version: version
-    }
 }

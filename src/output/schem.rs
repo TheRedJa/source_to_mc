@@ -69,10 +69,6 @@ struct Metadata {
     name: String,
     #[serde(rename = "Author")]
     author: String,
-    /// Namespaced so it cannot collide with another tool's metadata, and read
-    /// by the companion mod to decide whether it understands this file.
-    #[serde(rename = "src2mc:FormatVersion")]
-    format_version: i32,
 }
 
 /// Append `value` as an unsigned LEB128 varint.
@@ -182,7 +178,6 @@ pub fn encode_all(
             metadata: Metadata {
                 name: name.to_string(),
                 author: "src2mc".to_string(),
-                format_version: crate::FORMAT_VERSION,
             },
         },
     };

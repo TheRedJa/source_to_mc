@@ -1,6 +1,11 @@
+# Gradle and IDE state
 .gradle/
 build/
 run/
 runs/
-.idea/
 *.iml
+.idea/
+
+# Local Phase 0 test evidence; never commit screenshots, logs, or benchmarks.
+local-reports/*
+!local-reports/.gitkeep

@@ -1,7 +1,6 @@
 //! Writing converted maps to disk.
 
 pub mod bake;
-pub mod bundle;
 pub mod collision;
 pub mod dimension;
 pub mod display;

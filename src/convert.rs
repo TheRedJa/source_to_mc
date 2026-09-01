@@ -27,9 +27,6 @@ pub struct Conversion {
     /// Generated blocks carrying the map's own textures, when
     /// `[materials] mode = "kubejs"`.
     pub pack: crate::output::kubejs::Pack,
-    /// The same textures as a bundle for the companion mod, when
-    /// `[materials] mode = "bundle"`. One entry per material.
-    pub bundle: crate::output::bundle::Bundle,
     /// Props drawn as their real mesh, as the display entities that place
     /// them. Empty unless `[props] models` is on.
     pub props: Vec<crate::output::display::Placement>,
@@ -805,25 +802,8 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     // did before, from rules and the compiler's average colour.
     let assets = crate::source::extract::extract(map, config);
     let materials = assets.materials(map);
-    // A material's block comes from whichever of the two outputs is in use;
-    // only one of them is ever populated, so concatenating them is safe and
-    // keeps the resolver from having to know which mode this is.
-    let mut texture_ids = assets.pack.ids();
-    texture_ids.extend(assets.bundle.ids());
+    let texture_ids = assets.pack.ids();
     let resolver = Resolver::with_textures(config, &materials, &texture_ids)?;
-
-    // A material that could not be given a pool index would be painted with
-    // some other material's texture, so this stops the run rather than
-    // producing a map that looks subtly wrong everywhere.
-    if let Some(first) = assets.bundle_errors.first() {
-        anyhow::bail!(
-            "{first}{}",
-            match assets.bundle_errors.len() {
-                1 => String::new(),
-                n => format!(" ({} more materials did not fit)", n - 1),
-            }
-        );
-    }
 
     let entity_models = entity_models(map, config, &transform);
 
@@ -1305,7 +1285,6 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         separate,
         props,
         pack: assets.pack,
-        bundle: assets.bundle,
     })
 }
 

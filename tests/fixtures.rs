@@ -1,10 +1,7 @@
-//! Golden fixtures for the interchange format described in `docs/format.md`.
+//! Golden fixtures for schematic output.
 //!
 //! The files under `tests/fixtures` are real converter output, committed. This
-//! test regenerates them and fails if a byte moved; the companion mod's tests
-//! read the same files. That is the point — a change on either side that breaks
-//! the other fails in the same CI run, which no amount of prose in the format
-//! document can achieve.
+//! test regenerates them and fails if a byte moved.
 //!
 //! Fixtures are stored as uncompressed NBT rather than as gzipped `.schem`, so
 //! the bytes depend only on what we serialize and not on which version of the
@@ -46,8 +43,7 @@ fn golden(name: &str, actual: &[u8]) {
     assert!(
         expected == actual,
         "fixture {} is out of date ({} bytes committed, {} bytes produced).\n\
-         This is an interface change: see docs/format.md. Bump FORMAT_VERSION on \
-         both sides, then regenerate with UPDATE_FIXTURES=1 cargo test --test fixtures",
+         Regenerate deliberately with UPDATE_FIXTURES=1 cargo test --test fixtures",
         path.display(),
         expected.len(),
         actual.len()
@@ -76,74 +72,4 @@ fn tiny_schematic_matches_the_fixture() {
 #[test]
 fn encoding_is_deterministic() {
     assert!(tiny() == tiny(), "schematic encoding is not reproducible");
-}
-
-/// A bundle small enough to read by eye, with the two things about a material
-/// entry that are easy to get wrong: a texture path that has to match a file on
-/// disk, and a repeat measured on each axis separately.
-fn tiny_bundle(dir: &Path) {
-    let mut bundle = src2mc::output::bundle::Bundle::new("tiny", 16.0);
-    for (material, repeat, surface_prop) in [
-        ("concrete/concretewall001a", [8.0, 4.0], Some("concrete")),
-        ("metal/metalwall048a", [1.0, 1.0], Some("metal")),
-    ] {
-        bundle
-            .insert(
-                material,
-                image::RgbaImage::new(4, 4),
-                repeat,
-                &src2mc::source::vmt::MaterialAssets {
-                    base_texture: String::new(),
-                    alpha_test: false,
-                    translucent: false,
-                    surface_prop: surface_prop.map(str::to_string),
-                },
-            )
-            .unwrap();
-    }
-    bundle.write(dir).unwrap();
-}
-
-/// The bundle's index and material table are what the mod parses, so they are
-/// golden too. The textures are not: a PNG encoder's output is not part of the
-/// contract, only the path that points at it.
-#[test]
-fn tiny_bundle_matches_the_fixtures() {
-    let dir = std::env::temp_dir().join("src2mc-fixture-bundle");
-    let _ = std::fs::remove_dir_all(&dir);
-    tiny_bundle(&dir);
-
-    for name in ["bundle.json", "materials.json", "models.json"] {
-        let produced = std::fs::read(dir.join(name)).unwrap();
-        golden(&format!("bundle/{name}"), &produced);
-    }
-
-    // materials.json names this file; if the two ever disagree the mod loads a
-    // material with no texture and every surface wearing it turns pink.
-    assert!(
-        dir.join("textures/concrete_concretewall001a.png").exists(),
-        "the texture materials.json points at was not written"
-    );
-}
-
-/// The mod reads this key before anything else, so make its absence loud here
-/// rather than in a Minecraft log.
-#[test]
-fn the_format_version_is_written() {
-    let root: fastnbt::Value = fastnbt::from_bytes(&tiny()).unwrap();
-    let fastnbt::Value::Compound(root) = root else {
-        panic!("root is not a compound")
-    };
-    let fastnbt::Value::Compound(schematic) = &root["Schematic"] else {
-        panic!("missing Schematic")
-    };
-    let fastnbt::Value::Compound(metadata) = &schematic["Metadata"] else {
-        panic!("missing Metadata")
-    };
-
-    assert_eq!(
-        metadata["src2mc:FormatVersion"],
-        fastnbt::Value::Int(src2mc::FORMAT_VERSION),
-        "docs/format.md requires Metadata.src2mc:FormatVersion"
-    );
 }

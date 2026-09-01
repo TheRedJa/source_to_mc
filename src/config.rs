@@ -110,10 +110,6 @@ pub enum MaterialMode {
     /// Generate a block per material carrying its real Source texture, and
     /// emit a KubeJS pack registering them. Needs KubeJS installed to paste.
     Kubejs,
-    /// Write the textures as a bundle the companion mod reads, one entry per
-    /// material rather than one block per tile of it. Needs the mod in `mod/`,
-    /// which does not read a bundle yet — see `docs/format.md`.
-    Bundle,
 }
 
 /// What to do with a brush carrying a given contents flag.
