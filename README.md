@@ -507,40 +507,32 @@ Five things worth knowing if you work on this code:
   Missing any of those finds nothing at all: before the parser handled them,
   E:Z2 resolved 0 of 127 materials rather than 125.
 
-## The companion mod
+## Why there is a companion mod
 
-The KubeJS output above works, but its cost is proportional to the wrong thing:
-one map produced 181 MB across about 40,000 files to describe 168 materials and
-95 models, and adding a map needs a restart. `mod/` holds a NeoForge mod that
-fixes that by registering a fixed set of blocks and treating materials, models
-and placements as data. It is a skeleton — the build and the format tests are
-there, nothing reads a bundle yet.
+The long-term goal is to recreate the Half-Life 2 universe in Minecraft without
+spending the available creative time manually blocking out geometry that
+already exists in the Source maps.
 
-The two halves are coordinated by three documents rather than by good
-intentions:
+The converter grew from stone WorldEdit schematics, through colour-matched
+vanilla blocks, to KubeJS blocks with real multi-block textures and real prop
+meshes. That proves the visual approach, but it does not scale to a campaign:
+Half-Life 2 alone produces more than 9 GB of generated pack data and pushes the
+vanilla block texture atlas to roughly 16k x 16k, which can prevent Minecraft
+from starting on weaker GPUs.
 
-- [`docs/format.md`](docs/format.md) — the interchange contract, versioned.
-  Normative: where it and either implementation disagree, the document is right.
-- [`docs/decisions.md`](docs/decisions.md) — settled questions and the
-  measurement behind each, so neither side re-derives or contradicts them.
-- [`docs/mod-requirements.md`](docs/mod-requirements.md) — what the mod is for.
-
-`src2mc::FORMAT_VERSION` and `Src2mc.FORMAT_VERSION` must agree, and the golden
-files under `tests/fixtures` are written by the converter's tests and read by
-the mod's, so a change on either side that breaks the other fails in the same CI
-run.
+[`mod/`](mod/) is a cleanly restarted NeoForge companion mod intended to load
+deduplicated campaign data through its own bounded texture backend while maps
+remain ordinary WorldEdit schematics. The discarded prototype format is not a
+compatibility target. See the current
+[`requirements`](docs/mod-requirements.md),
+[`architecture decisions`](docs/decisions.md), and
+[`implementation plan`](mod/IMPLEMENTATION_PLAN.md).
 
 ## Building
 
 ```sh
 cargo build --release
 cargo test --release
-```
-
-The mod builds separately, with Java 21:
-
-```sh
-cd mod && ./gradlew build
 ```
 
 Tests that need real maps look for an Entropy: Zero install and skip themselves
