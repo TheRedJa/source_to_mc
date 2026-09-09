@@ -9,7 +9,7 @@ displayName="${mod_name}"
 displayURL="https://src2mc.theredja.dev/mod"
 authors="TheRedJa"
 description='''
-Minimal NeoForge scaffold for src2mc. No content or runtime behavior is implemented in Phase 0.
+Companion mod for loading and rendering maps exported by src2mc.
 '''
 
 [[dependencies.${mod_id}]]

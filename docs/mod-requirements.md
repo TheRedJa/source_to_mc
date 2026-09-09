@@ -115,8 +115,9 @@ converter's documented safe volume limit. An exceptional map that does not fit
 fails with an actionable error; mod export never silently tiles, truncates or
 rescales it.
 
-The exact v1 manifest, tables, binary mesh layout, NBT and error codes are
-Phase 1 work. [`format.md`](format.md) deliberately does not define them yet.
+The exact v1 manifest, tables, binary mesh layout, NBT, defensive limits and
+error codes are defined in [`format.md`](format.md). The converter's single-map
+and batch mod-export paths write and deterministically test them together.
 
 ### R3 — Map identity survives WorldEdit
 
@@ -160,16 +161,20 @@ no larger than 4096 x 4096, with mipmaps, filtering and transparent-edge
 handling. More content than one page must allocate more pages rather than grow
 one global atlas.
 
-Each texture allocation is wholly contained by one page and never crosses a
-page boundary. An allocation larger than a page follows a documented
-reduce/split/reject rule. Atlas allocations use extruded gutters sufficient for
-every generated mip level, or an equivalently proven per-allocation mip-clamp
-policy, so filtering cannot sample neighboring textures.
+Each physical texture-region allocation is wholly contained by one page and
+never crosses a page boundary. Logical textures keep the resolution needed for
+16 output texels per projected world block. A larger logical image is split
+losslessly into page-contained regions and selected through geometry/UV
+remapping; it is not squeezed or downsampled merely to fit. Regions use a
+16-pixel base-level extruded gutter, mip-aligned placement, and converter-made
+mip levels 0 through 4, leaving at least one gutter texel at the smallest mip.
 
 Page dimensions alone are not a memory budget. Export and load diagnostics must
 report encoded bytes, decoded RAM, mipmapped VRAM and page count. The prototype
 must define and enforce an agreed texture-residency budget before whole-campaign
-loading is accepted on weaker GPUs.
+loading is accepted on weaker GPUs. Decoded-RAM and estimated-VRAM budgets
+default independently to 2 GiB and remain user-configurable; they do not cause
+eager allocation.
 
 Campaign metadata and texture indices load on reload, but texture pixels are
 demand-resident. Pages referenced by chunks approaching render distance are

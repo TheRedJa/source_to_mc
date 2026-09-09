@@ -15,6 +15,24 @@
 
 use crate::geom::Vec3;
 
+/// A Source texel projection rewritten to consume map-local Minecraft block
+/// coordinates directly. The fourth component is the affine offset.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockTexCoord {
+    pub u: [f64; 4],
+    pub v: [f64; 4],
+}
+
+impl BlockTexCoord {
+    pub fn s(&self, p: Vec3) -> f64 {
+        self.u[0] * p.x + self.u[1] * p.y + self.u[2] * p.z + self.u[3]
+    }
+
+    pub fn t(&self, p: Vec3) -> f64 {
+        self.v[0] * p.x + self.v[1] * p.y + self.v[2] * p.z + self.v[3]
+    }
+}
+
 /// The affine map from a world position to texel coordinates on one face.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TexCoord {
@@ -37,6 +55,37 @@ impl TexCoord {
 
     pub fn t(&self, p: Vec3) -> f64 {
         self.v[0] * p.x + self.v[1] * p.y + self.v[2] * p.z + self.v[3]
+    }
+
+    /// Express this projection in map-local block coordinates. Brush-entity
+    /// geometry is stored relative to its Source origin, hence the explicit
+    /// `source_origin` subtraction.
+    pub fn in_block_space(
+        &self,
+        transform: &crate::voxel::transform::Transform,
+        source_origin: Vec3,
+    ) -> BlockTexCoord {
+        let project = |p: Vec3| transform.to_source_space(p) - source_origin;
+        let origin = project(Vec3::ZERO);
+        let u0 = self.s(origin);
+        let v0 = self.t(origin);
+        let axis = |axis: usize| {
+            let mut point = Vec3::ZERO;
+            match axis {
+                0 => point.x = 1.0,
+                1 => point.y = 1.0,
+                _ => point.z = 1.0,
+            }
+            let source = project(point);
+            [self.s(source) - u0, self.t(source) - v0]
+        };
+        let x = axis(0);
+        let y = axis(1);
+        let z = axis(2);
+        BlockTexCoord {
+            u: [x[0], y[0], z[0], u0],
+            v: [x[1], y[1], z[1], v0],
+        }
     }
 
     /// Texels per Source unit along `s` and `t`.
@@ -156,8 +205,12 @@ impl Split {
 pub fn material_scales(map: &crate::bsp::Map) -> Vec<Option<MaterialScale>> {
     let mut samples: Vec<Vec<[f64; 2]>> = vec![Vec::new(); map.materials().len()];
 
-    for info in &map.bsp.textures_info {
-        let Ok(index) = usize::try_from(info.texture_data_index) else {
+    for (texture_info, info) in map.bsp.textures_info.iter().enumerate() {
+        // Keep this lookup through Map rather than treating the raw texture
+        // data handle as a material-list offset.  The converter assigns face
+        // material IDs through this same path; keeping the two coupled is
+        // essential for BSP variants with non-standard texture-info tables.
+        let Some(index) = map.material_index(texture_info) else {
             continue;
         };
         let Some(bucket) = samples.get_mut(index) else {
@@ -189,6 +242,52 @@ pub fn material_scales(map: &crate::bsp::Map) -> Vec<Option<MaterialScale>> {
         .collect()
 }
 
+/// Per-material projection rates for texture export. A logical atlas texture
+/// is shared by every face using a material, so its resolution must satisfy
+/// the *least dense* valid projection, not the median used for block tiling.
+/// Otherwise a stretched floor can be needlessly downsampled into visible
+/// multi-block pixels even though another use of the same material is dense.
+pub fn material_export_scales(map: &crate::bsp::Map) -> Vec<Option<MaterialScale>> {
+    let mut samples: Vec<Vec<[f64; 2]>> = vec![Vec::new(); map.materials().len()];
+    for (texture_info, info) in map.bsp.textures_info.iter().enumerate() {
+        // See material_scales: export resolution must use the exact material
+        // identity emitted into face records, never a raw BSP handle.
+        let Some(index) = map.material_index(texture_info) else {
+            continue;
+        };
+        let Some(bucket) = samples.get_mut(index) else {
+            continue;
+        };
+        let rate = TexCoord::of(info).texels_per_unit();
+        if rate[0] > 0.0 && rate[1] > 0.0 && rate[0].is_finite() && rate[1].is_finite() {
+            bucket.push(rate);
+        }
+    }
+    samples
+        .into_iter()
+        .enumerate()
+        .map(|(index, rates)| {
+            let data = map.bsp.textures_data.get(index)?;
+            let size = [
+                u32::try_from(data.width).ok()?,
+                u32::try_from(data.height).ok()?,
+            ];
+            if size[0] == 0 || size[1] == 0 || rates.is_empty() {
+                return None;
+            }
+            Some(MaterialScale {
+                size,
+                texels_per_unit: std::array::from_fn(|axis| {
+                    rates
+                        .iter()
+                        .map(|rate| rate[axis])
+                        .fold(f64::INFINITY, f64::min)
+                }),
+            })
+        })
+        .collect()
+}
+
 fn median(rates: &mut [[f64; 2]]) -> [f64; 2] {
     std::array::from_fn(|axis| {
         rates.sort_by(|a, b| {
@@ -208,6 +307,29 @@ mod tests {
 
     fn coord(u: [f64; 4], v: [f64; 4]) -> TexCoord {
         TexCoord { u, v }
+    }
+
+    #[test]
+    fn block_space_projection_matches_source_projection() {
+        let mut config = crate::config::Config::default();
+        config.scale.units_per_block = 32.0;
+        config.transform.origin_mode = crate::config::OriginMode::MapOrigin;
+        config.transform.rotate_yaw = 37.0;
+        let transform =
+            crate::voxel::transform::Transform::new(&config, crate::geom::Aabb::empty());
+        let tex = coord([0.25, -0.5, 2.0, 17.0], [-1.0, 0.75, 0.125, -9.0]);
+        let entity_origin = Vec3::new(128.0, -64.0, 32.0);
+        let block = tex.in_block_space(&transform, entity_origin);
+
+        for point in [
+            Vec3::ZERO,
+            Vec3::new(1.5, -2.25, 8.0),
+            Vec3::new(-17.0, 4.0, 0.125),
+        ] {
+            let source = transform.to_source_space(point) - entity_origin;
+            assert!((block.s(point) - tex.s(source)).abs() < 1e-9);
+            assert!((block.t(point) - tex.t(source)).abs() < 1e-9);
+        }
     }
 
     /// Hammer's texture scale is the reciprocal of what the BSP stores, and

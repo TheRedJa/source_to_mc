@@ -37,6 +37,31 @@ pub fn decode(data: &[u8], size: u32, alpha_test: bool) -> Result<RgbaImage> {
     Ok(decode_tiles(data, size, alpha_test, [1, 1], [u32::MAX; 2])?.remove(0))
 }
 
+/// Decode a complete VTF to an explicitly selected output resolution.
+pub fn decode_resized(data: &[u8], size: [u32; 2], alpha_test: bool) -> Result<RgbaImage> {
+    if size[0] == 0 || size[1] == 0 {
+        bail!("output texture dimensions must be positive");
+    }
+    let vtf = vtf::from_bytes(data).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let image: DynamicImage = vtf
+        .highres_image
+        .decode(0)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if image.width() == 0 || image.height() == 0 {
+        bail!("texture has no pixels");
+    }
+    let coverage = alpha_test.then(|| {
+        let pixels = image.to_rgba8();
+        let solid = pixels.pixels().filter(|p| p.0[3] >= ALPHA_CUTOFF).count();
+        solid as f64 / pixels.pixels().len().max(1) as f64
+    });
+    let mut output = resize_to(image, size);
+    if let Some(coverage) = coverage {
+        binarize_alpha(&mut output, coverage);
+    }
+    Ok(output)
+}
+
 /// Decode a VTF and cut it into a `grid` of `size` x `size` tiles, row by row.
 ///
 /// This is what stops a wall looking like a smear. A Source wall texture is
@@ -141,16 +166,22 @@ fn binarize_alpha(image: &mut RgbaImage, coverage: f64) {
 
 /// Downsample to a square, halving first so the final filter has a sane
 /// sampling window.
-fn resize(mut image: DynamicImage, size: u32) -> RgbaImage {
-    while image.width() > PREFILTER_ABOVE.max(size) && image.height() > PREFILTER_ABOVE.max(size) {
+fn resize(image: DynamicImage, size: u32) -> RgbaImage {
+    resize_to(image, [size, size])
+}
+
+fn resize_to(mut image: DynamicImage, size: [u32; 2]) -> RgbaImage {
+    while image.width() > PREFILTER_ABOVE.max(size[0])
+        && image.height() > PREFILTER_ABOVE.max(size[1])
+    {
         image = image.resize_exact(
-            (image.width() / 2).max(size),
-            (image.height() / 2).max(size),
+            (image.width() / 2).max(size[0]),
+            (image.height() / 2).max(size[1]),
             FilterType::Triangle,
         );
     }
     image
-        .resize_exact(size, size, FilterType::Lanczos3)
+        .resize_exact(size[0], size[1], FilterType::Lanczos3)
         .to_rgba8()
 }
 
@@ -202,6 +233,24 @@ impl<'a> Textures<'a> {
     pub fn get(&mut self, base_texture: &str, alpha_test: bool) -> Option<&RgbaImage> {
         self.tiles(base_texture, alpha_test, [1, 1], [u32::MAX; 2])?
             .first()
+    }
+
+    /// Compressed VTF bytes on disk or in the VPK, without container overhead.
+    pub fn encoded_bytes(&self, base_texture: &str) -> Option<u64> {
+        let key = base_texture.to_ascii_lowercase().replace('\\', "/");
+        self.vfs.open(&path_of(&key)).map(|data| data.len() as u64)
+    }
+
+    /// Decode a complete logical texture at a caller-selected resolution.
+    pub fn resized(
+        &self,
+        base_texture: &str,
+        size: [u32; 2],
+        alpha_test: bool,
+    ) -> Option<RgbaImage> {
+        let key = base_texture.to_ascii_lowercase().replace('\\', "/");
+        let data = self.vfs.open(&path_of(&key))?;
+        decode_resized(&data, size, alpha_test).ok()
     }
 
     /// Load a texture cut into a `grid` of tiles, row by row, using the first

@@ -7,6 +7,7 @@ pub mod displacement;
 pub mod entities;
 pub mod lumps;
 pub mod props;
+pub mod pvs;
 pub mod rawleaves;
 pub mod rawprops;
 pub mod skybox;
@@ -184,7 +185,7 @@ pub struct Map {
     pub path: PathBuf,
     pub name: String,
     /// Leaf brush ranges in original BSP order, which `vbsp` does not preserve.
-    leaf_brushes: Vec<rawleaves::LeafBrushRange>,
+    leaf_brushes: Vec<rawleaves::RawLeaf>,
     /// Static props, read from the lump rather than from `vbsp`'s view of it.
     /// See [`rawprops`] for why.
     pub static_props: rawprops::StaticProps,
@@ -228,7 +229,7 @@ impl Map {
     pub fn from_bytes(mut data: Vec<u8>, path: &Path) -> Result<Map> {
         let version = lumps::present_as_known_version(&mut data)
             .with_context(|| format!("reading the header of {}", path.display()))?;
-        let leaf_brushes = rawleaves::leaf_brush_ranges(&data)
+        let leaf_brushes = rawleaves::leaves(&data)
             .with_context(|| format!("reading leaf lump of {}", path.display()))?;
         let static_props = rawprops::static_props(&data)
             .with_context(|| format!("reading static props of {}", path.display()))?;

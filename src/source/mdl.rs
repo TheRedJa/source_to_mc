@@ -14,18 +14,20 @@
 
 use crate::geom::{Aabb, Vec3};
 use crate::source::vfs::Vfs;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// One material's triangles and the texture coordinates of their corners, as
 /// they are gathered before becoming a [`Part`].
-type Geometry = (Vec<[Vec3; 3]>, Vec<[[f64; 2]; 3]>);
+type Geometry = (Vec<[Vec3; 3]>, Vec<[Vec3; 3]>, Vec<[[f64; 2]; 3]>);
 
 /// One model's triangles that share a material.
 #[derive(Debug, Clone)]
 pub struct Part {
     /// Triangles in model space, in Source units.
     pub triangles: Vec<[Vec3; 3]>,
+    /// Authored per-corner normals, parallel to `triangles`.
+    pub normals: Vec<[Vec3; 3]>,
     /// Each corner's position in texture space, parallel to `triangles`.
     ///
     /// Per corner, not one value per triangle: a model's triangles are not
@@ -188,13 +190,19 @@ impl<'a> Models<'a> {
             let t = root.transform_vector(Vector3::new(v.x, v.y, v.z));
             Vec3::new(t.x as f64, t.y as f64, t.z as f64)
         };
+        let place_normal = |v: vmdl::Vector| -> Vec3 {
+            let t = root.transform_vector(Vector3::new(v.x, v.y, v.z));
+            Vec3::new(t.x as f64, t.y as f64, t.z as f64).normalized()
+        };
 
-        let mut parts: HashMap<String, Geometry> = HashMap::new();
+        // Part order is format identity: HashMap iteration made identical
+        // Source models produce different mesh content IDs across processes.
+        let mut parts: BTreeMap<String, Geometry> = BTreeMap::new();
         let vertices = model.vertices();
 
         for mesh in model.meshes() {
             let material = self.material_of(&model, mesh.material_index());
-            let (triangles, uvs) = parts.entry(material).or_default();
+            let (triangles, normals, uvs) = parts.entry(material).or_default();
             for strip in mesh.vertex_strip_indices() {
                 let indices: Vec<usize> = strip.collect();
                 for tri in indices.chunks_exact(3) {
@@ -203,6 +211,11 @@ impl<'a> Models<'a> {
                         continue;
                     };
                     triangles.push([place(a.position), place(b.position), place(c.position)]);
+                    normals.push([
+                        place_normal(a.normal),
+                        place_normal(b.normal),
+                        place_normal(c.normal),
+                    ]);
                     uvs.push([a, b, c].map(|v| -> [f64; 2] {
                         std::array::from_fn(|axis| f64::from(v.texture_coordinates[axis]))
                     }));
@@ -219,9 +232,10 @@ impl<'a> Models<'a> {
         Model {
             parts: parts
                 .into_iter()
-                .map(|(material, (triangles, uvs))| Part {
+                .map(|(material, (triangles, normals, uvs))| Part {
                     uv_per_unit: uv_rate(&triangles, &uvs),
                     triangles,
+                    normals,
                     uvs,
                     material,
                 })

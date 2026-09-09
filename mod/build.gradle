@@ -33,6 +33,15 @@ runs {
 
 dependencies {
     implementation "net.neoforged:neoforge:${neo_version}"
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+tasks.named('test', Test) {
+    useJUnitPlatform()
+    if (System.getProperty('src2mc.testBundle') != null) {
+        systemProperty 'src2mc.testBundle', System.getProperty('src2mc.testBundle')
+    }
 }
 
 tasks.withType(ProcessResources).configureEach {

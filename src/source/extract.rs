@@ -19,6 +19,7 @@ use crate::source::mdl::Models;
 use crate::source::vfs::Vfs;
 use crate::source::vmt::Materials;
 use crate::source::vtf::Textures;
+use std::sync::Arc;
 
 /// What extraction managed, for reporting.
 #[derive(Debug, Clone, Default)]
@@ -100,6 +101,76 @@ pub struct Assets {
     /// depends on the world the conversion built, which is not known here.
     pub prop_meshes: Vec<crate::output::obj::PropMesh>,
     pub stats: Extracted,
+}
+
+/// Source-authored prop inputs for mod export. This path retains geometry even
+/// when a texture is unavailable, unlike the legacy generated-block renderer.
+pub struct ModProp {
+    pub source_ordinal: u64,
+    pub prop: crate::bsp::props::Prop,
+    pub model: Arc<crate::source::mdl::Model>,
+    pub bounds: crate::geom::Aabb,
+}
+
+pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
+    if !config.props.enabled || !config.props.models {
+        return Vec::new();
+    }
+    let vfs = Vfs::for_map(&map.path, &config.materials.game_dir_paths());
+    let mut models = Models::new(&vfs);
+    let skip = globset(&config.props.skip).unwrap_or_else(|_| globset(&[]).unwrap());
+    let skybox = map.skybox().filter(|_| config.contents.skip_3d_skybox);
+    let mut props = crate::bsp::props::extract(map);
+    if config.props.entity_props {
+        props.extend(crate::bsp::props::extract_entities(&map.bsp));
+    }
+    props
+        .into_iter()
+        .enumerate()
+        .filter_map(|(ordinal, prop)| {
+            if skybox.is_some_and(|room| room.contains_point(prop.origin))
+                || skip.is_match(&prop.model)
+                || is_unsupported_visual_effect_model(&prop.model)
+            {
+                return None;
+            }
+            let model = models.get(&prop.model)?;
+            let size = model.bounds.size() * prop.scale;
+            let longest = size.x.max(size.y).max(size.z);
+            if longest < config.props.min_size
+                || (config.props.max_size > 0.0 && longest > config.props.max_size)
+            {
+                return None;
+            }
+            let mut bounds = crate::geom::Aabb::empty();
+            for corner in 0..8 {
+                let p = crate::geom::Vec3::new(
+                    if corner & 1 == 0 {
+                        model.bounds.min.x
+                    } else {
+                        model.bounds.max.x
+                    },
+                    if corner & 2 == 0 {
+                        model.bounds.min.y
+                    } else {
+                        model.bounds.max.y
+                    },
+                    if corner & 4 == 0 {
+                        model.bounds.min.z
+                    } else {
+                        model.bounds.max.z
+                    },
+                );
+                bounds.extend(prop.place(p));
+            }
+            Some(ModProp {
+                source_ordinal: ordinal as u64,
+                prop,
+                model,
+                bounds,
+            })
+        })
+        .collect()
 }
 
 impl Assets {
@@ -329,6 +400,7 @@ pub fn layouts(map: &Map, config: &Config) -> std::collections::BTreeMap<String,
         for prop in crate::bsp::props::extract(map) {
             if skybox.is_some_and(|room| room.contains_point(prop.origin))
                 || skip.is_match(&prop.model)
+                || is_unsupported_visual_effect_model(&prop.model)
             {
                 continue;
             }
@@ -475,7 +547,7 @@ fn place_props(
             assets.stats.props_skipped += 1;
             continue;
         }
-        if skip.is_match(&prop.model) {
+        if skip.is_match(&prop.model) || is_unsupported_visual_effect_model(&prop.model) {
             assets.stats.props_skipped += 1;
             continue;
         }
@@ -659,11 +731,35 @@ fn globset(patterns: &[String]) -> Result<globset::GlobSet, globset::Error> {
     builder.build()
 }
 
+/// These are translucent effect volumes rather than physical scene props.
+/// Source renders them with special additive/volumetric shader behavior; raw
+/// triangle export produces long wedges instead of light shafts.
+fn is_unsupported_visual_effect_model(path: &str) -> bool {
+    let normalized = path.to_ascii_lowercase().replace('\\', "/");
+    normalized.starts_with("models/effects/vol_light") && normalized.ends_with(".mdl")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::MaterialMode;
     use std::path::Path;
+
+    #[test]
+    fn volumetric_light_meshes_are_permanently_excluded() {
+        assert!(is_unsupported_visual_effect_model(
+            "models/effects/vol_light256x512.mdl"
+        ));
+        assert!(is_unsupported_visual_effect_model(
+            "MODELS\\EFFECTS\\VOL_LIGHT128X256.MDL"
+        ));
+        assert!(!is_unsupported_visual_effect_model(
+            "models/props_c17/light_cagelight02_on.mdl"
+        ));
+        assert!(!is_unsupported_visual_effect_model(
+            "models/props_trainstation/trainstation_window001.mdl"
+        ));
+    }
 
     fn sample_map() -> Option<Map> {
         let path = Path::new(

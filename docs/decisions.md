@@ -104,10 +104,19 @@ and page-count costs and the prototype has an explicit residency budget.
 A texture-array backend is a gated fallback if paged atlases fail the in-game
 visual test; it is not silently substituted during implementation.
 
-Each texture allocation lies wholly on one page. Oversized allocations follow a
-documented reduce/split/reject rule. Extruded gutters cover every mip level
-unless the implementation proves an equivalent per-allocation mip clamp;
-ordinary adjacent atlas pixels must never bleed together under filtering.
+Each physical texture-region allocation lies wholly on one page. Logical
+textures retain the resolution required for 16 output texels per projected
+world block. A logical image larger than one page's usable area is partitioned
+losslessly into page-contained regions; geometry selects the appropriate
+region, so the image is neither squeezed nor downsampled to fit. Each region
+has a 16-pixel base-level extruded gutter and the converter generates mip levels
+0 through 4. The gutter therefore remains at least one texel through the final
+mip and allocations are aligned to mip boundaries, preventing adjacent atlas
+content from bleeding under filtering.
+
+Decoded-RAM and estimated-VRAM residency budgets default independently to 2
+GiB and remain configurable. They are cache limits, not permission to allocate
+either amount eagerly.
 
 Campaign metadata loads eagerly, while texture pixels and GPU pages are
 demand-resident. Chunks approaching render distance acquire their pages; pages
@@ -115,6 +124,17 @@ with no loaded-chunk references become evictable after a grace period. RAM and
 VRAM budgets use least-recently-used eviction under pressure. An asynchronously
 loading page renders as a diagnostic placeholder and invalidates only its
 dependent chunks when ready. Camera direction alone does not control residency.
+
+The initial translucent fallback is deliberately basic: alpha-blended atlas
+meshes render at NeoForge's `AFTER_PARTICLES` stage in coarse far-to-near
+section/page order. It supports ordinary transparent pixels without claiming
+Source shaders, decals, refraction, or correct per-triangle ordering.
+
+Source's `models/effects/vol_light*.mdl` family is excluded permanently. Those
+meshes represent shader-driven volumetric light rays rather than physical scene
+props; rendering their raw triangles through the ordinary translucent path
+produces elongated wedges instead of the Source effect. Actual windows, lamps,
+and light fixtures are unaffected.
 
 ## D7 — Prop geometry is chunk-baked
 
@@ -220,3 +240,32 @@ as one bounding box around every triangle fragment in a block. Disconnected
 occupied regions remain disconnected. Runtime shapes may merge adjacent
 occupied subcells into fewer boxes only when the represented volume is
 unchanged.
+
+## D16 — Rendering uses mod-owned static section meshes
+
+Surface and static-prop geometry is baked into mod-owned immutable GPU buffers
+partitioned by Minecraft section and texture page. The client submits visible
+section/page buffers from NeoForge's world-render stages using the supplied
+camera frustum. It creates no entity or block entity renderer and does not issue
+one draw submission per source face or prop placement.
+
+The standard NeoForge named block-render-type path cannot bind an arbitrary
+mod-owned texture in a chunk layer, and Sodium 0.8.13 exposes no public custom
+terrain-pass registration API. src2mc therefore owns this narrow static-section
+backend instead of mixing into Sodium's internal terrain pipeline. Avoiding
+Sodium render-pipeline mixins is an explicit stability choice; they may only be
+reconsidered if measured evidence proves the independent backend cannot meet a
+required constraint.
+
+Section meshes retain generation identity and page dependencies so reload and
+texture residency can invalidate only affected buffers. Static world frustum
+culling is shared conceptually with Minecraft but the buffers, draw submission,
+and rebuild lifecycle are src2mc-owned. Moving Create contraptions require a
+separate adapter because they are no longer static world sections.
+
+Generic surface and derived carrier blocks expose no vanilla-rendered geometry.
+They may supply persistence, lookup, or collision, but the src2mc section mesh
+is the sole visual surface. This prevents a normal converted map from drawing a
+coplanar vanilla face beneath the Source-derived face. Deliberately placing an
+ordinary block face exactly coplanar with an src2mc face is outside the no-edit
+paste workflow and may z-fight; Source geometry is not shifted to hide it.

@@ -20,6 +20,8 @@ pub struct Conversion {
     pub grid: VoxelGrid,
     pub palette: Palette,
     pub transform: Transform,
+    /// Canonical material and UV truth for every visible world face.
+    pub surfaces: Vec<crate::voxel::surface::VisibleFaceRecord>,
     pub stats: Stats,
     /// Brush entities pulled out into their own grids, for classnames
     /// configured as `separate`.
@@ -90,6 +92,8 @@ pub struct Stats {
     pub props_modelled: usize,
     /// Distinct meshes generated for them.
     pub prop_models: usize,
+    /// Triangles across those distinct meshes, counted once per mesh.
+    pub prop_triangles: usize,
     /// Props moved vertically to stand on the floor rather than in it.
     pub props_settled: usize,
     /// Props drawn as a block with their rotation baked in, which the chunk
@@ -116,6 +120,8 @@ pub struct Stats {
     /// The world only: props are added after hollowing, deliberately, so they
     /// cannot seal a wall's air side and have that wall taken for interior.
     pub blocks_before_hollow: usize,
+    /// Canonical material/UV records for visible brush and terrain faces.
+    pub visible_faces: usize,
     pub blocks: usize,
     /// Voxel count per block type, for sourcing materials.
     pub block_counts: BTreeMap<String, usize>,
@@ -292,10 +298,17 @@ fn voxelize_displacement(
     solidify: u32,
     block: BlockId,
     tiles: Option<&TileSet>,
-) -> VoxelGrid {
+) -> (
+    VoxelGrid,
+    crate::voxel::shapes::MaskGrid,
+    crate::voxel::surface::FaceCandidates,
+) {
     use crate::voxel::mesh::{Triangle, voxelize_triangle};
+    use crate::voxel::surface::{FaceCandidates, FaceSource, SourceProvenance};
 
     let mut grid = VoxelGrid::new();
+    let mut masks = crate::voxel::shapes::MaskGrid::new();
+    let mut faces = FaceCandidates::new();
     let inward = transform.transform_direction(-surface.normal);
     // Terrain is world geometry like any other, so a split texture is chosen
     // by the same world projection the brushes use.
@@ -310,12 +323,24 @@ fn voxelize_displacement(
         (uv, set)
     });
 
-    for tri in &surface.triangles {
+    for (triangle, tri) in surface.triangles.iter().enumerate() {
         let mapped = Triangle::new(
             transform.to_block_space(tri.a),
             transform.to_block_space(tri.b),
             transform.to_block_space(tri.c),
         );
+        let source = match (surface.material, surface.texcoord) {
+            (Some(material), Some(texcoord)) => Some(FaceSource {
+                provenance: SourceProvenance::Displacement {
+                    displacement: surface.index,
+                    triangle,
+                },
+                material,
+                uv: texcoord.in_block_space(transform, Vec3::ZERO),
+            }),
+            _ => None,
+        };
+        let plane = crate::geom::Plane::new(mapped.normal(), mapped.normal().dot(mapped.a));
         voxelize_triangle(&mapped, |pos| {
             let block = match uv {
                 Some((uv, set)) => {
@@ -330,20 +355,29 @@ fn voxelize_displacement(
                 None => block,
             };
             grid.set(pos, block);
+            // Displacements are emitted as conservative whole voxels. They
+            // must never inherit a slab/stair mask from an overlapping base
+            // brush: that was sinking INFRA floors to Y + 0.5.
+            masks.add(pos, u8::MAX);
+            if let Some(source) = source {
+                faces.add(pos, source, plane);
+            }
             for step in 1..=solidify {
                 let offset = inward * step as f64;
-                grid.set(
-                    [
-                        pos[0] + offset.x.round() as i32,
-                        pos[1] + offset.y.round() as i32,
-                        pos[2] + offset.z.round() as i32,
-                    ],
-                    block,
-                );
+                let backing = [
+                    pos[0] + offset.x.round() as i32,
+                    pos[1] + offset.y.round() as i32,
+                    pos[2] + offset.z.round() as i32,
+                ];
+                grid.set(backing, block);
+                masks.add(backing, u8::MAX);
+                if let Some(source) = source {
+                    faces.add(backing, source, plane);
+                }
             }
         });
     }
-    grid
+    (grid, masks, faces)
 }
 
 /// Voxelize one static prop's triangles.
@@ -629,20 +663,25 @@ fn voxelize_solids(
     tiles: &[Option<TileSet>],
     palette: &Mutex<Palette>,
     skipped: &std::sync::atomic::AtomicUsize,
-) -> (VoxelGrid, crate::voxel::shapes::MaskGrid) {
+) -> (
+    VoxelGrid,
+    crate::voxel::shapes::MaskGrid,
+    crate::voxel::surface::FaceCandidates,
+) {
     use crate::voxel::shapes::MaskGrid;
+    use crate::voxel::surface::{FaceCandidates, FaceSource, SourceProvenance};
     let skip_sky = config.contents.skip_sky;
     let want_masks = config.shapes.enabled;
 
     solids
         .par_iter()
         .fold(
-            || (VoxelGrid::new(), MaskGrid::new()),
-            |(mut grid, mut masks), solid| {
+            || (VoxelGrid::new(), MaskGrid::new(), FaceCandidates::new()),
+            |(mut grid, mut masks, mut faces), solid| {
                 let decision = resolver.decide(solid.flags);
                 if decision == Decision::Skip {
                     skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return (grid, masks);
+                    return (grid, masks, faces);
                 }
 
                 let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
@@ -662,7 +701,7 @@ fn voxelize_solids(
                 // A brush whose every side was vetoed contributes nothing.
                 if side_blocks.iter().all(Option::is_none) {
                     skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return (grid, masks);
+                    return (grid, masks, faces);
                 }
                 // The side a voxel falls back to when its own nearest face is one
                 // the engine never draws. Half a brush's sides are nodraw, so this
@@ -691,6 +730,26 @@ fn voxelize_solids(
                         Some((uv, set))
                     })
                     .collect();
+                let side_sources: Vec<Option<FaceSource>> = solid
+                    .sides
+                    .iter()
+                    .enumerate()
+                    .map(|(side, source_side)| {
+                        side_blocks.get(side).copied().flatten()?;
+                        let info_index = source_side.texture_info?;
+                        let material = map.material_index(info_index)?;
+                        let texcoord = map.bsp.textures_info.get(info_index)?;
+                        Some(FaceSource {
+                            provenance: SourceProvenance::Brush {
+                                brush: solid.brush_index,
+                                side,
+                            },
+                            material,
+                            uv: crate::bsp::texcoord::TexCoord::of(texcoord)
+                                .in_block_space(transform, origin),
+                        })
+                    })
+                    .collect();
 
                 let block_of = |side: usize, pos: IVec3| -> Option<BlockId> {
                     let base = side_blocks.get(side).copied().flatten()?;
@@ -715,21 +774,28 @@ fn voxelize_solids(
                             .or_else(|| default_side.and_then(|s| block_of(s, pos)));
                         if let Some(block) = block {
                             grid.set(pos, block);
+                            for (plane, source_plane) in block_solid.planes.iter().enumerate() {
+                                let side = block_solid.side_of_plane[plane];
+                                if let Some(source) = side_sources.get(side).copied().flatten() {
+                                    faces.add(pos, source, *source_plane);
+                                }
+                            }
                             if want_masks {
                                 masks.add(pos, mask);
                             }
                         }
                     },
                 );
-                (grid, masks)
+                (grid, masks, faces)
             },
         )
         .reduce(
-            || (VoxelGrid::new(), MaskGrid::new()),
-            |(mut ga, mut ma), (gb, mb)| {
+            || (VoxelGrid::new(), MaskGrid::new(), FaceCandidates::new()),
+            |(mut ga, mut ma, mut fa), (gb, mb, fb)| {
                 ga.merge(gb);
                 ma.merge(mb);
-                (ga, ma)
+                fa.merge(fb);
+                (ga, ma, fa)
             },
         )
 }
@@ -820,7 +886,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
 
     let origins = model_origins(&entity_models);
     let tiles = tile_sets(map, &materials, &resolver, &assets.pack, &palette);
-    let (grid, masks) = voxelize_solids(
+    let (grid, mut masks, mut face_candidates) = voxelize_solids(
         &solids, map, config, &resolver, &transform, &origins, &tiles, &palette, &skipped,
     );
 
@@ -835,7 +901,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             if solids.is_empty() {
                 return None;
             }
-            let (grid, _) = voxelize_solids(
+            let (grid, _, _) = voxelize_solids(
                 &solids, map, config, &resolver, &transform, &origins, &tiles, &palette, &skipped,
             );
             (grid.count() > 0).then(|| SeparateEntity {
@@ -858,35 +924,64 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     };
     let mut grid = grid;
     if !surfaces.is_empty() {
-        let terrain = surfaces
+        let (terrain, terrain_masks, terrain_faces) = surfaces
             .par_iter()
-            .fold(VoxelGrid::new, |mut grid, surface| {
-                let block = surface
-                    .material
-                    .and_then(|m| resolver.block_for_material(m))
-                    .map(|name| palette.lock().unwrap().intern(name));
-                match block {
-                    Some(block) => grid.merge(voxelize_displacement(
-                        surface,
-                        &transform,
-                        config.displacement.solidify,
-                        block,
-                        surface
-                            .material
-                            .and_then(|m| tiles.get(m))
-                            .and_then(Option::as_ref),
-                    )),
-                    None => {
-                        displacements_skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fold(
+                || {
+                    (
+                        VoxelGrid::new(),
+                        crate::voxel::shapes::MaskGrid::new(),
+                        crate::voxel::surface::FaceCandidates::new(),
+                    )
+                },
+                |(mut grid, mut masks, mut faces), surface| {
+                    let block = surface
+                        .material
+                        .and_then(|m| resolver.block_for_material(m))
+                        .map(|name| palette.lock().unwrap().intern(name));
+                    match block {
+                        Some(block) => {
+                            let (surface_grid, surface_masks, surface_faces) =
+                                voxelize_displacement(
+                                    surface,
+                                    &transform,
+                                    config.displacement.solidify,
+                                    block,
+                                    surface
+                                        .material
+                                        .and_then(|m| tiles.get(m))
+                                        .and_then(Option::as_ref),
+                                );
+                            grid.merge(surface_grid);
+                            masks.merge(surface_masks);
+                            faces.merge(surface_faces);
+                        }
+                        None => {
+                            displacements_skipped
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
-                }
-                grid
-            })
-            .reduce(VoxelGrid::new, |mut a, b| {
-                a.merge(b);
-                a
-            });
+                    (grid, masks, faces)
+                },
+            )
+            .reduce(
+                || {
+                    (
+                        VoxelGrid::new(),
+                        crate::voxel::shapes::MaskGrid::new(),
+                        crate::voxel::surface::FaceCandidates::new(),
+                    )
+                },
+                |(mut a, mut ma, mut fa), (b, mb, fb)| {
+                    a.merge(b);
+                    ma.merge(mb);
+                    fa.merge(fb);
+                    (a, ma, fa)
+                },
+            );
         grid.merge(terrain);
+        masks.merge(terrain_masks);
+        face_candidates.merge(terrain_faces);
     }
     let displacements_skipped = displacements_skipped.into_inner();
 
@@ -1033,6 +1128,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     } else {
         grid
     };
+    let visible_surfaces = face_candidates.visible(&grid, &masks, config.shapes.enabled);
 
     // Props drawn as blocks rather than as entities. A prop's block may only
     // take a cell that is air, since taking one of the map's own would punch a
@@ -1267,6 +1363,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             props_skipped: assets.stats.props_skipped,
             props_modelled: assets.stats.props_modelled,
             prop_models: assets.stats.prop_models,
+            prop_triangles: assets.prop_meshes.iter().map(|mesh| mesh.triangles).sum(),
             props_settled: settled,
             props_baked,
             prop_blocks,
@@ -1276,12 +1373,14 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             prop_collision_step: collision_step,
             shapes_fitted,
             blocks_before_hollow,
+            visible_faces: visible_surfaces.len(),
             blocks: grid.count(),
             block_counts,
         },
         grid,
         palette,
         transform,
+        surfaces: visible_surfaces,
         separate,
         props,
         pack: assets.pack,

@@ -147,9 +147,9 @@ min_size = 12.0
 # across, and one of them can be tens of thousands of blocks of a single dark
 # material. Off by default, because that scenery really is there.
 max_size = 0.0
-# Model paths to leave out. Foliage is alpha-tested cards that voxelize into
-# solid slabs, and an outdoor map has thousands of them.
-skip = ["*props_foliage*", "*/foliage/*"]
+# Model paths to leave out. Real mesh export supports alpha-tested foliage, so
+# trees, grass and plants are included unless you add an explicit exclusion.
+skip = []
 # Voxels of backing driven along each triangle's inward normal. Props are
 # usually closed shells already, so a fence stays one block thick.
 solidify = 0

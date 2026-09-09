@@ -78,11 +78,7 @@ fn occupancy(solid: &BlockSolid, pos: IVec3, config: &Voxelize) -> f64 {
         // sampling resolution can quite match this on thin slivers, but it
         // costs a plane-triple intersection per boundary voxel, so it is for
         // final passes rather than iteration.
-        SampleMode::Exact => {
-            let mut planes = solid.planes.clone();
-            planes.extend(crate::geom::box_planes(corner, corner + Vec3::splat(1.0)));
-            crate::geom::polyhedron_volume(&planes, EXACT_EPSILON).clamp(0.0, 1.0)
-        }
+        SampleMode::Exact => exact_occupancy(solid, pos),
         SampleMode::Samples => {
             let n = config.samples.max(1);
             let step = 1.0 / n as f64;
@@ -125,12 +121,6 @@ fn is_thin(solid: &BlockSolid) -> bool {
     if (0..3).any(|axis| size.axis(axis) < 1.0) {
         return true;
     }
-    // A brush with a huge bounding box cannot be thin in a way that matters,
-    // and is the expensive case to measure.
-    if size.x.min(size.y).min(size.z) > 1.0 && solid.planes.len() > 16 {
-        return false;
-    }
-
     let corners = crate::geom::polyhedron_vertices(&solid.planes, THIN_EPSILON);
     if corners.len() < 4 {
         return false;
@@ -142,6 +132,13 @@ fn is_thin(solid: &BlockSolid) -> bool {
             .fold(f64::INFINITY, f64::min);
         -deepest < 1.0
     })
+}
+
+fn exact_occupancy(solid: &BlockSolid, pos: IVec3) -> f64 {
+    let corner = Vec3::new(pos[0] as f64, pos[1] as f64, pos[2] as f64);
+    let mut planes = solid.planes.clone();
+    planes.extend(crate::geom::box_planes(corner, corner + Vec3::splat(1.0)));
+    crate::geom::polyhedron_volume(&planes, EXACT_EPSILON).clamp(0.0, 1.0)
 }
 
 /// Slack for deciding a corner lies on a plane while measuring thickness, in
@@ -241,14 +238,21 @@ pub fn voxelize_with_shape(
         for y in min[1]..=max[1] {
             for z in min[2]..=max[2] {
                 let pos = [x as i32, y as i32, z as i32];
-                let fraction = occupancy(solid, pos, config);
+                // A sample grid can miss a thin plate completely even when it
+                // intersects the cell. Thin brushes must use exact clipping
+                // to keep the converter's conservative-coverage guarantee.
+                let fraction = if thin {
+                    exact_occupancy(solid, pos)
+                } else {
+                    occupancy(solid, pos, config)
+                };
 
-                let filled = if fraction >= config.fill_threshold {
+                let filled = if thin {
+                    fraction > EXACT_EPSILON
+                } else if fraction >= config.fill_threshold {
                     true
                 } else {
-                    // A sliver of a thin brush still counts: without this,
-                    // E:Z's 4- and 8-unit trim disappears at 16 units/block.
-                    thin && fraction > 0.0
+                    false
                 };
 
                 if filled {

@@ -531,9 +531,9 @@ impl Default for Props {
             enabled: true,
             min_size: 12.0,
             max_size: 0.0,
-            // Foliage is alpha-tested cards that voxelize into solid slabs,
-            // and there are thousands of them in an outdoor map.
-            skip: vec!["*props_foliage*".into(), "*/foliage/*".into()],
+            // Real mesh export has a cutout path, so foliage is included by
+            // default. A user can still exclude a family explicitly.
+            skip: Vec::new(),
             solidify: 0,
             models: true,
             entity_props: true,

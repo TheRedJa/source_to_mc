@@ -6,4 +6,5 @@ pub mod mesh;
 pub mod settle;
 pub mod shapes;
 pub mod shell;
+pub mod surface;
 pub mod transform;

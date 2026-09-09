@@ -165,6 +165,8 @@ pub struct MeshPart {
     pub material: String,
     /// Model space, in blocks: one unit is one Minecraft block.
     pub triangles: Vec<[Vec3; 3]>,
+    /// Authored per-corner normals, parallel to `triangles`.
+    pub normals: Vec<[Vec3; 3]>,
     /// Already mapped into the sprite's `0..1` by [`Repeat`].
     pub uvs: Vec<[[f64; 2]; 3]>,
 }
@@ -685,10 +687,12 @@ pub fn build(
         let mut mesh_part = MeshPart {
             material: material_name,
             triangles: Vec::new(),
+            normals: Vec::new(),
             uvs: Vec::new(),
         };
-        for (triangle, uv) in part.triangles.iter().zip(&part.uvs) {
+        for ((triangle, normals), uv) in part.triangles.iter().zip(&part.normals).zip(&part.uvs) {
             let corners = triangle.map(|v| to_model_space(v, units));
+            let normals = normals.map(to_model_normal);
             // Texture coordinates written as they are. Both conventions run V
             // downwards from the top of the image: Source's because it is a
             // Direct3D engine, Minecraft's because `TextureAtlasSprite.getV`
@@ -705,7 +709,7 @@ pub fn build(
             // pair of them. Splitting the edge is exact — the surface is flat
             // and the texture coordinates run linearly across it — so this
             // costs triangles and changes nothing you can see.
-            subdivide(corners, coords, limit, &mut mesh_part, 0);
+            subdivide(corners, normals, coords, limit, &mut mesh_part, 0);
             written += 1;
         }
         mesh_parts.push(mesh_part);
@@ -744,7 +748,14 @@ pub fn build(
 /// run linearly across a triangle, so the midpoint's are the average of the
 /// edge's. Depth is capped because a limit of zero would otherwise never be
 /// reached.
-fn subdivide(corners: [Vec3; 3], uvs: [[f64; 2]; 3], limit: f64, out: &mut MeshPart, depth: u32) {
+fn subdivide(
+    corners: [Vec3; 3],
+    normals: [Vec3; 3],
+    uvs: [[f64; 2]; 3],
+    limit: f64,
+    out: &mut MeshPart,
+    depth: u32,
+) {
     const MAX_DEPTH: u32 = 8;
     let edges = [(0, 1), (1, 2), (2, 0)];
     let longest = edges
@@ -763,16 +774,19 @@ fn subdivide(corners: [Vec3; 3], uvs: [[f64; 2]; 3], limit: f64, out: &mut MeshP
 
     if depth >= MAX_DEPTH || limit <= 0.0 || (corners[a] - corners[b]).length() <= limit {
         out.triangles.push(corners);
+        out.normals.push(normals);
         out.uvs.push(uvs);
         return;
     }
 
     let middle = (corners[a] + corners[b]) * 0.5;
+    let middle_normal = (normals[a] + normals[b]).normalized();
     let middle_uv = [(uvs[a][0] + uvs[b][0]) * 0.5, (uvs[a][1] + uvs[b][1]) * 0.5];
     // Both halves keep the winding of the original, so the faces still point
     // the way the model meant them to.
     subdivide(
         [corners[a], middle, corners[c]],
+        [normals[a], middle_normal, normals[c]],
         [uvs[a], middle_uv, uvs[c]],
         limit,
         out,
@@ -780,6 +794,7 @@ fn subdivide(corners: [Vec3; 3], uvs: [[f64; 2]; 3], limit: f64, out: &mut MeshP
     );
     subdivide(
         [middle, corners[b], corners[c]],
+        [middle_normal, normals[b], normals[c]],
         [middle_uv, uvs[b], uvs[c]],
         limit,
         out,
@@ -798,6 +813,10 @@ fn to_model_space(v: Vec3, units_per_block: f64) -> Vec3 {
         v.z / units_per_block,
         -v.y / units_per_block,
     )
+}
+
+fn to_model_normal(v: Vec3) -> Vec3 {
+    Vec3::new(v.x, v.z, -v.y).normalized()
 }
 
 #[cfg(test)]
