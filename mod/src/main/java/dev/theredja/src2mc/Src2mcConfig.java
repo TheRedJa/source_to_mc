@@ -7,6 +7,7 @@ import net.neoforged.neoforge.common.ModConfigSpec;
 public final class Src2mcConfig {
     static final ModConfigSpec SPEC;
     private static final ModConfigSpec.ConfigValue<String> BUNDLE_DIRECTORY;
+    private static final ModConfigSpec.ConfigValue<String> SCHEMATIC_DIRECTORY;
     private static final ModConfigSpec.BooleanValue VERBOSE_DIAGNOSTICS;
     private static final ModConfigSpec.LongValue TEXTURE_RAM_BUDGET;
     private static final ModConfigSpec.LongValue TEXTURE_VRAM_BUDGET;
@@ -16,6 +17,9 @@ public final class Src2mcConfig {
         BUNDLE_DIRECTORY = builder
             .comment("Game-directory-relative folder containing .src2mc campaign bundles")
             .define("bundleDirectory", "config/src2mc/bundles", Src2mcConfig::validRelativePath);
+        SCHEMATIC_DIRECTORY = builder
+            .comment("Game-directory-relative folder containing <mapId>.schem files for /src2mc place")
+            .define("schematicDirectory", "config/src2mc/schematics", Src2mcConfig::validRelativePath);
         VERBOSE_DIAGNOSTICS = builder
             .comment("Include per-bundle validation details in logs")
             .define("verboseDiagnostics", false);
@@ -35,6 +39,10 @@ public final class Src2mcConfig {
 
     static Path bundleDirectory() {
         return FMLPaths.GAMEDIR.get().resolve(BUNDLE_DIRECTORY.get()).normalize();
+    }
+
+    static Path schematicDirectory() {
+        return FMLPaths.GAMEDIR.get().resolve(SCHEMATIC_DIRECTORY.get()).normalize();
     }
 
     static boolean verboseDiagnostics() {

@@ -1,7 +1,11 @@
 package dev.theredja.src2mc;
 
+import static net.minecraft.commands.Commands.argument;
 import static net.minecraft.commands.Commands.literal;
 
+import com.mojang.brigadier.arguments.StringArgumentType;
+import java.nio.file.Path;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 
@@ -21,6 +25,10 @@ final class Src2mcCommands {
             .then(literal("reconcile")
                 .requires(source -> source.hasPermission(2))
                 .executes(context -> reconcile(context.getSource())))
+            .then(literal("place")
+                .requires(source -> source.hasPermission(2))
+                .then(argument("mapId", StringArgumentType.word())
+                    .executes(context -> place(context.getSource(), StringArgumentType.getString(context, "mapId")))))
             .then(literal("status").executes(context -> {
                 var generation = Src2mc.BUNDLES.active();
                 context.getSource().sendSuccess(
@@ -88,6 +96,60 @@ final class Src2mcCommands {
         source.sendSuccess(() -> Component.literal("src2mc: reconciled current chunk; anchors=" + counts.anchors()
             + ", healed=" + counts.healed() + ", diagnostics=" + counts.failures()), false);
         return counts.failures() == 0 ? 1 : 0;
+    }
+
+    private static int place(net.minecraft.commands.CommandSourceStack source, String mapId) {
+        var generation = Src2mc.BUNDLES.active();
+        var matches = generation.bundles().stream()
+            .flatMap(bundle -> bundle.maps().stream()
+                .filter(map -> map.mapId().equals(mapId))
+                .map(map -> new dev.theredja.src2mc.bundle.BundleGeneration.LocatedMap(bundle, map)))
+            .toList();
+        if (matches.isEmpty()) {
+            source.sendFailure(Component.literal("src2mc: no loaded bundle has map `" + mapId + "`"));
+            return 0;
+        }
+        if (matches.size() > 1) {
+            source.sendFailure(Component.literal("src2mc: map `" + mapId + "` is ambiguous across "
+                + matches.size() + " bundles; rename one campaign to disambiguate"));
+            return 0;
+        }
+        var located = matches.get(0);
+        Path schematicPath = Src2mcConfig.schematicDirectory().resolve(mapId + ".schem");
+        dev.theredja.src2mc.world.SchematicReader.Result schematic;
+        try {
+            schematic = dev.theredja.src2mc.world.SchematicReader.read(schematicPath);
+        } catch (java.io.IOException exception) {
+            Src2mc.LOGGER.error("src2mc place failed to read {}", schematicPath, exception);
+            source.sendFailure(Component.literal("src2mc: failed to read " + schematicPath + ": " + exception.getMessage()));
+            return 0;
+        }
+        int[] anchorCell = located.map().anchorCell();
+        BlockPos anchorWorld = BlockPos.containing(source.getPosition());
+        BlockPos translation = anchorWorld.subtract(new BlockPos(anchorCell[0], anchorCell[1], anchorCell[2]));
+
+        var level = source.getLevel();
+        int[] offset = schematic.offset();
+        int minWorldY = Integer.MAX_VALUE, maxWorldY = Integer.MIN_VALUE;
+        for (var cell : schematic.cells()) {
+            int worldY = translation.getY() + offset[1] + cell.y();
+            minWorldY = Math.min(minWorldY, worldY);
+            maxWorldY = Math.max(maxWorldY, worldY);
+        }
+        if (!schematic.cells().isEmpty()
+            && (minWorldY < level.getMinBuildHeight() || maxWorldY > level.getMaxBuildHeight() - 1)) {
+            source.sendFailure(Component.literal("src2mc: " + mapId + " needs y=" + minWorldY + ".." + maxWorldY
+                + " from this position, but this world's build height is only " + level.getMinBuildHeight() + ".."
+                + level.getMaxBuildHeight() + ". Placement would silently drop blocks/props outside that range. "
+                + "Install a taller dimension_type (custom height datapack) for this world before placing, "
+                + "or place from a lower anchor position."));
+            return 0;
+        }
+
+        dev.theredja.src2mc.world.WorldPlacer.enqueue(level, source, mapId, translation, schematic);
+        source.sendSuccess(() -> Component.literal("src2mc: placing " + mapId + " ("
+            + schematic.cells().size() + " cells) at " + anchorWorld.toShortString()), true);
+        return 1;
     }
 
     private static void warnForTallMaps(net.minecraft.commands.CommandSourceStack source,

@@ -25,6 +25,7 @@ public final class Src2mc {
         NeoForge.EVENT_BUS.addListener(Src2mcCommands::register);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.world.WorldReconciler::onChunkLoad);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.network.PlacementNetwork::onLogin);
+        NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.world.WorldPlacer::onServerTick);
         LOGGER.info("src2mc initialized; no campaign generation is loaded");
     }
 
