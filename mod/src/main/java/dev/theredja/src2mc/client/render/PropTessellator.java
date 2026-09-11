@@ -11,6 +11,8 @@ import java.util.List;
 final class PropTessellator {
     private static final double EPSILON = 1.0e-8;
     private static final int MAX_POLYGONS_PER_TRIANGLE = 4096;
+    /** Repeat-index clamp; far above any real tiling, far below where long arithmetic overflows. */
+    private static final long MAX_REPEAT_INDEX = 1L << 40;
 
     private PropTessellator() {}
 
@@ -29,12 +31,16 @@ final class PropTessellator {
             }
             double minU = min(triangle, 3), maxU = max(triangle, 3);
             double minV = min(triangle, 4), maxV = max(triangle, 4);
-            int repeatUMin = floorDiv(minU, texture.width()), repeatUMax = floorDiv(maxU - EPSILON, texture.width());
-            int repeatVMin = floorDiv(minV, texture.height()), repeatVMax = floorDiv(maxV - EPSILON, texture.height());
-            long candidates = (long) (repeatUMax - repeatUMin + 1) * (repeatVMax - repeatVMin + 1) * texture.regions().size();
-            if (candidates > MAX_POLYGONS_PER_TRIANGLE) continue;
-            for (int repeatV = repeatVMin; repeatV <= repeatVMax; repeatV++) {
-                for (int repeatU = repeatUMin; repeatU <= repeatUMax; repeatU++) {
+            long repeatUMin = floorDiv(minU, texture.width()), repeatUMax = floorDiv(maxU - EPSILON, texture.width());
+            long repeatVMin = floorDiv(minV, texture.height()), repeatVMax = floorDiv(maxV - EPSILON, texture.height());
+            long spanU = repeatUMax - repeatUMin + 1, spanV = repeatVMax - repeatVMin + 1;
+            // Checked before multiplying: a single .mdl with a corrupt UV (observed: v = 4.6e11 on
+            // props_elevator/construction_elevator_mast_64) spans billions of texture repeats, and
+            // an int product of the two spans wraps negative and slips straight past this limit.
+            if (spanU > MAX_POLYGONS_PER_TRIANGLE || spanV > MAX_POLYGONS_PER_TRIANGLE) continue;
+            if (spanU * spanV * texture.regions().size() > MAX_POLYGONS_PER_TRIANGLE) continue;
+            for (long repeatV = repeatVMin; repeatV <= repeatVMax; repeatV++) {
+                for (long repeatU = repeatUMin; repeatU <= repeatUMax; repeatU++) {
                     for (AtlasIndex.Region region : texture.regions()) {
                         int[] source = region.source(), allocation = region.allocation();
                         double left = (double) repeatU * texture.width() + source[0];
@@ -112,7 +118,16 @@ final class PropTessellator {
     private static double value(Vertex v, int axis) { return switch (axis) { case 0 -> v.x(); case 1 -> v.y(); case 2 -> v.z(); case 3 -> v.u(); case 4 -> v.v(); default -> throw new IllegalArgumentException("axis"); }; }
     private static double min(List<Vertex> vertices, int axis) { double result = Double.POSITIVE_INFINITY; for (Vertex vertex : vertices) result = Math.min(result, value(vertex, axis)); return result; }
     private static double max(List<Vertex> vertices, int axis) { double result = Double.NEGATIVE_INFINITY; for (Vertex vertex : vertices) result = Math.max(result, value(vertex, axis)); return result; }
-    private static int floorDiv(double value, int divisor) { return (int) Math.floor(value / divisor); }
+    /**
+     * Floor division clamped well inside {@code long}, so that a repeat index derived from a
+     * corrupt UV cannot saturate and make the span arithmetic above wrap. Non-finite input
+     * (including NaN) clamps low, which produces an oversized span and drops the triangle.
+     */
+    private static long floorDiv(double value, int divisor) {
+        double result = Math.floor(value / divisor);
+        if (!Double.isFinite(result)) return result > 0 ? MAX_REPEAT_INDEX : -MAX_REPEAT_INDEX;
+        return (long) Math.max(-MAX_REPEAT_INDEX, Math.min(MAX_REPEAT_INDEX, result));
+    }
 
     record Triangle(int page, Vertex a, Vertex b, Vertex c) {}
     record Vertex(double x, double y, double z, double nx, double ny, double nz, double u, double v) {

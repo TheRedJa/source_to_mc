@@ -15,7 +15,6 @@ import dev.theredja.src2mc.bundle.BundleMap;
 import dev.theredja.src2mc.bundle.BundleMaterial;
 import dev.theredja.src2mc.bundle.BundleModel;
 import dev.theredja.src2mc.bundle.BundleProp;
-import dev.theredja.src2mc.bundle.PropVisibility;
 import dev.theredja.src2mc.bundle.RuntimeMesh;
 import dev.theredja.src2mc.network.PlacementNetwork;
 import dev.theredja.src2mc.world.MapPlacement;
@@ -31,7 +30,6 @@ import java.util.Set;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.GameRenderer;
-import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
@@ -83,13 +81,8 @@ public final class PropRenderer {
     private static boolean renderingEnabled = true;
     private static final PropRenderPerf PERF = new PropRenderPerf();
     private static final OcclusionCuller<AggregateKey> OCCLUSION = new OcclusionCuller<>();
-    private static PropVisibility pvsTable;
-    private static MapPlacement pvsPlacement;
-    private static byte[] pvsRow;
-    private static int pvsCluster = -1;
-    private static int pvsCameraX = Integer.MIN_VALUE;
-    private static int pvsCameraY = Integer.MIN_VALUE;
-    private static int pvsCameraZ = Integer.MIN_VALUE;
+    private static long shadowPassCallsSinceMainPass;
+    private static long shadowPassCallsLastFrame;
 
     private PropRenderer() {}
 
@@ -139,7 +132,8 @@ public final class PropRenderer {
         lines.add(statusLine("Status", renderingEnabled ? "ON" : "OFF", renderingEnabled ? ChatFormatting.GREEN : ChatFormatting.RED)
             .append(detail("  Roots " + active + "/" + ROOTS.size() + "  Batches " + AGGREGATES.size() + "  Built " + BUILT_PROPS.size())));
         lines.add(statusLine("Render (last frame)", last.drawCalls() + " draws  " + formatMillions(last.triangles()) + " triangles  " + formatMs(last.renderMs()) + " ms", ChatFormatting.YELLOW)
-            .append(detail("  PVS " + (pvsRow != null ? "cluster " + pvsCluster + ", " + last.pvsRejected() + " rejected" : "off"))));
+            .append(detail("  PVS " + (CameraVisibility.row() != null ? "cluster " + CameraVisibility.cluster() + ", " + last.pvsRejected() + " rejected" : "off")
+                + "  shaderpack=" + (IrisCompat.shaderPackInUse() ? "on" : "off") + " shadow-pass/frame=" + shadowPassCallsLastFrame)));
         String occlusionState = !occlusion.enabled() ? "OFF" : occlusion.supported() ? "ON" : "UNSUPPORTED";
         ChatFormatting occlusionColor = !occlusion.enabled() ? ChatFormatting.RED : occlusion.supported() ? ChatFormatting.GREEN : ChatFormatting.RED;
         lines.add(statusLine("GPU occlusion", occlusionState, occlusionColor)
@@ -157,11 +151,28 @@ public final class PropRenderer {
 
     @SubscribeEvent(priority = EventPriority.LOWEST)
     public static void render(RenderLevelStageEvent event) {
-        if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_SOLID_BLOCKS) renderOpaque(event);
-        else if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES) renderTranslucent(event);
+        boolean shadowPass = IrisCompat.renderingShadowPass();
+        if (event.getStage() == MapSurfaceRenderer.opaqueStage()) {
+            if (shadowPass) drawShadowPass(event, false); else renderOpaque(event);
+        } else if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES) {
+            // Translucent geometry is skipped in the shadow pass; it would cast an opaque shadow.
+            if (!shadowPass) renderTranslucent(event);
+        }
+    }
+
+    /** Shadow pass: draw only, from already-built aggregates. No root scan, prop build, aggregate
+     * rebuild, {@code frame} advance, or {@code LAST_VISIBLE} stamping — all of that assumes a
+     * player camera driving residency, which the sun's camera is not. */
+    private static void drawShadowPass(RenderLevelStageEvent event, boolean translucent) {
+        shadowPassCallsSinceMainPass++;
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null || generationSequence < 0) return;
+        if (renderingEnabled) draw(event, Src2mc.bundles().active(), translucent, true);
     }
 
     private static void renderOpaque(RenderLevelStageEvent event) {
+        shadowPassCallsLastFrame = shadowPassCallsSinceMainPass;
+        shadowPassCallsSinceMainPass = 0;
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null) { clear(); return; }
         BundleGeneration generation = Src2mc.bundles().active();
@@ -185,38 +196,13 @@ public final class PropRenderer {
         PERF.add(PropRenderPerf.M_BUILD_NANOS, System.nanoTime() - buildStart);
         discardExpiredMeshes();
         rebuildDirtyAggregates(generation, minecraft.gameRenderer.getMainCamera().getPosition(), tessCache);
-        resolveCameraPvs(generation, minecraft);
+        CameraVisibility.resolve(generation, minecraft);
         OCCLUSION.beginFrame(frame);
-        if (renderingEnabled) draw(event, generation, false);
-    }
-
-    /**
-     * Resolves the camera's visibility cluster once per camera block move.
-     * Every unresolved case — camera outside any map placement, no visibility
-     * table, solid leaf, or unknown cluster — leaves the row null and renders
-     * without PVS rejection.
-     */
-    private static void resolveCameraPvs(BundleGeneration generation, Minecraft minecraft) {
-        var camera = minecraft.gameRenderer.getMainCamera().getPosition();
-        BlockPos cameraBlock = BlockPos.containing(camera.x, camera.y, camera.z);
-        if (cameraBlock.getX() == pvsCameraX && cameraBlock.getY() == pvsCameraY && cameraBlock.getZ() == pvsCameraZ) return;
-        pvsCameraX = cameraBlock.getX(); pvsCameraY = cameraBlock.getY(); pvsCameraZ = cameraBlock.getZ();
-        pvsTable = null; pvsPlacement = null; pvsRow = null; pvsCluster = -1;
-        var placement = PlacementNetwork.clientIndex(minecraft.level.dimension().location()).at(cameraBlock).orElse(null);
-        if (placement == null) return;
-        var map = generation.findMap(placement.campaignId(), placement.mapId()).orElse(null);
-        PropVisibility table = map == null ? null : map.pvs();
-        if (table == null) return;
-        BlockPos local = placement.toLocal(cameraBlock);
-        int cluster = table.clusterAt(local.getX(), local.getY(), local.getZ());
-        if (cluster < 0) return;
-        byte[] row = table.row(cluster);
-        if (row == null) return;
-        pvsTable = table; pvsPlacement = placement; pvsRow = row; pvsCluster = cluster;
+        if (renderingEnabled) draw(event, generation, false, false);
     }
 
     private static void renderTranslucent(RenderLevelStageEvent event) {
-        if (Minecraft.getInstance().level != null && generationSequence >= 0 && renderingEnabled) draw(event, Src2mc.bundles().active(), true);
+        if (Minecraft.getInstance().level != null && generationSequence >= 0 && renderingEnabled) draw(event, Src2mc.bundles().active(), true, false);
     }
 
     /** @return the number of roots inspected, or -1 when this frame skipped the periodic recheck. */
@@ -434,9 +420,15 @@ public final class PropRenderer {
     private static Mesh upload(BundleManifest bundle, AtlasIndex atlas, MapPlacement placement, int sectionX, int sectionY, int sectionZ, List<PropTessellator.Triangle> triangles) {
         int baseX = sectionX << 4, baseY = sectionY << 4, baseZ = sectionZ << 4;
         int capacity = (int) Math.min(Integer.MAX_VALUE, Math.max(4096L, (long) triangles.size() * 3 * 36));
+        Map<Long, Integer> lightCache = new HashMap<>();
         try (var bytes = new ByteBufferBuilder(capacity)) {
             var builder = new BufferBuilder(bytes, VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.NEW_ENTITY);
-            for (PropTessellator.Triangle triangle : triangles) { vertex(builder, triangle.a(), baseX, baseY, baseZ); vertex(builder, triangle.b(), baseX, baseY, baseZ); vertex(builder, triangle.c(), baseX, baseY, baseZ); }
+            for (PropTessellator.Triangle triangle : triangles) {
+                int light = sampleTriangleLight(placement, triangle, lightCache);
+                vertex(builder, triangle.a(), baseX, baseY, baseZ, light);
+                vertex(builder, triangle.b(), baseX, baseY, baseZ, light);
+                vertex(builder, triangle.c(), baseX, baseY, baseZ, light);
+            }
             try (var data = builder.buildOrThrow()) {
                 var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
                 buffer.bind(); buffer.upload(data); VertexBuffer.unbind();
@@ -452,13 +444,40 @@ public final class PropRenderer {
         }
     }
 
-    private static void vertex(BufferBuilder builder, PropTessellator.Vertex vertex, int baseX, int baseY, int baseZ) {
+    private static void vertex(BufferBuilder builder, PropTessellator.Vertex vertex, int baseX, int baseY, int baseZ, int light) {
         builder.addVertex((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ))
             .setColor(255, 255, 255, 255).setUv((float) vertex.u(), (float) vertex.v()).setOverlay(OverlayTexture.NO_OVERLAY)
-            .setLight(LightTexture.FULL_BRIGHT).setNormal((float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz());
+            .setLight(light).setNormal((float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz());
     }
 
-    private static void draw(RenderLevelStageEvent event, BundleGeneration generation, boolean translucent) {
+    /** One sample per triangle, at its centroid using the averaged (renormalized) vertex normal;
+     * tessCache stays lighting-independent, so only this upload step changes on a relight. */
+    private static int sampleTriangleLight(MapPlacement placement, PropTessellator.Triangle triangle, Map<Long, Integer> cache) {
+        PropTessellator.Vertex a = triangle.a(), b = triangle.b(), c = triangle.c();
+        double cx = (a.x() + b.x() + c.x()) / 3.0, cy = (a.y() + b.y() + c.y()) / 3.0, cz = (a.z() + b.z() + c.z()) / 3.0;
+        float nx = (float) (a.nx() + b.nx() + c.nx()), ny = (float) (a.ny() + b.ny() + c.ny()), nz = (float) (a.nz() + b.nz() + c.nz());
+        float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (length > 1.0e-6f) { nx /= length; ny /= length; nz /= length; } else { nx = 0; ny = 1; nz = 0; }
+        double worldX = placement.translation().getX() + cx, worldY = placement.translation().getY() + cy, worldZ = placement.translation().getZ() + cz;
+        return LightSampler.sample(level, worldX, worldY, worldZ, nx, ny, nz, cache);
+    }
+
+    /** Marks aggregates for the section overlapping {@code worldSection} and its six face
+     * neighbours dirty; {@link #rebuildDirtyAggregates} drains them under its own budget. A
+     * triangle samples light one block along its normal, so a diagonal section can never be
+     * affected and rebuilding those 20 extra sections was pure cost. */
+    static void invalidateLight(MapPlacement placement, SectionPos worldSection) {
+        BlockPos local = placement.toLocal(new BlockPos(SectionPos.sectionToBlockCoord(worldSection.x()),
+            SectionPos.sectionToBlockCoord(worldSection.y()), SectionPos.sectionToBlockCoord(worldSection.z())));
+        int sx = Math.floorDiv(local.getX(), 16), sy = Math.floorDiv(local.getY(), 16), sz = Math.floorDiv(local.getZ(), 16);
+        for (AggregateKey key : AGGREGATES.keys()) {
+            if (!key.placement().equals(placement)) continue;
+            int dx = Math.abs(key.sectionX() - sx), dy = Math.abs(key.sectionY() - sy), dz = Math.abs(key.sectionZ() - sz);
+            if (dx + dy + dz <= 1) AGGREGATES.markDirty(key);
+        }
+    }
+
+    private static void draw(RenderLevelStageEvent event, BundleGeneration generation, boolean translucent, boolean shadowPass) {
         long started = System.nanoTime();
         var camera = event.getCamera().getPosition();
         List<Map.Entry<AggregateKey, Mesh>> visible = new ArrayList<>();
@@ -467,17 +486,23 @@ public final class PropRenderer {
         for (AggregateKey key : AGGREGATES.keys()) {
             Mesh mesh = AGGREGATES.value(key);
             if (mesh == null || (key.renderClass() == BundleMaterial.RenderClass.TRANSLUCENT) != translucent) continue;
-            if (pvsRow != null && key.placement().equals(pvsPlacement)) {
-                short[] clusters = pvsTable.sectionClusters(key.sectionX(), key.sectionY(), key.sectionZ());
-                if (!pvsTable.visible(pvsRow, clusters)) { PERF.add(PropRenderPerf.M_PVS_REJECTED, 1); continue; }
+            // PVS answers "can the player's BSP leaf see this", which is the wrong question for a
+            // shadow caster: geometry the player cannot see still casts shadows the player can.
+            if (!shadowPass && MapSurfaceRenderer.pvsCulling() && CameraVisibility.row() != null && key.placement().equals(CameraVisibility.placement())) {
+                short[] clusters = CameraVisibility.table().sectionClusters(key.sectionX(), key.sectionY(), key.sectionZ());
+                if (!CameraVisibility.table().visible(CameraVisibility.row(), clusters)) { PERF.add(PropRenderPerf.M_PVS_REJECTED, 1); continue; }
             }
             PERF.add(PropRenderPerf.M_FRUSTUM_TESTS, 1);
-            if (!event.getFrustum().isVisible(mesh.bounds)) continue;
-            queryCandidates.add(new OcclusionCuller.Candidate<>(key, mesh.bounds, mesh.triangles));
-            if (OCCLUSION.shouldCull(key, mesh.bounds, view, mesh.triangles)) continue;
+            if (shadowPass) {
+                if (!MapSurfaceRenderer.withinShadowDistance(mesh.bounds, camera)) continue;
+            } else if (MapSurfaceRenderer.frustumCulling() && !event.getFrustum().isVisible(mesh.bounds)) continue;
+            if (!shadowPass) {
+                queryCandidates.add(new OcclusionCuller.Candidate<>(key, mesh.bounds, mesh.triangles));
+                if (OCCLUSION.shouldCull(key, mesh.bounds, view, mesh.triangles)) continue;
+            }
             visible.add(Map.entry(key, mesh));
         }
-        OCCLUSION.issue(queryCandidates, view, event.getModelViewMatrix(), event.getProjectionMatrix());
+        if (!shadowPass) OCCLUSION.issue(queryCandidates, view, event.getModelViewMatrix(), event.getProjectionMatrix());
         if (translucent) visible.sort(Comparator.<Map.Entry<AggregateKey, Mesh>>comparingDouble(item -> -distanceSquared(item.getValue().bounds, camera)));
         else visible.sort(Comparator.<Map.Entry<AggregateKey, Mesh>>comparingInt(item -> item.getKey().renderClass().ordinal())
             .thenComparingInt(item -> item.getKey().page()));
@@ -552,9 +577,9 @@ public final class PropRenderer {
         AGGREGATES.values().forEach(Mesh::close); AGGREGATES.clear();
         PROP_CONTRIBUTIONS.clear(); ROOT_DATA.clear();
         ROOTS.clear(); ROOT_STATUS.clear(); BUILT_PROPS.clear(); LAST_VISIBLE.clear(); PERF.reset(); OCCLUSION.close();
-        pvsTable = null; pvsPlacement = null; pvsRow = null; pvsCluster = -1;
-        pvsCameraX = Integer.MIN_VALUE; pvsCameraY = Integer.MIN_VALUE; pvsCameraZ = Integer.MIN_VALUE;
+        CameraVisibility.reset();
         level = null; generationSequence = -1; placementSnapshot = List.of(); frame = 0; nearbyProps = 0; nearbyUnbuilt = 0; buildsLastFrame = 0;
+        shadowPassCallsSinceMainPass = 0; shadowPassCallsLastFrame = 0;
     }
 
     private record PropKey(MapPlacement placement, String stableId) {}

@@ -133,6 +133,20 @@ pub fn decode_tiles(
     Ok(tiles)
 }
 
+/// Force every texel opaque.
+///
+/// A Source material that declares neither `$alphatest` nor `$translucent` is
+/// opaque no matter what its base texture's alpha channel holds — and it
+/// commonly holds a specular or envmap mask, not coverage. Vanilla's solid
+/// shader ignores alpha, so this went unnoticed, but shaderpacks alpha-test
+/// what they draw and punched the mask's dark texels out of both the gbuffer
+/// and the shadow map: fixed holes in walls, and sunlight through sealed rooms.
+pub fn force_opaque(image: &mut RgbaImage) {
+    for pixel in image.pixels_mut() {
+        pixel.0[3] = 255;
+    }
+}
+
 /// Snap alpha to fully on or off, keeping roughly `coverage` of the image
 /// solid. Searching for the cutoff rather than fixing one keeps a fine grate
 /// from closing up and a sparse one from vanishing.

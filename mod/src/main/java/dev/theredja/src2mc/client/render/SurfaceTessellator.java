@@ -9,6 +9,9 @@ import java.util.List;
 /** Converts one canonical micro-face into page-contained atlas triangles. */
 final class SurfaceTessellator {
     private static final double EPSILON = 1.0e-9;
+    private static final int MAX_POLYGONS_PER_FACE = 4096;
+    /** Repeat-index clamp; far above any real tiling, far below where long arithmetic overflows. */
+    private static final long MAX_REPEAT_INDEX = 1L << 40;
 
     private SurfaceTessellator() {}
 
@@ -29,11 +32,16 @@ final class SurfaceTessellator {
         }
         double minU = min(corners, true), maxU = max(corners, true);
         double minV = min(corners, false), maxV = max(corners, false);
-        int repeatUMin = floorDiv(minU, texture.width()), repeatUMax = floorDiv(maxU - EPSILON, texture.width());
-        int repeatVMin = floorDiv(minV, texture.height()), repeatVMax = floorDiv(maxV - EPSILON, texture.height());
+        long repeatUMin = floorDiv(minU, texture.width()), repeatUMax = floorDiv(maxU - EPSILON, texture.width());
+        long repeatVMin = floorDiv(minV, texture.height()), repeatVMax = floorDiv(maxV - EPSILON, texture.height());
+        long spanU = repeatUMax - repeatUMin + 1, spanV = repeatVMax - repeatVMin + 1;
+        // A face whose UV transform tiles absurdly (or is non-finite) would otherwise expand into
+        // billions of clip iterations on the render thread. Real map faces stay in the low tens.
+        if (spanU > MAX_POLYGONS_PER_FACE || spanV > MAX_POLYGONS_PER_FACE
+            || spanU * spanV * texture.regions().size() > MAX_POLYGONS_PER_FACE) return List.of();
         List<Triangle> result = new ArrayList<>();
-        for (int repeatV = repeatVMin; repeatV <= repeatVMax; repeatV++) {
-            for (int repeatU = repeatUMin; repeatU <= repeatUMax; repeatU++) {
+        for (long repeatV = repeatVMin; repeatV <= repeatVMax; repeatV++) {
+            for (long repeatU = repeatUMin; repeatU <= repeatUMax; repeatU++) {
                 for (AtlasIndex.Region region : texture.regions()) {
                     int[] source = region.source(), allocation = region.allocation();
                     double left = (double) repeatU * texture.width() + source[0];
@@ -104,7 +112,12 @@ final class SurfaceTessellator {
 
     private static double min(Vertex[] vertices, boolean u) { double value = Double.POSITIVE_INFINITY; for (Vertex v : vertices) value = Math.min(value, u ? v.u : v.v); return value; }
     private static double max(Vertex[] vertices, boolean u) { double value = Double.NEGATIVE_INFINITY; for (Vertex v : vertices) value = Math.max(value, u ? v.u : v.v); return value; }
-    private static int floorDiv(double value, int divisor) { return (int) Math.floor(value / divisor); }
+    /** Clamped floor division; see {@link PropTessellator} for why saturation here is unsafe. */
+    private static long floorDiv(double value, int divisor) {
+        double result = Math.floor(value / divisor);
+        if (!Double.isFinite(result)) return result > 0 ? MAX_REPEAT_INDEX : -MAX_REPEAT_INDEX;
+        return (long) Math.max(-MAX_REPEAT_INDEX, Math.min(MAX_REPEAT_INDEX, result));
+    }
 
     record Triangle(int page, Vertex a, Vertex b, Vertex c) {}
     record Vertex(double x, double y, double z, double u, double v) {

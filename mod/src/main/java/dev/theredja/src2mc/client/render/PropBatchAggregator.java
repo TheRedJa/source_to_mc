@@ -38,6 +38,11 @@ final class PropBatchAggregator<K, P, M> {
         return dirty.add(key);
     }
 
+    /** Marks an existing aggregate dirty without changing its contributors, e.g. on a relight. */
+    void markDirty(K key) {
+        if (entries.containsKey(key)) dirty.add(key);
+    }
+
     Set<P> contributors(K key) {
         Entry<P, M> entry = entries.get(key);
         return entry == null ? Set.of() : entry.contributors;
