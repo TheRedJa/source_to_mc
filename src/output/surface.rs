@@ -142,7 +142,7 @@ fn uv_key(uv: BlockTexCoord) -> Result<UvKey> {
     Ok(UvKey(bits))
 }
 
-fn section_of(cell: IVec3) -> IVec3 {
+pub(crate) fn section_of(cell: IVec3) -> IVec3 {
     [cell[0] >> 4, cell[1] >> 4, cell[2] >> 4]
 }
 

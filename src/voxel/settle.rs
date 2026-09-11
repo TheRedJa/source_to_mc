@@ -130,6 +130,39 @@ fn columns(bounds: Aabb) -> Vec<(i32, i32)> {
     out
 }
 
+/// A prop's base is treated as resting on another prop's top when the two are
+/// within this many blocks of touching. Loose enough to absorb Source's own
+/// placement slop (a mapper's crate is rarely exactly flush with its pallet)
+/// and the sub-block corrections applied elsewhere, tight enough that two
+/// props merely near each other in a cluttered room are not mistaken for a
+/// stack.
+pub const SUPPORT_CONTACT_EPSILON: f64 = 0.1;
+
+/// Whether `dependent` rests on `support`'s top surface closely enough that it
+/// should move exactly as `support` does, rather than being settled
+/// independently against the world grid.
+///
+/// The grid only ever sees world geometry — props are deliberately left out of
+/// it — so a crate on a pallet each settle against the floor on their own and
+/// come apart by whatever the two floors' roundings differ by. This is the
+/// prop-to-prop relationship the grid cannot see: when a prop's base sits
+/// right where the thing under it stops, it is not standing on the floor, it
+/// is standing on that other prop, and it should inherit its shift exactly
+/// rather than reinvent a very slightly different one of its own.
+///
+/// Returns the horizontal overlap area between the two footprints when the
+/// contact holds, so a caller choosing between several candidate supports can
+/// prefer whichever one it is actually resting on the most of.
+pub fn resting_on(dependent: Aabb, support: Aabb) -> Option<f64> {
+    if (dependent.min.y - support.max.y).abs() > SUPPORT_CONTACT_EPSILON {
+        return None;
+    }
+    let dx = (dependent.max.x.min(support.max.x) - dependent.min.x.max(support.min.x)).max(0.0);
+    let dz = (dependent.max.z.min(support.max.z) - dependent.min.z.max(support.min.z)).max(0.0);
+    let overlap = dx * dz;
+    (overlap > 0.0).then_some(overlap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +312,26 @@ mod tests {
     fn settling_can_be_turned_off_by_allowing_no_shift() {
         let (grid, _) = floor();
         assert_eq!(offset(&grid, crate_at(0.4), 0.0), 0.0);
+    }
+
+    #[test]
+    fn a_crate_flush_with_a_pallets_top_is_resting_on_it() {
+        let pallet = Aabb::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 0.2, 2.0));
+        let crate_box = Aabb::new(Vec3::new(0.5, 0.2, 0.5), Vec3::new(1.5, 1.2, 1.5));
+        assert!(resting_on(crate_box, pallet).is_some());
+    }
+
+    #[test]
+    fn a_prop_far_above_another_is_not_resting_on_it() {
+        let pallet = Aabb::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 0.2, 2.0));
+        let floating = Aabb::new(Vec3::new(0.5, 5.0, 0.5), Vec3::new(1.5, 6.0, 1.5));
+        assert!(resting_on(floating, pallet).is_none());
+    }
+
+    #[test]
+    fn a_prop_beside_but_not_over_another_is_not_resting_on_it() {
+        let pallet = Aabb::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 0.2, 2.0));
+        let beside = Aabb::new(Vec3::new(10.0, 0.2, 10.0), Vec3::new(11.0, 1.2, 11.0));
+        assert!(resting_on(beside, pallet).is_none());
     }
 }

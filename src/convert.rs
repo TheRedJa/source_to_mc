@@ -32,6 +32,13 @@ pub struct Conversion {
     /// Props drawn as their real mesh, as the display entities that place
     /// them. Empty unless `[props] models` is on.
     pub props: Vec<crate::output::display::Placement>,
+    /// Every voxelized brush, kept in continuous block space so a prop's
+    /// overlap with the grid can be tested against the map's real geometry
+    /// instead of only the grid's rounded approximation of it.
+    pub solids: Vec<BlockSolid>,
+    /// Cell to solids index for `solids`, so a prop touching one cell does
+    /// not have to scan every brush in the map.
+    pub solid_index: BTreeMap<IVec3, Vec<u32>>,
 }
 
 /// One brush entity converted on its own.
@@ -885,6 +892,40 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let skipped = std::sync::atomic::AtomicUsize::new(0);
 
     let origins = model_origins(&entity_models);
+
+    // Continuous brush geometry, retained so a prop's overlap with the grid
+    // can be told apart from overlap that was already in the source map.
+    let block_solids: Vec<BlockSolid> = solids
+        .iter()
+        .map(|solid| {
+            let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
+            to_block_solid(solid, &transform, origin)
+        })
+        .collect();
+    let mut solid_index: BTreeMap<IVec3, Vec<u32>> = BTreeMap::new();
+    for (index, solid) in block_solids.iter().enumerate() {
+        if solid.bounds.is_empty() {
+            continue;
+        }
+        let min = [
+            solid.bounds.min.x.floor() as i32,
+            solid.bounds.min.y.floor() as i32,
+            solid.bounds.min.z.floor() as i32,
+        ];
+        let max = [
+            (solid.bounds.max.x - 1.0e-6).floor() as i32,
+            (solid.bounds.max.y - 1.0e-6).floor() as i32,
+            (solid.bounds.max.z - 1.0e-6).floor() as i32,
+        ];
+        for x in min[0]..=max[0] {
+            for y in min[1]..=max[1] {
+                for z in min[2]..=max[2] {
+                    solid_index.entry([x, y, z]).or_default().push(index as u32);
+                }
+            }
+        }
+    }
+
     let tiles = tile_sets(map, &materials, &resolver, &assets.pack, &palette);
     let (grid, mut masks, mut face_candidates) = voxelize_solids(
         &solids, map, config, &resolver, &transform, &origins, &tiles, &palette, &skipped,
@@ -1384,6 +1425,8 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         separate,
         props,
         pack: assets.pack,
+        solids: block_solids,
+        solid_index,
     })
 }
 

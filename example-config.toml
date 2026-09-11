@@ -184,6 +184,20 @@ settle = true
 # grid's own rounding, so a block covers it; further than that is a prop over a
 # hole the conversion did not build, and moving it there would invent a position.
 settle_max = 1.0
+# Nudge a prop off converted map geometry it did not intersect in the source
+# map. Voxelizing a wall can round its face by up to a block, and a prop
+# flush against the real surface can read as embedded in the voxel one; the
+# correction measures the true brush plane and moves the prop only as far as
+# that rounding, along the collision normal.
+snap = true
+# How far the sub-block correction above may move a prop, in blocks. Hard-capped
+# at one block regardless of this setting, since the rounding it undoes cannot
+# exceed a block by construction.
+snap_max = 1.0
+# Record up to this many individual per-prop snap offsets in diagnostics.json,
+# beyond the existing summary counts. Off by default so a map with thousands of
+# props does not carry thousands of extra diagnostic entries.
+snap_diagnostics_limit = 0
 # Draw props as blocks with their rotation baked into the mesh, rather than as
 # display entities. An entity is redrawn through the entity renderer every
 # frame and is never baked into a chunk's vertex buffer, so a few hundred props
