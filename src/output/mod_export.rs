@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 
 pub const UNITS_PER_BLOCK: f64 = 32.0;
 
+/// Source ordinals for brush meshes start here, well clear of any static prop
+/// index, so the two cannot collide in a prop's stable identity.
+const BRUSH_MESH_ORDINAL_BASE: u64 = 1 << 40;
+
 pub struct ModelAsset {
     pub source_model: String,
     pub bytes: Vec<u8>,
@@ -51,6 +55,9 @@ pub struct MapExport {
     pub props: Vec<Prop>,
     /// Encoded prop visibility table; absent when the map has no usable PVS.
     pub pvs: Option<Vec<u8>>,
+    /// Encoded light-occlusion mask; absent when no brush is drawn as geometry
+    /// or the map was exported with the mask turned off.
+    pub occlusion: Option<Vec<u8>>,
     pub diagnostics: metadata::Diagnostics,
 }
 
@@ -125,8 +132,27 @@ pub fn from_conversion(
             }
         }
     }
-    let (mut materials, textures, face_material_ids, prop_bucket_ids) =
-        extract_materials(map, config, &prop_texture_spans, &conversion.surfaces);
+    let mut brush_texture_spans = BTreeMap::<String, [f64; 2]>::new();
+    for mesh in &conversion.brush_meshes {
+        for part in &mesh.parts {
+            if !part.blocks_per_repeat.iter().all(|v| v.is_finite() && *v > 0.0) {
+                continue;
+            }
+            let entry = brush_texture_spans
+                .entry(part.material.clone())
+                .or_insert([0.0; 2]);
+            for (axis, blocks) in entry.iter_mut().enumerate() {
+                *blocks = blocks.max(part.blocks_per_repeat[axis]);
+            }
+        }
+    }
+    let (mut materials, textures, face_material_ids, prop_bucket_ids) = extract_materials(
+        map,
+        config,
+        &prop_texture_spans,
+        &brush_texture_spans,
+        &conversion.surfaces,
+    );
     let faces = conversion
         .surfaces
         .iter()
@@ -391,6 +417,117 @@ pub fn from_conversion(
             material_ids: slots.clone(),
         });
     }
+
+    // Brushes too thin to voxelize honestly are drawn exactly the way a prop
+    // is: real geometry at an exact origin, filed under a free cell nearby. A
+    // 4-unit gusset plate keeps its 4 units instead of being inflated into a
+    // full block wall that seals the ceiling truss it belongs to.
+    let mut brush_meshes_placed = 0usize;
+    let mut brush_meshes_unanchored = 0usize;
+    for mesh in &conversion.brush_meshes {
+        let source_model = format!("*brush/{}", mesh.brush_index);
+        let (brush_mesh, slots) = crate::output::mesh::from_brush_mesh(mesh)
+            .with_context(|| format!("brush {} could not be drawn as a mesh", mesh.brush_index))?;
+        let slot_ids = slots
+            .into_iter()
+            .map(|name| {
+                if let Some(id) = prop_bucket_ids.get(&name) {
+                    return *id;
+                }
+                if let Some(id) = material_ids.get(&name) {
+                    return *id;
+                }
+                let id = materials.len() as u32;
+                material_ids.insert(name.clone(), id);
+                materials.push(metadata::MaterialReference {
+                    source_material: name,
+                    source_material_raw: None,
+                    render_class: metadata::RenderClass::Fallback,
+                    texture: None,
+                    surface_prop: None,
+                    reflectivity: [0.0; 3],
+                });
+                id
+            })
+            .collect::<Vec<_>>();
+        // A thin brush buried in solid geometry can have no free cell to be
+        // filed under. Losing one piece of trim is worth more than losing the
+        // whole map, so it is reported rather than fatal.
+        let Some(root_cell) = crate::output::bake::anchor(&conversion.grid, mesh.bounds, &taken)
+        else {
+            brush_meshes_unanchored += 1;
+            continue;
+        };
+        taken.insert(root_cell);
+        let bytes = crate::output::mesh::encode(&brush_mesh)?;
+        let model_content_id = bundle::content_id(&bytes);
+        model_by_path.insert(
+            source_model.clone(),
+            (model_content_id.clone(), slot_ids.clone(), bytes),
+        );
+        if pvs_index.is_some() {
+            for x in section_coord(mesh.bounds.min.x)..=section_coord(mesh.bounds.max.x - 1.0e-8) {
+                for y in
+                    section_coord(mesh.bounds.min.y)..=section_coord(mesh.bounds.max.y - 1.0e-8)
+                {
+                    for z in
+                        section_coord(mesh.bounds.min.z)..=section_coord(mesh.bounds.max.z - 1.0e-8)
+                    {
+                        pvs_sections.insert([x, y, z]);
+                    }
+                }
+            }
+        }
+        for axis in 0..3 {
+            cell_max[axis] = cell_max[axis].max(root_cell[axis]);
+            cell_min[axis] = cell_min[axis].min(root_cell[axis]);
+        }
+        brush_meshes_placed += 1;
+        props.push(Prop {
+            source_ordinal: BRUSH_MESH_ORDINAL_BASE + mesh.brush_index as u64,
+            source_model,
+            model_content_id,
+            root_cell,
+            translation: [mesh.origin.x, mesh.origin.y, mesh.origin.z],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            material_ids: slot_ids,
+        });
+    }
+    if brush_meshes_placed > 0 {
+        let mut context = BTreeMap::new();
+        context.insert("brushes_drawn".into(), brush_meshes_placed.to_string());
+        context.insert(
+            "max_thickness_units".into(),
+            format!("{:.3}", config.output.brush_meshes.max_thickness_units),
+        );
+        diagnostics.push(metadata::Diagnostic {
+            severity: metadata::Severity::Info,
+            code: "BRUSH_MESH_SUMMARY".into(),
+            message: "brushes too thin to voxelize honestly were drawn as geometry instead".into(),
+            context,
+        });
+    }
+    if !conversion.occluders.is_empty() {
+        let mut context = BTreeMap::new();
+        context.insert("cells".into(), conversion.occluders.len().to_string());
+        diagnostics.push(metadata::Diagnostic {
+            severity: metadata::Severity::Info,
+            code: "LIGHT_OCCLUSION_SUMMARY".into(),
+            message: "cells recorded as blocking light for geometry that holds no block".into(),
+            context,
+        });
+    }
+    if brush_meshes_unanchored > 0 {
+        let mut context = BTreeMap::new();
+        context.insert("brushes_dropped".into(), brush_meshes_unanchored.to_string());
+        diagnostics.push(metadata::Diagnostic {
+            severity: metadata::Severity::Warning,
+            code: "BRUSH_MESH_NO_ROOT".into(),
+            message: "no free cell was available to file these brush meshes under; they were left out".into(),
+            context,
+        });
+    }
     if snapped_props > 0 {
         let mut context = BTreeMap::new();
         context.insert("props_snapped".into(), snapped_props.to_string());
@@ -457,6 +594,13 @@ pub fn from_conversion(
     } else {
         None
     };
+    // Cells a drawn brush covers. No block is written for them; the mask is
+    // what lets the mod's light engine treat the geometry as opaque, so a
+    // ceiling of thin plates keeps the daylight out without becoming solid.
+    let occlusion = (!conversion.occluders.is_empty())
+        .then(|| crate::output::occlusion::encode(&conversion.occluders))
+        .transpose()
+        .context("encoding the light-occlusion mask")?;
     Ok(MapExport {
         map_id: portable_id(&map.name),
         source_name: map.name.clone(),
@@ -471,6 +615,7 @@ pub fn from_conversion(
         models,
         props,
         pvs,
+        occlusion,
         diagnostics: metadata::Diagnostics::new(diagnostics)?,
     })
 }
@@ -508,6 +653,7 @@ fn extract_materials(
     map: &crate::bsp::Map,
     config: &crate::config::Config,
     prop_texture_spans: &BTreeMap<String, f64>,
+    brush_texture_spans: &BTreeMap<String, [f64; 2]>,
     surfaces: &[crate::voxel::surface::VisibleFaceRecord],
 ) -> (
     Vec<metadata::MaterialReference>,
@@ -580,6 +726,13 @@ fn extract_materials(
         let prop_span = prop_texture_spans.get(&material.name).copied();
         if let Some(prop) = prop_span {
             contributions.push((Contrib::Prop, [prop; 2]));
+        }
+        // Brush meshes share the prop bucket: both are drawn from a mesh, so
+        // both need the material to exist in the atlas whether or not any
+        // voxelized face still wears it.
+        let brush_span = brush_texture_spans.get(&material.name).copied();
+        if let Some(brush) = brush_span {
+            contributions.push((Contrib::Prop, brush));
         }
         let buckets = bucket_by_output(header.size, contributions);
         if buckets.is_empty() {
@@ -1695,6 +1848,10 @@ pub fn write_campaign(
         if let Some(pvs) = map.pvs {
             archive.add(format!("{prefix}/pvs.s2pvs"), pvs)?;
         }
+        let has_occlusion = map.occlusion.is_some();
+        if let Some(occlusion) = map.occlusion {
+            archive.add(format!("{prefix}/occlusion.s2occl"), occlusion)?;
+        }
         archive.add(
             format!("{prefix}/diagnostics.json"),
             map.diagnostics.encode()?,
@@ -1714,6 +1871,7 @@ pub fn write_campaign(
             models: model_refs,
             props: format!("{prefix}/props.s2props"),
             pvs: has_pvs.then(|| format!("{prefix}/pvs.s2pvs")),
+            occlusion: has_occlusion.then(|| format!("{prefix}/occlusion.s2occl")),
             diagnostics: format!("{prefix}/diagnostics.json"),
         };
         archive.add(&metadata_path, meta.encode()?)?;
@@ -1861,6 +2019,7 @@ mod tests {
                 materials: vec![0],
             }],
             pvs: None,
+            occlusion: None,
             props: vec![Prop {
                 source_ordinal: 0,
                 source_model: source_model.into(),

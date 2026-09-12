@@ -638,6 +638,7 @@ pub struct Output {
     /// Write a WorldEdit paste macro next to the tiles.
     pub paste_script: bool,
     pub voxelize: Voxelize,
+    pub brush_meshes: BrushMeshes,
 }
 
 impl Default for Output {
@@ -647,6 +648,45 @@ impl Default for Output {
             emit_dimension: false,
             paste_script: true,
             voxelize: Voxelize::default(),
+            brush_meshes: BrushMeshes::default(),
+        }
+    }
+}
+
+/// Drawing the map's thinnest brushes as meshes instead of voxelizing them.
+///
+/// `preserve_thin` keeps a brush thinner than a block alive by filling every
+/// cell it touches, which is right for a 16-unit wall and wrong for a 4-unit
+/// gusset plate: the plate comes out eight times too thick, and a ceiling truss
+/// made of dozens of them voxelizes into a solid ceiling the source map does not
+/// have. At or below `max_thickness_units` a brush is drawn as its real
+/// geometry instead, the same way a prop is, so it keeps its true thickness.
+///
+/// The trade is collision: mesh geometry is visual only, exactly as props are.
+/// The default cut-off is a quarter of a block at 32 units per block. It takes
+/// in the 8-unit plates Source trusses and ceilings are built from, which
+/// voxelize four times too thick, and leaves the 16-unit decking you stand on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BrushMeshes {
+    pub enabled: bool,
+    /// Thickness in Source units, measured against the brush's own faces so an
+    /// angled plate is judged by its real thickness rather than its bounding box.
+    pub max_thickness_units: f64,
+    /// Record the cells a drawn brush covers so the mod can light them as if
+    /// they were solid. Nothing is placed in them: Minecraft only ever blocks
+    /// light with a block, so the mod teaches its light engine about the
+    /// geometry instead. Without this a ceiling of thin plates lets the
+    /// daylight straight through.
+    pub occlude_light: bool,
+}
+
+impl Default for BrushMeshes {
+    fn default() -> Self {
+        BrushMeshes {
+            enabled: true,
+            max_thickness_units: 8.0,
+            occlude_light: true,
         }
     }
 }

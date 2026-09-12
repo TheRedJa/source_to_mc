@@ -113,6 +113,92 @@ pub fn from_prop_mesh(source: &crate::output::obj::PropMesh) -> Result<(Mesh, Ve
     Ok((mesh, materials))
 }
 
+/// Convert a brush that is drawn as geometry rather than voxelized.
+///
+/// Brush sides are flat, so the one face normal covers each of its triangle's
+/// corners; nothing here is smooth-shaded. UVs are already normalized to the
+/// texture's own `0..1` and routinely fall outside it, which the runtime
+/// handles by repeating the sprite exactly as it does for a prop.
+pub fn from_brush_mesh(source: &crate::convert::BrushMesh) -> Result<(Mesh, Vec<String>)> {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut submeshes = Vec::new();
+    let mut materials = Vec::new();
+    let mut interned: HashMap<[u32; 8], u32> = HashMap::new();
+
+    for part in &source.parts {
+        ensure!(
+            part.triangles.len() == part.normals.len() && part.triangles.len() == part.uvs.len(),
+            "brush mesh attribute arrays differ in length"
+        );
+        if part.triangles.is_empty() {
+            continue;
+        }
+        let first_index = u32::try_from(indices.len())?;
+        let material_slot = u32::try_from(materials.len())?;
+        materials.push(part.material.clone());
+        for ((triangle, normal), uvs) in part.triangles.iter().zip(&part.normals).zip(&part.uvs) {
+            for corner in 0..3 {
+                let values = [
+                    triangle[corner].x as f32,
+                    triangle[corner].y as f32,
+                    triangle[corner].z as f32,
+                    normal.x as f32,
+                    normal.y as f32,
+                    normal.z as f32,
+                    uvs[corner][0] as f32,
+                    uvs[corner][1] as f32,
+                ];
+                ensure!(
+                    values.iter().all(|value| value.is_finite()),
+                    "brush mesh value cannot be represented as f32"
+                );
+                let key = values.map(|value| if value == 0.0 { 0 } else { value.to_bits() });
+                let index = match interned.get(&key) {
+                    Some(index) => *index,
+                    None => {
+                        let index = u32::try_from(vertices.len())?;
+                        vertices.push(Vertex {
+                            position: values[0..3].try_into().unwrap(),
+                            normal: values[3..6].try_into().unwrap(),
+                            uv: values[6..8].try_into().unwrap(),
+                        });
+                        interned.insert(key, index);
+                        index
+                    }
+                };
+                indices.push(index);
+            }
+        }
+        submeshes.push(Submesh {
+            first_index,
+            index_count: u32::try_from(indices.len())? - first_index,
+            material_slot,
+        });
+    }
+    ensure!(
+        !vertices.is_empty(),
+        "brush mesh has no renderable triangles"
+    );
+    let mut bounds_min = [f32::INFINITY; 3];
+    let mut bounds_max = [f32::NEG_INFINITY; 3];
+    for vertex in &vertices {
+        for axis in 0..3 {
+            bounds_min[axis] = bounds_min[axis].min(vertex.position[axis]);
+            bounds_max[axis] = bounds_max[axis].max(vertex.position[axis]);
+        }
+    }
+    let mesh = Mesh {
+        bounds_min,
+        bounds_max,
+        vertices,
+        indices,
+        submeshes,
+    };
+    encode(&mesh)?;
+    Ok((mesh, materials))
+}
+
 /// Convert authored Source geometry directly, without legacy texture-repeat
 /// subdivision. UVs remain authored sheet coordinates.
 pub fn from_source_model(

@@ -121,17 +121,27 @@ fn is_thin(solid: &BlockSolid) -> bool {
     if (0..3).any(|axis| size.axis(axis) < 1.0) {
         return true;
     }
+    thickness(solid) < 1.0
+}
+
+/// How thin the brush is, in blocks, measured the way [`is_thin`] describes:
+/// the smallest distance any of its own faces has to the corner furthest behind
+/// it. Infinite for a degenerate brush with no corners to measure against.
+pub fn thickness(solid: &BlockSolid) -> f64 {
     let corners = crate::geom::polyhedron_vertices(&solid.planes, THIN_EPSILON);
     if corners.len() < 4 {
-        return false;
+        return f64::INFINITY;
     }
-    solid.planes.iter().any(|plane| {
-        let deepest = corners
-            .iter()
-            .map(|c| plane.distance_to(*c))
-            .fold(f64::INFINITY, f64::min);
-        -deepest < 1.0
-    })
+    solid
+        .planes
+        .iter()
+        .map(|plane| {
+            -corners
+                .iter()
+                .map(|c| plane.distance_to(*c))
+                .fold(f64::INFINITY, f64::min)
+        })
+        .fold(f64::INFINITY, f64::min)
 }
 
 fn exact_occupancy(solid: &BlockSolid, pos: IVec3) -> f64 {
@@ -556,6 +566,39 @@ mod tests {
         assert!(
             kept > dropped * 2,
             "angled plate kept {kept} voxels against {dropped} without preservation"
+        );
+    }
+
+    /// The measure `thickness` reports is the brush's own, not its bounding
+    /// box's: a plate tilted off the axes has a box far deeper than the plate.
+    #[test]
+    fn thickness_measures_the_plate_not_its_box() {
+        let plate = 0.125;
+        let normal = Vec3::new(1.0, 1.0, 0.0).normalized();
+        let across = Vec3::new(-1.0, 1.0, 0.0).normalized();
+        let up = Vec3::new(0.0, 0.0, 1.0);
+        let planes = vec![
+            Plane::new(normal, plate / 2.0),
+            Plane::new(-normal, plate / 2.0),
+            Plane::new(across, 4.0),
+            Plane::new(-across, 4.0),
+            Plane::new(up, 4.0),
+            Plane::new(-up, 4.0),
+        ];
+        let bounds = crate::geom::polyhedron_bounds(&planes, 1e-9).unwrap();
+        let solid = BlockSolid {
+            planes,
+            bounds,
+            side_of_plane: (0..6).collect(),
+        };
+        assert!(
+            solid.bounds.size().axis(0) > 1.0,
+            "the tilted plate's box is more than a block deep"
+        );
+        assert!(
+            (thickness(&solid) - plate).abs() < 1e-6,
+            "reported {} rather than the plate's own {plate}",
+            thickness(&solid)
         );
     }
 

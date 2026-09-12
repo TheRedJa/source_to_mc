@@ -81,6 +81,10 @@ pub struct MapMetadata {
     /// Optional prop visibility table. Absent when the map has no usable PVS.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pvs: Option<String>,
+    /// Optional light-occlusion mask. Absent when the map draws no brush as
+    /// geometry, or was exported with the mask turned off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occlusion: Option<String>,
     pub diagnostics: String,
 }
 
@@ -304,6 +308,12 @@ impl MapMetadata {
                 "non-canonical pvs path"
             );
         }
+        if let Some(occlusion) = &self.occlusion {
+            ensure!(
+                occlusion == &format!("maps/{}/occlusion.s2occl", self.map_id),
+                "non-canonical occlusion path"
+            );
+        }
         for material in &mut self.materials {
             material.validate()?;
         }
@@ -519,6 +529,7 @@ mod tests {
             ],
             props: "maps/d1_01/props.s2props".into(),
             pvs: Some("maps/d1_01/pvs.s2pvs".into()),
+            occlusion: Some("maps/d1_01/occlusion.s2occl".into()),
             diagnostics: "maps/d1_01/diagnostics.json".into(),
         };
         let value: serde_json::Value =
@@ -528,6 +539,7 @@ mod tests {
         assert!(value["materials"][0].get("texture").is_none());
         assert_eq!(value["models"][0]["content_id"], id('a'));
         assert_eq!(value["pvs"], "maps/d1_01/pvs.s2pvs");
+        assert_eq!(value["occlusion"], "maps/d1_01/occlusion.s2occl");
 
         map.models.swap(0, 1);
         assert!(map.encode().is_err());

@@ -9,7 +9,7 @@ use crate::voxel::grid::{AIR, BlockId, IVec3, Palette, VoxelGrid};
 use crate::voxel::shell;
 use crate::voxel::transform::Transform;
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 /// What a prop drawn as its own mesh leaves behind to stand on: solid, and
@@ -39,6 +39,48 @@ pub struct Conversion {
     /// Cell to solids index for `solids`, so a prop touching one cell does
     /// not have to scan every brush in the map.
     pub solid_index: BTreeMap<IVec3, Vec<u32>>,
+    /// Brushes too thin to voxelize honestly, kept as real geometry instead.
+    pub brush_meshes: Vec<BrushMesh>,
+    /// Cells those brushes would have filled, had they been voxelized. No
+    /// block is written for them; they exist so the runtime can make the
+    /// lighting behave as if the geometry were there.
+    pub occluders: BTreeSet<IVec3>,
+}
+
+/// One brush drawn as its own geometry rather than as blocks.
+///
+/// Everything is already in map-local block space, with the triangles expressed
+/// relative to `origin` so the pair can be handed to the same runtime path that
+/// draws a prop: an origin to place it at, and a mesh in model space.
+#[derive(Debug, Clone)]
+pub struct BrushMesh {
+    pub brush_index: usize,
+    /// Where the mesh is placed, in map-local block coordinates.
+    pub origin: Vec3,
+    /// World-space bounds in block coordinates, for anchoring and visibility.
+    pub bounds: Aabb,
+    pub parts: Vec<BrushMeshPart>,
+}
+
+/// The triangles of one brush wearing one material.
+#[derive(Debug, Clone)]
+pub struct BrushMeshPart {
+    /// Authored material path, matching [`crate::bsp::Material::name`].
+    pub material: String,
+    /// Model space, in blocks, relative to the mesh's origin.
+    pub triangles: Vec<[Vec3; 3]>,
+    /// Face normal per triangle. Brush sides are flat, so one normal covers a
+    /// whole triangle rather than each of its corners.
+    pub normals: Vec<Vec3>,
+    /// Corner UVs, normalized to the texture's own `0..1`. Source projections
+    /// tile, so these routinely fall outside that range; the runtime repeats
+    /// the sprite to cover them, the same as it does for a prop.
+    pub uvs: Vec<[[f64; 2]; 3]>,
+    /// How many blocks one repeat of the sprite covers, per UV axis. A Source
+    /// projection can compress one axis far harder than the other, so the atlas
+    /// is told about each separately rather than being handed the worse of the
+    /// two and under-resolving the other.
+    pub blocks_per_repeat: [f64; 2],
 }
 
 /// One brush entity converted on its own.
@@ -864,6 +906,176 @@ fn fit_shapes(
     (out, fitted)
 }
 
+/// Slop allowed when testing points against brush planes, in blocks. Looser
+/// than the voxelizer's, because a corner shared by several sides has to be
+/// recognised as lying on each of them for the face polygons to close.
+const MESH_PLANE_EPSILON: f64 = 1e-5;
+
+/// Slack on the mesh cut-off, in blocks. A brush authored exactly at the
+/// cut-off must land on the mesh side of it whichever way the scaling rounds.
+const MESH_THICKNESS_SLACK: f64 = 1e-6;
+
+/// Split off the brushes that will be drawn as geometry instead of voxelized.
+///
+/// Returns the brushes still bound for the voxel grid, and the meshes built for
+/// the rest. A thin brush with nothing visible on it is dropped outright, which
+/// is the same answer voxelizing would have reached: every side vetoed means no
+/// blocks.
+fn split_brush_meshes(
+    map: &Map,
+    config: &Config,
+    transform: &Transform,
+    origins: &std::collections::HashMap<usize, Vec3>,
+    solids: Vec<Solid>,
+) -> (Vec<Solid>, Vec<BrushMesh>, BTreeSet<IVec3>) {
+    if !config.output.brush_meshes.enabled {
+        return (solids, Vec::new(), BTreeSet::new());
+    }
+    let limit = config.output.brush_meshes.max_thickness_units / transform.units_per_block();
+    let mut voxelized = Vec::with_capacity(solids.len());
+    let mut meshes = Vec::new();
+    let mut occluders = BTreeSet::new();
+    for solid in solids {
+        let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
+        let block = to_block_solid(&solid, transform, origin);
+        // Inclusive: 8-unit plates are the single most common thin brush in a
+        // Source map, and the transform leaves their measured thickness a hair
+        // either side of the cut-off, so the slack decides them consistently.
+        if crate::voxel::brush::thickness(&block) > limit + MESH_THICKNESS_SLACK {
+            voxelized.push(solid);
+            continue;
+        }
+        let Some(mesh) = brush_mesh(map, config, &solid, &block, transform, origin) else {
+            // Nothing drawn means nothing there as far as the map is
+            // concerned, so it must not darken anything either.
+            continue;
+        };
+        if config.output.brush_meshes.occlude_light {
+            // Exactly the cells voxelizing would have filled. They carry no
+            // block; the runtime reads them as opaque so a ceiling of plates
+            // keeps the daylight out the way the source map does.
+            crate::voxel::brush::voxelize(&block, &config.output.voxelize, |cell, _| {
+                occluders.insert(cell);
+            });
+        }
+        meshes.push(mesh);
+    }
+    (voxelized, meshes, occluders)
+}
+
+/// Build the drawable mesh for one brush, or `None` when none of its sides is
+/// ever drawn.
+fn brush_mesh(
+    map: &Map,
+    config: &Config,
+    solid: &Solid,
+    block: &BlockSolid,
+    transform: &Transform,
+    origin: Vec3,
+) -> Option<BrushMesh> {
+    use vbsp::TextureFlags as F;
+    let corners = crate::geom::polyhedron_vertices(&block.planes, MESH_PLANE_EPSILON);
+    if corners.len() < 4 {
+        return None;
+    }
+    let mut bounds = Aabb::empty();
+    for corner in &corners {
+        bounds.extend(*corner);
+    }
+    let centre = bounds.center();
+
+    let mut parts: BTreeMap<String, BrushMeshPart> = BTreeMap::new();
+    for (index, side) in solid.sides.iter().enumerate() {
+        if is_invisible(side.texture_flags)
+            || (config.contents.skip_sky && side.texture_flags.intersects(F::SKY | F::SKY2D))
+        {
+            continue;
+        }
+        let Some(info_index) = side.texture_info else {
+            continue;
+        };
+        let Some(material_index) = map.material_index(info_index) else {
+            continue;
+        };
+        let Some(material) = map.materials().get(material_index) else {
+            continue;
+        };
+        let Some(info) = map.bsp.textures_info.get(info_index) else {
+            continue;
+        };
+        let Some(size) = texture_size(map, info) else {
+            continue;
+        };
+        let plane = block.planes[index];
+        let polygon = crate::geom::polyhedron_face(&corners, plane, MESH_PLANE_EPSILON);
+        if polygon.len() < 3 {
+            continue;
+        }
+        let texcoord = crate::bsp::texcoord::TexCoord::of(info).in_block_space(transform, origin);
+        let uv_of = |p: Vec3| [texcoord.s(p) / size[0], texcoord.t(p) / size[1]];
+
+        let part = parts
+            .entry(material.name.clone())
+            .or_insert_with(|| BrushMeshPart {
+                material: material.name.clone(),
+                triangles: Vec::new(),
+                normals: Vec::new(),
+                uvs: Vec::new(),
+                blocks_per_repeat: [0.0; 2],
+            });
+        // Texels per block along each projection axis, turned into how many
+        // blocks one repeat of the sprite covers. That is what decides how much
+        // of the texture is worth keeping: a sprite tiled every half block
+        // needs far fewer texels than one stretched over ten.
+        let span = |axis: [f64; 4], texels: f64| {
+            let rate =
+                (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            (rate > 0.0).then(|| texels / rate)
+        };
+        for (index, blocks) in [span(texcoord.u, size[0]), span(texcoord.v, size[1])]
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(blocks) = blocks.filter(|value| value.is_finite()) {
+                part.blocks_per_repeat[index] = part.blocks_per_repeat[index].max(blocks);
+            }
+        }
+        for corner in 1..polygon.len() - 1 {
+            let triangle = [polygon[0], polygon[corner], polygon[corner + 1]];
+            part.triangles
+                .push(triangle.map(|point| point - centre));
+            part.normals.push(plane.normal);
+            part.uvs.push(triangle.map(uv_of));
+        }
+    }
+
+    let parts: Vec<BrushMeshPart> = parts
+        .into_values()
+        .filter(|part| !part.triangles.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(BrushMesh {
+        brush_index: solid.brush_index,
+        origin: centre,
+        bounds,
+        parts,
+    })
+}
+
+/// The nominal size of the texture a face's projection is expressed in. UVs are
+/// texel counts, and one repeat of the sprite is one texture width, so this is
+/// what turns them into the normalized coordinates the runtime expects.
+fn texture_size(map: &Map, info: &vbsp::TextureInfo) -> Option<[f64; 2]> {
+    let data = map
+        .bsp
+        .textures_data
+        .get(usize::try_from(info.texture_data_index).ok()?)?;
+    let (width, height) = (f64::from(data.width), f64::from(data.height));
+    (width > 0.0 && height > 0.0).then_some([width, height])
+}
+
 pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     // Bounds of what will be kept, which is not the same as worldspawn's own
     // box once the 3D skybox room is left out of it.
@@ -892,6 +1104,11 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let skipped = std::sync::atomic::AtomicUsize::new(0);
 
     let origins = model_origins(&entity_models);
+
+    // Brushes thinner than the cut-off never reach the voxel grid: filling
+    // every cell they touch is what turns a 4-unit plate into a 32-unit wall.
+    let (solids, brush_meshes, occluders) =
+        split_brush_meshes(map, config, &transform, &origins, solids);
 
     // Continuous brush geometry, retained so a prop's overlap with the grid
     // can be told apart from overlap that was already in the source map.
@@ -1427,6 +1644,8 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         pack: assets.pack,
         solids: block_solids,
         solid_index,
+        brush_meshes,
+        occluders,
     })
 }
 
@@ -1578,6 +1797,76 @@ mod tests {
             "/Entropy Zero/EntropyZero/maps/az_c4_4.bsp"
         ));
         path.exists().then(|| Map::load(path).unwrap())
+    }
+
+    /// The whole point of drawing a thin brush instead of voxelizing it: a
+    /// 4-unit plate stays 4 units instead of being inflated into a full block.
+    #[test]
+    fn thin_brushes_become_meshes_that_keep_their_thickness() {
+        let Some(map) = sample_map() else { return };
+        let mut config = Config::default();
+        config.scale.units_per_block = 32.0;
+        let transform = Transform::new(&config, map.converted_bounds(true));
+        let entity_models = entity_models(&map, &config, &transform);
+        let origins = model_origins(&entity_models);
+        let solids: Vec<Solid> = models_to_convert(&map, &config, &entity_models)
+            .into_iter()
+            .flat_map(|model| map.solids(model))
+            .collect();
+        let total = solids.len();
+
+        let (voxelized, meshes, occluders) =
+            split_brush_meshes(&map, &config, &transform, &origins, solids.clone());
+        assert!(
+            !occluders.is_empty(),
+            "drawn brushes must still darken the cells they cover"
+        );
+        assert!(!meshes.is_empty(), "a real map has trim thinner than 8 units");
+        assert!(
+            voxelized.len() + meshes.len() <= total,
+            "splitting invented brushes"
+        );
+
+        let limit = config.output.brush_meshes.max_thickness_units / transform.units_per_block();
+        let by_index: std::collections::HashMap<usize, &Solid> =
+            solids.iter().map(|solid| (solid.brush_index, solid)).collect();
+        for mesh in &meshes {
+            // Measured against the brush's own faces, not its bounding box: a
+            // tilted plate has a box far thicker than the plate.
+            let solid = by_index[&mesh.brush_index];
+            let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
+            let thinnest =
+                crate::voxel::brush::thickness(&to_block_solid(solid, &transform, origin));
+            assert!(
+                thinnest <= limit + MESH_THICKNESS_SLACK,
+                "brush {} is {thinnest} blocks thick, over the {limit}-block cut-off",
+                mesh.brush_index
+            );
+            assert!(
+                mesh.parts.iter().any(|part| !part.triangles.is_empty()),
+                "a mesh was kept with nothing to draw"
+            );
+        }
+
+        // An 8-unit plate is the commonest thin brush there is, and the
+        // default cut-off is exactly 8 units, so the boundary has to be
+        // inclusive or the feature misses most of what it is for.
+        let at_cutoff = meshes.iter().any(|mesh| {
+            let solid = by_index[&mesh.brush_index];
+            let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
+            (crate::voxel::brush::thickness(&to_block_solid(solid, &transform, origin)) - limit)
+                .abs()
+                <= MESH_THICKNESS_SLACK
+        });
+        assert!(at_cutoff, "brushes exactly at the cut-off were voxelized");
+
+        // Turning the feature off must put every brush back on the voxel path.
+        config.output.brush_meshes.enabled = false;
+        let (all, none, no_cells) =
+            split_brush_meshes(&map, &config, &transform, &origins, solids);
+        assert_eq!(all.len(), total);
+        assert!(none.is_empty());
+        assert!(no_cells.is_empty());
     }
 
     #[test]
@@ -2159,6 +2448,11 @@ mod tests {
         // either way; only where the answer is written down differs.
         let mut on = kubejs_config();
         on.props.bake = false;
+        // Settling corrects for voxelization rounding, so it is measured
+        // against a fully voxelized world. Drawing the thin brushes as meshes
+        // instead removes the rounding these props would have been settling
+        // out of, which is a different question from whether settling works.
+        on.output.brush_meshes.enabled = false;
         let mut off = on.clone();
         off.props.settle = false;
         let off = convert(&map, &off).unwrap();

@@ -12,6 +12,7 @@ pub mod limits;
 pub mod mesh;
 pub mod metadata;
 pub mod mod_export;
+pub mod occlusion;
 pub mod obj;
 pub mod placement;
 pub mod pvs;

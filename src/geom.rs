@@ -256,37 +256,56 @@ pub fn polyhedron_volume(planes: &[Plane], epsilon: f64) -> f64 {
     let mut volume = 0.0;
 
     for plane in planes {
-        let face: Vec<Vec3> = verts
-            .iter()
-            .copied()
-            .filter(|v| plane.distance_to(*v).abs() <= epsilon)
-            .collect();
-        if face.len() < 3 {
+        let ordered = face_polygon(&verts, *plane, epsilon);
+        if ordered.len() < 3 {
             continue;
         }
 
-        // Order the face's vertices around its own centre, in the plane's own
-        // two-dimensional basis. Unordered, a fan would produce overlapping
-        // triangles and the wrong area.
-        let hub = face.iter().fold(Vec3::ZERO, |a, b| a + *b) / face.len() as f64;
-        let u = perpendicular(plane.normal);
-        let v = plane.normal.cross(u);
-        let mut ordered: Vec<(f64, Vec3)> = face
-            .iter()
-            .map(|p| {
-                let d = *p - hub;
-                (d.dot(v).atan2(d.dot(u)), *p)
-            })
-            .collect();
-        ordered.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
         for window in 1..ordered.len() - 1 {
-            let (a, b, c) = (ordered[0].1, ordered[window].1, ordered[window + 1].1);
+            let (a, b, c) = (ordered[0], ordered[window], ordered[window + 1]);
             volume += tetrahedron_volume(centroid, a, b, c);
         }
     }
 
     volume
+}
+
+/// The polygon one plane cuts out of a polyhedron, wound counter-clockwise when
+/// seen from outside, or fewer than three points when the plane contributes no
+/// face.
+///
+/// `vertices` is the whole polyhedron's corner set, as [`polyhedron_vertices`]
+/// returns it: a plane's face is exactly the corners lying on it. They come out
+/// of that function in no particular order, so a fan built straight from them
+/// would self-overlap; sorting them by angle around their own centre, in the
+/// plane's two-dimensional basis, is what makes the fan a simple polygon.
+pub fn polyhedron_face(vertices: &[Vec3], plane: Plane, epsilon: f64) -> Vec<Vec3> {
+    face_polygon(vertices, plane, epsilon)
+}
+
+fn face_polygon(vertices: &[Vec3], plane: Plane, epsilon: f64) -> Vec<Vec3> {
+    let face: Vec<Vec3> = vertices
+        .iter()
+        .copied()
+        .filter(|v| plane.distance_to(*v).abs() <= epsilon)
+        .collect();
+    if face.len() < 3 {
+        return Vec::new();
+    }
+    let hub = face.iter().fold(Vec3::ZERO, |a, b| a + *b) / face.len() as f64;
+    let u = perpendicular(plane.normal);
+    // `u`, `v` and the plane normal form a right-handed basis, so increasing
+    // angle runs counter-clockwise as seen from outside the solid.
+    let v = plane.normal.cross(u);
+    let mut ordered: Vec<(f64, Vec3)> = face
+        .iter()
+        .map(|p| {
+            let d = *p - hub;
+            (d.dot(v).atan2(d.dot(u)), *p)
+        })
+        .collect();
+    ordered.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    ordered.into_iter().map(|(_, p)| p).collect()
 }
 
 /// Any unit vector perpendicular to `n`.
@@ -330,6 +349,55 @@ pub fn polyhedron_bounds(planes: &[Plane], epsilon: f64) -> Option<Aabb> {
         bounds.extend(v);
     }
     Some(bounds)
+}
+
+#[cfg(test)]
+mod face_tests {
+    use super::*;
+
+    #[test]
+    fn a_box_face_comes_back_as_a_closed_quad() {
+        let planes = box_planes(Vec3::ZERO, Vec3::splat(2.0));
+        let corners = polyhedron_vertices(&planes, 1e-9);
+        assert_eq!(corners.len(), 8);
+        for plane in planes {
+            let face = polyhedron_face(&corners, plane, 1e-9);
+            assert_eq!(face.len(), 4, "every side of a box is a quad");
+            // Consecutive corners of a quad on a 2-unit box are an edge apart;
+            // an unordered fan would put a diagonal in the sequence instead.
+            for pair in 0..4 {
+                let edge = (face[(pair + 1) % 4] - face[pair]).length();
+                assert!((edge - 2.0).abs() < 1e-9, "corner {pair} is not an edge apart: {edge}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_winding_faces_out_of_the_solid() {
+        let planes = box_planes(Vec3::ZERO, Vec3::splat(2.0));
+        let corners = polyhedron_vertices(&planes, 1e-9);
+        for plane in planes {
+            let face = polyhedron_face(&corners, plane, 1e-9);
+            let normal = (face[1] - face[0]).cross(face[2] - face[0]).normalized();
+            assert!(
+                normal.dot(plane.normal) > 0.9,
+                "face winding points into the solid"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plane_touching_only_an_edge_has_no_face() {
+        let mut planes = box_planes(Vec3::ZERO, Vec3::splat(2.0)).to_vec();
+        // A plane through one vertical edge of the box and nothing else.
+        planes.push(Plane::new(Vec3::new(-1.0, -1.0, 0.0).normalized(), 0.0));
+        let corners = polyhedron_vertices(&planes, 1e-9);
+        let face = polyhedron_face(&corners, planes[6], 1e-9);
+        assert!(
+            face.is_empty(),
+            "a plane meeting the solid along an edge encloses no face"
+        );
+    }
 }
 
 #[cfg(test)]

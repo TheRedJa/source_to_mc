@@ -319,6 +319,19 @@ fill_threshold = 0.5
 # E:Z's 4- and 8-unit trim does not vanish at 16 units/block.
 preserve_thin = true
 
+[output.brush_meshes]
+# Draw brushes at or under max_thickness_units thick as their real geometry, the way
+# a prop is drawn, instead of voxelizing them. preserve_thin above keeps a thin
+# brush alive by filling every cell it touches, which turns a 4-unit gusset
+# plate into a full 32-unit block wall and seals ceiling trusses shut. Mesh
+# geometry is visual only and has no collision.
+enabled = true
+max_thickness_units = 8.0
+# Record the cells a drawn brush covers so the mod can light them as if they
+# were solid. No block is placed; the mod's light engine is taught about the
+# geometry instead. Off means daylight passes straight through thin ceilings.
+occlude_light = true
+
 [performance]
 # Worker threads; 0 uses one per core.
 threads = 0

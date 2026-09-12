@@ -342,3 +342,44 @@ section intersects at least one visible cluster renders; otherwise it is
 rejected for the frame. Every row must include its own cluster; a table that
 violates this integrity invariant is invalid. A camera cluster of `-1`, a
 missing tree, or any other unresolved lookup renders without rejection.
+
+## 13. Light-occlusion mask
+
+`maps/<map-id>/occlusion.s2occl` optionally records the map-local cells that
+block light while holding no block. Map metadata references it through the
+optional `occlusion` field, which sits between `pvs` and `diagnostics`; a map
+that draws no brush as geometry omits both, and readers must then take the
+world's light exactly as vanilla computes it.
+
+A brush thinner than the export cut-off is drawn as its real geometry instead
+of being voxelized, so its cells stay air. Minecraft derives light opacity from
+the block state alone, so without this mask a ceiling built from thin plates
+lets the daylight straight through. Filling the cells with invisible blocks
+would fix the light and break everything else — they would be solid to walk
+into. The mask is the alternative: the mod bakes the map's sky light itself,
+treating these cells as opaque, and hands the finished light to the engine. No
+block exists, and vanilla's own opacity rules are never consulted for them.
+
+Props are deliberately left out. A cell is the smallest shadow the mask can
+express, and a prop that fills one — a tree, a conveyor, a pile of scrap — casts
+a block of shade the thing itself never would. The mask covers converted brush
+geometry only, which is where the map's own roofs and floors live.
+
+The payload begins with this fixed little-endian header:
+
+| Field | Type | Value |
+| --- | --- | --- |
+| magic | 8 bytes | `S2OCCL\0\0` |
+| version | `u32` | 1 |
+| section count | `u32` | following section records |
+
+Section records follow in lexicographic order of their map-local 16-block
+section coordinates: three `i32` values, then 512 bytes holding one bit per
+cell. Bit `(y & 15) << 8 | (z & 15) << 4 | (x & 15)` — the surface table's
+local-cell packing — is set when that cell blocks light, LSB-first within each
+byte. Every listed section has at least one bit set, and coordinates are unique
+and ascending, so the payload is canonical for a given cell set.
+
+The mask is advisory for rendering and authoritative for nothing else: it never
+adds collision, never appears in the schematic, and a reader that ignores it
+produces a correct but over-lit world.
