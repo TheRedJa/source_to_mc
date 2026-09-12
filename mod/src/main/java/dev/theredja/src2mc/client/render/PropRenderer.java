@@ -424,10 +424,9 @@ public final class PropRenderer {
         try (var bytes = new ByteBufferBuilder(capacity)) {
             var builder = new BufferBuilder(bytes, VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.NEW_ENTITY);
             for (PropTessellator.Triangle triangle : triangles) {
-                int light = sampleTriangleLight(placement, triangle, lightCache);
-                vertex(builder, triangle.a(), baseX, baseY, baseZ, light);
-                vertex(builder, triangle.b(), baseX, baseY, baseZ, light);
-                vertex(builder, triangle.c(), baseX, baseY, baseZ, light);
+                vertex(builder, triangle.a(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.a(), lightCache));
+                vertex(builder, triangle.b(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.b(), lightCache));
+                vertex(builder, triangle.c(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.c(), lightCache));
             }
             try (var data = builder.buildOrThrow()) {
                 var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
@@ -450,22 +449,32 @@ public final class PropRenderer {
             .setLight(light).setNormal((float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz());
     }
 
-    /** One sample per triangle, at its centroid using the averaged (renormalized) vertex normal;
-     * tessCache stays lighting-independent, so only this upload step changes on a relight. */
-    private static int sampleTriangleLight(MapPlacement placement, PropTessellator.Triangle triangle, Map<Long, Integer> cache) {
-        PropTessellator.Vertex a = triangle.a(), b = triangle.b(), c = triangle.c();
-        double cx = (a.x() + b.x() + c.x()) / 3.0, cy = (a.y() + b.y() + c.y()) / 3.0, cz = (a.z() + b.z() + c.z()) / 3.0;
-        float nx = (float) (a.nx() + b.nx() + c.nx()), ny = (float) (a.ny() + b.ny() + c.ny()), nz = (float) (a.nz() + b.nz() + c.nz());
+    /** One sample per vertex, along the vertex's own normal; tessCache stays
+     * lighting-independent, so only this upload step changes on a relight. One value for the
+     * whole triangle is vanilla's flat lighting, and on a prop-sized mesh it showed every
+     * block boundary the prop crossed. */
+    private static int sampleVertexLight(MapPlacement placement, PropTessellator.Vertex vertex, Map<Long, Integer> cache) {
+        float nx = (float) vertex.nx(), ny = (float) vertex.ny(), nz = (float) vertex.nz();
         float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
         if (length > 1.0e-6f) { nx /= length; ny /= length; nz /= length; } else { nx = 0; ny = 1; nz = 0; }
-        double worldX = placement.translation().getX() + cx, worldY = placement.translation().getY() + cy, worldZ = placement.translation().getZ() + cz;
-        return LightSampler.sample(level, worldX, worldY, worldZ, nx, ny, nz, cache);
+        double worldX = placement.translation().getX() + vertex.x();
+        double worldY = placement.translation().getY() + vertex.y();
+        double worldZ = placement.translation().getZ() + vertex.z();
+        return MapSurfaceRenderer.smoothLighting()
+            ? LightSampler.smooth(level, worldX, worldY, worldZ, nx, ny, nz, cache)
+            : LightSampler.sample(level, worldX, worldY, worldZ, nx, ny, nz, cache);
     }
 
-    /** Marks aggregates for the section overlapping {@code worldSection} and its six face
-     * neighbours dirty; {@link #rebuildDirtyAggregates} drains them under its own budget. A
-     * triangle samples light one block along its normal, so a diagonal section can never be
-     * affected and rebuilding those 20 extra sections was pure cost. */
+    /** Rebuilds every prop aggregate, for a change in how light is sampled rather than in the
+     * light itself. */
+    static void invalidateAllLight() {
+        for (AggregateKey key : AGGREGATES.keys()) AGGREGATES.markDirty(key);
+    }
+
+    /** Marks aggregates for the section overlapping {@code worldSection} and all 26 neighbours
+     * dirty; {@link #rebuildDirtyAggregates} drains them under its own budget. A smooth sample
+     * reads the eight cells around a point up to half a block outside the mesh, so a change
+     * across a section corner does reach these vertices. */
     static void invalidateLight(MapPlacement placement, SectionPos worldSection) {
         BlockPos local = placement.toLocal(new BlockPos(SectionPos.sectionToBlockCoord(worldSection.x()),
             SectionPos.sectionToBlockCoord(worldSection.y()), SectionPos.sectionToBlockCoord(worldSection.z())));
@@ -473,7 +482,7 @@ public final class PropRenderer {
         for (AggregateKey key : AGGREGATES.keys()) {
             if (!key.placement().equals(placement)) continue;
             int dx = Math.abs(key.sectionX() - sx), dy = Math.abs(key.sectionY() - sy), dz = Math.abs(key.sectionZ() - sz);
-            if (dx + dy + dz <= 1) AGGREGATES.markDirty(key);
+            if (Math.max(dx, Math.max(dy, dz)) <= 1) AGGREGATES.markDirty(key);
         }
     }
 

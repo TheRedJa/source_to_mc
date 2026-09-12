@@ -29,6 +29,7 @@ final class BundleSchemaValidator {
     private static final byte[] PROP_MAGIC = {'S','2','P','R','O','P',0,0};
     private static final byte[] MESH_MAGIC = {'S','2','M','E','S','H',0,0};
     private static final byte[] PVS_MAGIC = {'S','2','P','V','I','S',0,0};
+    private static final byte[] OCCLUSION_MAGIC = {'S','2','O','C','C','L',0,0};
     private static final byte[] PNG_SIGNATURE = {(byte)137,80,78,71,13,10,26,10};
 
     private BundleSchemaValidator() {}
@@ -73,11 +74,13 @@ final class BundleSchemaValidator {
     private static BundleMap validateMap(ZipFile zip, Map<String, ZipEntry> entries, Map<String, String> hashes, String mapId, String path, Set<String> referenced, AtlasIndex atlas) throws IOException {
         referenced.add(path);
         JsonObject map = json(zip, required(entries, path), path);
-        if (map.has("pvs")) {
-            keys(map, "format", "version", "map_id", "source_name", "units_per_block", "cell_min", "cell_max", "anchor_cell", "surfaces", "materials", "models", "props", "pvs", "diagnostics");
-        } else {
-            keys(map, "format", "version", "map_id", "source_name", "units_per_block", "cell_min", "cell_max", "anchor_cell", "surfaces", "materials", "models", "props", "diagnostics");
-        }
+        // Both optional tables sit between props and diagnostics, in that order.
+        List<String> expected = new ArrayList<>(List.of("format", "version", "map_id", "source_name", "units_per_block",
+            "cell_min", "cell_max", "anchor_cell", "surfaces", "materials", "models", "props"));
+        if (map.has("pvs")) expected.add("pvs");
+        if (map.has("occlusion")) expected.add("occlusion");
+        expected.add("diagnostics");
+        keys(map, expected.toArray(String[]::new));
         format(map, "src2mc-map", path);
         if (!mapId.equals(string(map, "map_id"))) fail(BundleErrorCode.INVALID_REFERENCE, "map ID differs from path: " + path);
         String sourceName = string(map, "source_name");
@@ -125,6 +128,12 @@ final class BundleSchemaValidator {
             referenced.add(pvsPath);
             pvs = validatePvs(zip, required(entries, pvsPath));
         }
+        OcclusionTable occlusion = null;
+        if (map.has("occlusion")) {
+            String occlusionPath = exactPath(map, "occlusion", prefix + "occlusion.s2occl");
+            referenced.add(occlusionPath);
+            occlusion = validateOcclusion(zip, required(entries, occlusionPath));
+        }
         referenced.addAll(List.of(surfaces, props, diagnostics));
         SurfaceTable surfaceTable = validateFaces(zip, required(entries, surfaces), materials.size());
         List<BundleProp> propRecords = validateProps(zip, required(entries, props), modelRefs.size());
@@ -144,7 +153,7 @@ final class BundleSchemaValidator {
         }
         long mapHeight = (long) max[1] - min[1] + 1;
         return new BundleMap(mapId, sourceName, min, max, anchor, loadedMaterials, modelRefs, propRecords, mapHeight > 384,
-            surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs);
+            surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion);
     }
 
     private static AtlasIndex validateAtlas(ZipFile zip, Map<String, ZipEntry> entries, Map<String, String> hashes, String path, Set<String> referenced) throws IOException {
@@ -340,6 +349,31 @@ final class BundleSchemaValidator {
     }
 
     /** Parses and validates the optional prop visibility table (format.md section 12). */
+    private static OcclusionTable validateOcclusion(ZipFile zip, ZipEntry entry) throws IOException {
+        try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
+            in.magic(OCCLUSION_MAGIC);
+            in.version();
+            long sections = in.count(BundleLimits.MAX_SECTIONS_PER_MAP, "occlusion section");
+            in.requireRemaining(Math.multiplyExact(sections, 12L + OcclusionTable.SECTION_BYTES), "occlusion payload");
+            Map<SurfaceTable.SectionPos, byte[]> loaded = new java.util.HashMap<>();
+            int[] previous = null;
+            for (long i = 0; i < sections; i++) {
+                int[] at = {in.i32(), in.i32(), in.i32()};
+                if (previous != null && compare(previous, at) >= 0) {
+                    fail(BundleErrorCode.DUPLICATE_IDENTITY, "occlusion sections are not uniquely sorted");
+                }
+                previous = at;
+                byte[] bits = in.bytes(OcclusionTable.SECTION_BYTES);
+                boolean empty = true;
+                for (byte value : bits) if (value != 0) { empty = false; break; }
+                if (empty) fail(BundleErrorCode.INVALID_SCHEMA, "occlusion section has no cells");
+                loaded.put(new SurfaceTable.SectionPos(at[0], at[1], at[2]), bits);
+            }
+            in.end();
+            return new OcclusionTable(loaded);
+        }
+    }
+
     private static PropVisibility validatePvs(ZipFile zip, ZipEntry entry) throws IOException {
         try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
             in.magic(PVS_MAGIC);

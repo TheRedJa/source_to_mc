@@ -39,5 +39,7 @@ public final class PlacementIndex {
     }
 
     public List<MapPlacement> view() { return List.copyOf(placements); }
+    /** Count without copying, for per-tick change checks. */
+    public int size() { return placements.size(); }
     public enum Registration { ADDED, UNCHANGED, OVERLAP }
 }

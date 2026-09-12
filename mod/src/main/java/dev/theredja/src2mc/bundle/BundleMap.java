@@ -16,7 +16,9 @@ public record BundleMap(
     SurfaceTable surfaces,
     java.util.Set<String> modelContentIds,
     AtlasIndex atlas,
-    PropVisibility pvs
+    PropVisibility pvs,
+    // Cells that block light without holding a block; null when the map has none.
+    OcclusionTable occlusion
 ) {
     public BundleMap {
         cellMin = cellMin.clone();
@@ -41,7 +43,7 @@ public record BundleMap(
             && materials.equals(map.materials) && models.equals(map.models) && props.equals(map.props)
             && exceedsVanillaBuildHeight == map.exceedsVanillaBuildHeight && surfaces.equals(map.surfaces)
             && modelContentIds.equals(map.modelContentIds) && java.util.Objects.equals(atlas, map.atlas)
-            && pvs == map.pvs;
+            && pvs == map.pvs && occlusion == map.occlusion;
     }
 
     @Override
@@ -53,7 +55,11 @@ public record BundleMap(
         result = 31 * result + surfaces.hashCode();
         result = 31 * result + modelContentIds.hashCode();
         result = 31 * result + java.util.Objects.hashCode(atlas);
-        return 31 * result + System.identityHashCode(pvs);
+        result = 31 * result + System.identityHashCode(pvs);
+        // Identity, like the visibility table: both are large and are never
+        // rebuilt within one published generation, and this record is hashed
+        // often enough that walking them would cost real frame time.
+        return 31 * result + System.identityHashCode(occlusion);
     }
 
     public int materialCount() { return materials.size(); }

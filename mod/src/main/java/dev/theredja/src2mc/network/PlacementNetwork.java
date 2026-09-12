@@ -21,6 +21,11 @@ public final class PlacementNetwork {
                 PlacementIndex index = new PlacementIndex();
                 payload.placements().forEach(index::register);
                 CLIENT.put(payload.dimension(), index);
+                // The client draws from its own light engine, so it bakes the
+                // map's sky light itself from the same bundle the server used.
+                if (context.player().level() instanceof net.minecraft.world.level.Level level) {
+                    dev.theredja.src2mc.world.LightOcclusion.publishClient(level, payload.dimension(), index);
+                }
             });
     }
 

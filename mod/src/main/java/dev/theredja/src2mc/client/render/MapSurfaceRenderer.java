@@ -78,6 +78,10 @@ public final class MapSurfaceRenderer {
      * but contributes nothing usable to the deferred pass. */
     private static RenderLevelStageEvent.Stage opaqueStage = RenderLevelStageEvent.Stage.AFTER_SOLID_BLOCKS;
     private static final java.util.Set<String> SHADOW_STAGES_SEEN = new java.util.LinkedHashSet<>();
+    // One light per vertex rather than one per face. Kept as a toggle because
+    // lighting is judged by looking at it, and the flat build is the only
+    // honest comparison.
+    private static boolean smoothLighting = true;
     private static boolean pvsCulling = true;
     private static boolean frustumCulling = true;
     /** Shadow-caster cutoff in blocks. The shaderpack's own shadow-distance setting only culls
@@ -132,6 +136,9 @@ public final class MapSurfaceRenderer {
             .then(net.minecraft.commands.Commands.argument("blocks", com.mojang.brigadier.arguments.DoubleArgumentType.doubleArg(0))
                 .executes(context -> setShadowDistance(context.getSource(),
                     com.mojang.brigadier.arguments.DoubleArgumentType.getDouble(context, "blocks")))));
+        event.getDispatcher().register(literal("src2mc_smooth_light")
+            .then(literal("on").executes(context -> setSmoothLighting(context.getSource(), true)))
+            .then(literal("off").executes(context -> setSmoothLighting(context.getSource(), false))));
         event.getDispatcher().register(literal("src2mc_cull")
             .then(literal("pvs").then(literal("on").executes(context -> setPvsCulling(context.getSource(), true)))
                 .then(literal("off").executes(context -> setPvsCulling(context.getSource(), false))))
@@ -143,6 +150,18 @@ public final class MapSurfaceRenderer {
         shadowDistance = blocks;
         source.sendSuccess(() -> Component.literal("src2mc shadow caster distance = "
             + (blocks <= 0 ? "unlimited" : blocks + " blocks")), false);
+        return 1;
+    }
+
+    /** Drops every built mesh, since the light is baked into them at build time. */
+    private static int setSmoothLighting(net.minecraft.commands.CommandSourceStack source, boolean value) {
+        smoothLighting = value;
+        MESHES.values().forEach(Mesh::close);
+        MESHES.clear();
+        BUILT_REGIONS.clear();
+        PENDING_BUILDS.clear();
+        PropRenderer.invalidateAllLight();
+        source.sendSuccess(() -> Component.literal("src2mc smooth lighting " + (value ? "on" : "off")), false);
         return 1;
     }
 
@@ -174,7 +193,8 @@ public final class MapSurfaceRenderer {
 
     private static int renderStatus(net.minecraft.commands.CommandSourceStack source) {
         AtlasPageResidency.Stats stats = PAGES.stats();
-        source.sendSuccess(() -> Component.literal("src2mc render: regions=" + BUILT_REGIONS.size()
+        source.sendSuccess(() -> Component.literal("src2mc render: smooth-light " + (smoothLighting ? "on" : "off")
+            + ", regions=" + BUILT_REGIONS.size()
             + ", meshes=" + MESHES.size() + ", atlas resident=" + stats.residentPages() + "/" + stats.trackedPages()
             + ", vram=" + formatBytes(stats.residentVramBytes()) + ", decode-pending=" + formatBytes(stats.pendingRamBytes())
             + ", requests=" + stats.requests() + " (hit=" + stats.hits() + ", miss=" + stats.misses()
@@ -262,6 +282,8 @@ public final class MapSurfaceRenderer {
     static RenderLevelStageEvent.Stage opaqueStage() { return opaqueStage; }
 
     static boolean pvsCulling() { return pvsCulling; }
+
+    static boolean smoothLighting() { return smoothLighting; }
 
     static boolean frustumCulling() { return frustumCulling; }
 
@@ -452,11 +474,13 @@ public final class MapSurfaceRenderer {
                 if (texture == null) continue;
                 int local = face.localCell();
                 int x = baseX + (local & 15), y = baseY + (local >> 8 & 15), z = baseZ + (local >> 4 & 15);
-                int light = sampleFaceLight(build.placement, x, y, z, face.patch(), build.lightCache);
                 for (var triangle : SurfaceTessellator.tessellate(x, y, z, face,
                     map.surfaces().uvRegions().get(face.uvRegionId()), material.texture(), texture, map.atlas().pageSize())) {
                     build.triangles.computeIfAbsent(new PageClass(triangle.page(), material.renderClass()), ignored -> new ArrayList<>())
-                        .add(new LitTriangle(triangle, light));
+                        .add(new LitTriangle(triangle,
+                            sampleVertexLight(build.placement, triangle.a(), face.patch(), build.lightCache),
+                            sampleVertexLight(build.placement, triangle.b(), face.patch(), build.lightCache),
+                            sampleVertexLight(build.placement, triangle.c(), face.patch(), build.lightCache)));
                 }
             }
         }
@@ -493,19 +517,29 @@ public final class MapSurfaceRenderer {
         }
     }
 
-    /** One sample per face, at the face's own position offset one block outward along its patch
-     * direction: matches vanilla's flat (non-smooth) block lighting and costs one lookup per
-     * face rather than one per triangle vertex. */
-    private static int sampleFaceLight(MapPlacement placement, int x, int y, int z, int patch, Map<Long, Integer> cache) {
+    /**
+     * One sample per vertex, at the vertex's own world position and along its
+     * face's patch direction.
+     *
+     * One sample per face is what vanilla calls flat lighting, and it steps in
+     * whole blocks -- a wall lit by one torch went from cell to cell rather
+     * than fading. The eight cells behind a smooth sample all come out of the
+     * build's own cache, so the extra cost is lookups in a hash map, not light
+     * computations, and nothing changes per frame.
+     */
+    private static int sampleVertexLight(MapPlacement placement, SurfaceTessellator.Vertex vertex, int patch,
+                                         Map<Long, Integer> cache) {
         int dirIndex = patch & 7;
         Direction direction = dirIndex < 6 ? Direction.values()[dirIndex] : null;
         float nx = direction == null ? 0 : direction.getStepX();
         float ny = direction == null ? 0 : direction.getStepY();
         float nz = direction == null ? 0 : direction.getStepZ();
-        double worldX = placement.translation().getX() + x + 0.5 + nx * 0.5;
-        double worldY = placement.translation().getY() + y + 0.5 + ny * 0.5;
-        double worldZ = placement.translation().getZ() + z + 0.5 + nz * 0.5;
-        return LightSampler.sample(level, worldX, worldY, worldZ, nx, ny, nz, cache);
+        double worldX = placement.translation().getX() + vertex.x();
+        double worldY = placement.translation().getY() + vertex.y();
+        double worldZ = placement.translation().getZ() + vertex.z();
+        return smoothLighting
+            ? LightSampler.smooth(level, worldX, worldY, worldZ, nx, ny, nz, cache)
+            : LightSampler.sample(level, worldX, worldY, worldZ, nx, ny, nz, cache);
     }
 
     private static Mesh upload(BundleManifest bundle, AtlasIndex atlas, BlockPos origin, AABB bounds,
@@ -515,9 +549,9 @@ public final class MapSurfaceRenderer {
             var builder = new BufferBuilder(bytes, VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.NEW_ENTITY);
             for (var lit : triangles) {
                 SurfaceTessellator.Triangle triangle = lit.triangle();
-                vertex(builder, triangle.a(), baseX, baseY, baseZ, triangle, lit.light());
-                vertex(builder, triangle.b(), baseX, baseY, baseZ, triangle, lit.light());
-                vertex(builder, triangle.c(), baseX, baseY, baseZ, triangle, lit.light());
+                vertex(builder, triangle.a(), baseX, baseY, baseZ, triangle, lit.lightA());
+                vertex(builder, triangle.b(), baseX, baseY, baseZ, triangle, lit.lightB());
+                vertex(builder, triangle.c(), baseX, baseY, baseZ, triangle, lit.lightC());
             }
             try (var data = builder.buildOrThrow()) {
                 var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
@@ -540,17 +574,17 @@ public final class MapSurfaceRenderer {
     }
 
     /** Removes the built mesh for the region overlapping {@code worldSection} so the next frame's
-     * build loop rebuilds it with fresh light. Covers the section itself plus its six face
-     * neighbours: a face samples light one block along its own axis-aligned normal, so the sampled
-     * block is never in a diagonal section, and widening this to the full 3x3x3 only multiplied
-     * the number of 64-block regions rebuilt per torch. */
+     * build loop rebuilds it with fresh light. Covers the section itself and all 26 neighbours:
+     * a smooth sample reads the eight cells around a point up to half a block outside the face,
+     * so a change diagonally across a section corner does reach this region's vertices. */
     static void invalidateLight(MapPlacement placement, SectionPos worldSection) {
         BlockPos local = placement.toLocal(new BlockPos(SectionPos.sectionToBlockCoord(worldSection.x()),
             SectionPos.sectionToBlockCoord(worldSection.y()), SectionPos.sectionToBlockCoord(worldSection.z())));
         int sx = Math.floorDiv(local.getX(), 16), sy = Math.floorDiv(local.getY(), 16), sz = Math.floorDiv(local.getZ(), 16);
-        invalidateRegionAt(placement, sx, sy, sz);
-        for (Direction direction : Direction.values()) {
-            invalidateRegionAt(placement, sx + direction.getStepX(), sy + direction.getStepY(), sz + direction.getStepZ());
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) invalidateRegionAt(placement, sx + dx, sy + dy, sz + dz);
+            }
         }
     }
 
@@ -646,7 +680,7 @@ public final class MapSurfaceRenderer {
         return pvs.visible(CameraVisibility.row(), clusters);
     }
 
-    private record LitTriangle(SurfaceTessellator.Triangle triangle, int light) {}
+    private record LitTriangle(SurfaceTessellator.Triangle triangle, int lightA, int lightB, int lightC) {}
     private record RegionCoord(int x, int y, int z) {}
     private record RegionGroup(List<SurfaceTable.SectionPos> sections, short[] clusters,
                                 int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {}

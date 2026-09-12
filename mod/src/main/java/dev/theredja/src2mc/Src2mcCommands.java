@@ -29,6 +29,18 @@ final class Src2mcCommands {
                 .requires(source -> source.hasPermission(2))
                 .then(argument("mapId", StringArgumentType.word())
                     .executes(context -> place(context.getSource(), StringArgumentType.getString(context, "mapId")))))
+            .then(literal("lightmask")
+                .requires(source -> source.hasPermission(2))
+                .executes(context -> lightMaskStatus(context.getSource()))
+                .then(argument("enabled", com.mojang.brigadier.arguments.BoolArgumentType.bool())
+                    .executes(context -> lightMask(context.getSource(),
+                        com.mojang.brigadier.arguments.BoolArgumentType.getBool(context, "enabled")))))
+            .then(literal("lightcolumn")
+                .requires(source -> source.hasPermission(2))
+                .executes(context -> lightColumn(context.getSource()))
+                .then(argument("height", com.mojang.brigadier.arguments.IntegerArgumentType.integer(1, 512))
+                    .executes(context -> lightColumn(context.getSource(),
+                        com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "height")))))
             .then(literal("status").executes(context -> {
                 var generation = Src2mc.BUNDLES.active();
                 context.getSource().sendSuccess(
@@ -40,6 +52,101 @@ final class Src2mcCommands {
                 );
                 return 1;
             })));
+    }
+
+    /**
+     * What the bake holds here: its own value at the player, the value the
+     * light engine ended up with, and the column above. The two disagreeing is
+     * the signature of light that was published and then recomputed away.
+     */
+    private static int lightMaskStatus(net.minecraft.commands.CommandSourceStack source) {
+        var level = source.getLevel();
+        net.minecraft.core.BlockPos at = net.minecraft.core.BlockPos.containing(source.getPosition());
+        var baked = dev.theredja.src2mc.world.LightOcclusion.baked(level);
+
+        StringBuilder column = new StringBuilder();
+        for (int y = at.getY() + 10; y >= at.getY() - 2; y--) {
+            net.minecraft.core.BlockPos probe = new net.minecraft.core.BlockPos(at.getX(), y, at.getZ());
+            int sky = dev.theredja.src2mc.world.LightOcclusion.skyAt(level, at.getX(), y, at.getZ());
+            column.append(!level.getBlockState(probe).isAir() ? '#' : sky < 0 ? '?' : Character.forDigit(sky, 16));
+        }
+        source.sendSuccess(() -> Component.literal("src2mc: sky-light bake "
+            + (dev.theredja.src2mc.world.LightOcclusion.enabled() ? "on" : "off")
+            + "; shaded=" + baked.darkCells() + " open=" + baked.litCells()
+            + " sections=" + baked.sections().size() + " in " + baked.millis() + "ms"
+            + "; y=" + at.getY()
+            + " baked=" + describe(dev.theredja.src2mc.world.LightOcclusion.skyAt(level, at.getX(), at.getY(), at.getZ()), -1)
+            + " engine sky=" + level.getBrightness(net.minecraft.world.level.LightLayer.SKY, at)
+            + " block=" + level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, at)
+            + "; column +10..-2 " + column), false);
+        return 1;
+    }
+
+    private static int lightColumn(net.minecraft.commands.CommandSourceStack source) {
+        return lightColumn(source, 96);
+    }
+
+    /**
+     * Everything above the player in one column: real blocks, what the bake
+     * says, and what the light engine answers. This is where a ceiling that
+     * should stop daylight either shows up or does not.
+     */
+    private static int lightColumn(net.minecraft.commands.CommandSourceStack source, int height) {
+        var level = source.getLevel();
+        net.minecraft.core.BlockPos at = net.minecraft.core.BlockPos.containing(source.getPosition());
+        var placement = dev.theredja.src2mc.world.PlacementSavedData.get(level).index().at(at);
+        StringBuilder found = new StringBuilder();
+        int blocks = 0, shaded = 0;
+        for (int above = 0; above <= height; above++) {
+            net.minecraft.core.BlockPos probe = at.above(above);
+            var state = level.getBlockState(probe);
+            int baked = dev.theredja.src2mc.world.LightOcclusion.skyAt(level, probe.getX(), probe.getY(), probe.getZ());
+            if (baked >= 0 && baked < 15) shaded++;
+            if (state.isAir()) continue;
+            blocks++;
+            if (found.length() < 180) {
+                found.append(' ').append(probe.getY()).append('#')
+                    .append(state.getBlock().getName().getString().replace("Block of ", ""))
+                    .append("/sky").append(level.getBrightness(net.minecraft.world.level.LightLayer.SKY, probe));
+            }
+        }
+        // Neighbouring columns: a ceiling built from plates can miss the one
+        // column being stood in while sealing the ones beside it.
+        StringBuilder around = new StringBuilder();
+        for (net.minecraft.core.Direction side : net.minecraft.core.Direction.Plane.HORIZONTAL) {
+            net.minecraft.core.BlockPos next = at.relative(side);
+            around.append(' ').append(side.getName().charAt(0))
+                .append('=').append(describe(dev.theredja.src2mc.world.LightOcclusion
+                    .skyAt(level, next.getX(), next.getY(), next.getZ()), -1))
+                .append('/').append(level.getBrightness(net.minecraft.world.level.LightLayer.SKY, next));
+        }
+        String local = placement.map(value -> {
+            var cell = value.toLocal(at);
+            return value.mapId() + " local=" + cell.getX() + "," + cell.getY() + "," + cell.getZ();
+        }).orElse("no placement here");
+        int blockCount = blocks, shadedCount = shaded;
+        source.sendSuccess(() -> Component.literal("src2mc: column at " + at.getX() + "," + at.getY() + "," + at.getZ()
+            + " (" + local + "); within " + height + " above: blocks=" + blockCount + " shaded=" + shadedCount
+            + ";" + (found.isEmpty() ? " no blocks at all" : found)
+            + "; here baked/engine" + around), false);
+        return 1;
+    }
+
+    private static String describe(int value, int absent) {
+        return value == absent ? "none" : String.valueOf(value);
+    }
+
+    /**
+     * Turn the sky-light bake on or off and republish, so its effect can be
+     * compared in place rather than across two exports. Off hands the same
+     * sections full daylight, which is what vanilla alone produces here.
+     */
+    private static int lightMask(net.minecraft.commands.CommandSourceStack source, boolean enabled) {
+        dev.theredja.src2mc.world.LightOcclusion.setEnabled(enabled);
+        int shaded = dev.theredja.src2mc.world.LightOcclusion.rebuild(source.getLevel());
+        source.sendSuccess(() -> Component.literal("src2mc: sky-light bake "
+            + (enabled ? "on" : "off") + "; shaded cells=" + shaded), true);
+        return 1;
     }
 
     private static int validate(net.minecraft.commands.CommandSourceStack source) {
@@ -79,6 +186,9 @@ final class Src2mcCommands {
                 true
             );
             warnForTallMaps(source, generation);
+            // The bake is computed from the bundles, so a new generation can
+            // change it — including removing it when a map is withdrawn.
+            dev.theredja.src2mc.world.LightOcclusion.rebuild(source.getLevel());
             return 1;
         } catch (java.io.IOException exception) {
             Src2mc.LOGGER.error("src2mc reload failed; retaining generation {}", retained, exception);
