@@ -118,7 +118,8 @@ Important commands:
 
 - `/src2mc status`
 - `/src2mc validate`
-- `/src2mc reload`
+- `/src2mc reload` (bundles also load by themselves in the background during
+  game startup; the command is for picking up a bundle that changed on disk)
 - `/src2mc reconcile`
 - `/src2mc_render_status`
 - `/src2mc_prop_status`

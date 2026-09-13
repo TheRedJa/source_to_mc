@@ -155,30 +155,36 @@ public final class BundleValidator {
         if (actual.size() != declared.size() + 1) {
             throw failure(BundleErrorCode.INVALID_REFERENCE, "ZIP entries do not match manifest");
         }
-        for (BundleManifest.Entry expected : declared) {
-            ZipEntry entry = actual.get(expected.path());
-            if (entry == null) {
-                throw failure(BundleErrorCode.MISSING_ENTRY, "missing " + expected.path());
-            }
-            if (entry.getSize() != expected.size()) {
-                throw failure(BundleErrorCode.HASH_MISMATCH, "size differs for " + expected.path());
-            }
-            MessageDigest digest = sha256();
-            long read = 0;
-            try (InputStream input = zip.getInputStream(entry)) {
-                byte[] buffer = new byte[64 * 1024];
-                for (int count; (count = input.read(buffer)) >= 0;) {
-                    if (count == 0) continue;
-                    read = Math.addExact(read, count);
-                    if (read > expected.size()) {
-                        throw failure(BundleErrorCode.HASH_MISMATCH, "entry expands beyond declared size: " + expected.path());
-                    }
-                    digest.update(buffer, 0, count);
+        // Hashing is the bulk of a load and every entry is independent;
+        // ZipFile.getInputStream is safe to call from several threads at once,
+        // and each job keeps its own buffer and digest.
+        BundleLoadPool.forEach(declared, expected -> verifyEntry(zip, actual, expected));
+    }
+
+    private static void verifyEntry(ZipFile zip, Map<String, ZipEntry> actual, BundleManifest.Entry expected)
+        throws IOException {
+        ZipEntry entry = actual.get(expected.path());
+        if (entry == null) {
+            throw failure(BundleErrorCode.MISSING_ENTRY, "missing " + expected.path());
+        }
+        if (entry.getSize() != expected.size()) {
+            throw failure(BundleErrorCode.HASH_MISMATCH, "size differs for " + expected.path());
+        }
+        MessageDigest digest = sha256();
+        long read = 0;
+        try (InputStream input = zip.getInputStream(entry)) {
+            byte[] buffer = new byte[64 * 1024];
+            for (int count; (count = input.read(buffer)) >= 0;) {
+                if (count == 0) continue;
+                read = Math.addExact(read, count);
+                if (read > expected.size()) {
+                    throw failure(BundleErrorCode.HASH_MISMATCH, "entry expands beyond declared size: " + expected.path());
                 }
+                digest.update(buffer, 0, count);
             }
-            if (read != expected.size() || !HEX.formatHex(digest.digest()).equals(expected.sha256())) {
-                throw failure(BundleErrorCode.HASH_MISMATCH, "payload differs for " + expected.path());
-            }
+        }
+        if (read != expected.size() || !HEX.formatHex(digest.digest()).equals(expected.sha256())) {
+            throw failure(BundleErrorCode.HASH_MISMATCH, "payload differs for " + expected.path());
         }
     }
 

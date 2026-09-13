@@ -74,6 +74,51 @@ final class BundleValidatorTest {
     }
 
     @Test
+    void loadsSeveralBundlesInParallelWithAStableResult() throws Exception {
+        for (int i = 0; i < 6; i++) {
+            String campaign = "hl" + i;
+            writeBundle(directory.resolve(campaign + ".src2mc"), 1, campaign, "campaign.json", campaign(campaign), false);
+        }
+        var repository = new BundleRepository(() -> directory);
+
+        BundleGeneration first = repository.reload();
+        BundleGeneration second = repository.reload();
+
+        assertEquals(6, first.bundles().size());
+        assertEquals(first.fingerprint(), second.fingerprint());
+        // Filename order, whatever order the threads finished in.
+        assertEquals(List.of("hl0", "hl1", "hl2", "hl3", "hl4", "hl5"),
+            second.bundles().stream().map(BundleManifest::campaignId).toList());
+    }
+
+    @Test
+    void reloadAsyncPublishesTheSameGenerationAndReportsProgress() throws Exception {
+        writeBundle(directory.resolve("campaign.src2mc"), 1, "hl2", "campaign.json", campaign("hl2"), false);
+        var repository = new BundleRepository(() -> directory);
+
+        BundleGeneration published = repository.reloadAsync().get(30, java.util.concurrent.TimeUnit.SECONDS);
+
+        assertEquals(published, repository.active());
+        assertEquals(BundleLoadProgress.State.DONE, BundleLoadProgress.snapshot().state());
+        assertEquals(1, BundleLoadProgress.snapshot().total());
+    }
+
+    @Test
+    void aFailedAsyncLoadIsReportedWithoutReplacingTheActiveGeneration() throws Exception {
+        Path bundle = directory.resolve("campaign.src2mc");
+        writeBundle(bundle, 1, "hl2", "campaign.json", campaign("hl2"), false);
+        var repository = new BundleRepository(() -> directory);
+        BundleGeneration good = repository.reload();
+
+        writeBundle(bundle, 1, "hl2", "campaign.json", "corrupt\n".getBytes(StandardCharsets.UTF_8), true);
+        assertThrows(java.util.concurrent.ExecutionException.class,
+            () -> repository.reloadAsync().get(30, java.util.concurrent.TimeUnit.SECONDS));
+
+        assertEquals(good, repository.active());
+        assertEquals(BundleLoadProgress.State.FAILED, BundleLoadProgress.snapshot().state());
+    }
+
+    @Test
     void validatesCompleteMapSchemasAndRejectsMalformedBinary() throws Exception {
         Path valid = directory.resolve("map.src2mc");
         Map<String, byte[]> payloads = emptyMapPayloads();

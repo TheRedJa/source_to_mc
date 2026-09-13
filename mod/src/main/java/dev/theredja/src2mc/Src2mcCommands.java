@@ -45,7 +45,9 @@ final class Src2mcCommands {
                 var generation = Src2mc.BUNDLES.active();
                 context.getSource().sendSuccess(
                     () -> Component.literal(generation.sequence() == 0
-                        ? "src2mc: no campaign generation loaded; folder=" + Src2mc.BUNDLES.directory()
+                        ? "src2mc: no campaign generation loaded (load state "
+                            + dev.theredja.src2mc.bundle.BundleLoadProgress.snapshot().state()
+                            + "); folder=" + Src2mc.BUNDLES.directory()
                         : "src2mc: generation " + generation.sequence() + ", bundles="
                             + generation.bundles().size() + ", fingerprint=" + generation.fingerprint()),
                     false
@@ -180,9 +182,10 @@ final class Src2mcCommands {
                 "Published src2mc generation {}: bundles={}, fingerprint={}",
                 generation.sequence(), generation.bundles().size(), generation.fingerprint()
             );
+            long millis = dev.theredja.src2mc.bundle.BundleLoadProgress.snapshot().millis();
             source.sendSuccess(
                 () -> Component.literal("src2mc: loaded generation " + generation.sequence()
-                    + " with " + generation.bundles().size() + " bundle(s)"),
+                    + " with " + generation.bundles().size() + " bundle(s) in " + millis + " ms"),
                 true
             );
             warnForTallMaps(source, generation);

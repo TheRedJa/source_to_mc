@@ -6,8 +6,11 @@ static prop rendering is functional and under large-map performance work; root
 lifecycle and missing-material handling remain incomplete. The mod registers
 fixed generic world content plus `/src2mc status`, `validate`, `reload`, and
 `reconcile`; client diagnostics include `/src2mc_render_status` and
-`/src2mc_prop_status`. Surface rendering uses mod-owned paged textures rather
-than Minecraft's block atlas. Collision comes in Phase 6.
+`/src2mc_prop_status`. Bundles load by themselves in the background during game
+startup, so `/src2mc reload` is only needed for a bundle that changed on disk —
+see [`docs/bundle-loading.md`](docs/bundle-loading.md). Surface rendering uses
+mod-owned paged textures rather than Minecraft's block atlas. Collision comes in
+Phase 6.
 
 The current implementation state, test paths, verified behavior, known defects,
 and next work are recorded in [`../SESSION_HANDOFF.md`](../SESSION_HANDOFF.md).

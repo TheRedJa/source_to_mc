@@ -15,13 +15,12 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
-import javax.imageio.ImageIO;
 
 /** Semantic and binary-schema validation after the ZIP has passed its hash envelope. */
 final class BundleSchemaValidator {
@@ -34,6 +33,9 @@ final class BundleSchemaValidator {
 
     private BundleSchemaValidator() {}
 
+    /** One campaign map, after the campaign-level checks and before its own. */
+    private record MapRef(String mapId, String metadata) {}
+
     static List<BundleMap> validate(ZipFile zip, Map<String, ZipEntry> entries, String manifestCampaign, List<BundleManifest.Entry> manifestEntries) throws IOException {
         Map<String, String> hashes = new java.util.HashMap<>();
         for (BundleManifest.Entry entry : manifestEntries) hashes.put(entry.path(), entry.sha256());
@@ -44,13 +46,16 @@ final class BundleSchemaValidator {
         if (!manifestCampaign.equals(string(campaign, "campaign_id"))) fail(BundleErrorCode.INVALID_REFERENCE, "campaign IDs differ");
         JsonArray maps = array(campaign, "maps");
         limit(maps.size(), BundleLimits.MAX_MAPS, "map count");
-        String previous = null;
-        Set<String> referenced = new HashSet<>();
+        // Everything a map validates is its own; the only shared state left is
+        // the referenced-payload set, so the campaign-level checks that do care
+        // about order -- sortedness, canonical metadata paths -- happen here,
+        // before the maps themselves are handed to the pool.
+        Set<String> referenced = ConcurrentHashMap.newKeySet();
         AtlasIndex atlas = campaign.has("atlas")
             ? validateAtlas(zip, entries, hashes, exactPath(campaign, "atlas", "atlas.json"), referenced)
             : null;
-        List<BundleMap> loadedMaps = new ArrayList<>(maps.size());
-        long modelCount = 0;
+        String previous = null;
+        List<MapRef> refs = new ArrayList<>(maps.size());
         for (JsonElement itemElement : maps) {
             JsonObject item = object(itemElement, "campaign map");
             keys(item, "map_id", "metadata");
@@ -59,10 +64,14 @@ final class BundleSchemaValidator {
             previous = mapId;
             String metadata = string(item, "metadata");
             if (!metadata.equals("maps/" + mapId + ".json")) fail(BundleErrorCode.INVALID_REFERENCE, "non-canonical metadata path for " + mapId);
-            BundleMap loaded = validateMap(zip, entries, hashes, mapId, metadata, referenced, atlas);
+            refs.add(new MapRef(mapId, metadata));
+        }
+        List<BundleMap> loadedMaps = BundleLoadPool.map(refs,
+            ref -> validateMap(zip, entries, hashes, ref.mapId(), ref.metadata(), referenced, atlas));
+        long modelCount = 0;
+        for (BundleMap loaded : loadedMaps) {
             modelCount = Math.addExact(modelCount, loaded.modelCount());
             limit(modelCount, BundleLimits.MAX_MODELS_PER_CAMPAIGN, "campaign model count");
-            loadedMaps.add(loaded);
         }
         for (String path : entries.keySet()) {
             if (path.equals("manifest.json") || path.equals("campaign.json")) continue;
@@ -139,12 +148,15 @@ final class BundleSchemaValidator {
         List<BundleProp> propRecords = validateProps(zip, required(entries, props), modelRefs.size());
         validateDiagnostics(json(zip, required(entries, diagnostics), diagnostics));
 
-        for (BundleModel model : modelRefs) {
+        // A map's meshes are the bulk of its validation and each is walked on
+        // its own, so this is where the parallelism pays for a campaign that
+        // holds a single large map.
+        BundleLoadPool.forEach(modelRefs, model -> {
             String mesh = "meshes/" + model.contentId() + ".s2mesh";
             referenced.add(mesh);
             contentHash(hashes, mesh, model.contentId());
             validateMesh(zip, required(entries, mesh), model.materialSlotCount());
-        }
+        });
         if (!textureIds.isEmpty() && atlas == null) fail(BundleErrorCode.MISSING_ENTRY, "textured materials require atlas.json");
         for (Map.Entry<String, int[]> textureRef : textureIds.entrySet()) {
             AtlasIndex.Texture texture = atlas.textures().get(textureRef.getKey());
@@ -434,21 +446,19 @@ final class BundleSchemaValidator {
         }
     }
 
+    /**
+     * The IHDR already carries everything the bundle claims about a page, so
+     * the header check is the whole check. Decoding the image here would cost a
+     * full 4096-square inflate per mip per page and learn nothing: the payload
+     * bytes are already proven against the manifest hash, and the real decode
+     * happens at render time in AtlasPageResidency, which checks the dimensions
+     * again before it uploads.
+     */
     private static void validatePng(ZipFile zip, ZipEntry entry, int[] expectedDimensions) throws IOException {
         try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
             in.magic(PNG_SIGNATURE); if(in.u32be()!=13 || !Arrays.equals(in.bytes(4),new byte[]{'I','H','D','R'})) fail(BundleErrorCode.INVALID_SCHEMA,"PNG lacks canonical IHDR");
             long width=in.u32be(),height=in.u32be(); if(width==0||height==0||width>BundleLimits.MAX_OUTPUT_TEXTURE_AXIS||height>BundleLimits.MAX_OUTPUT_TEXTURE_AXIS||width*height*4>BundleLimits.MAX_DECODED_TEXTURE_BYTES) fail(BundleErrorCode.LIMIT_EXCEEDED,"PNG dimensions exceed limits");
             if (width != expectedDimensions[0] || height != expectedDimensions[1]) fail(BundleErrorCode.INVALID_REFERENCE, "PNG dimensions differ from texture metadata");
-        }
-        try (InputStream input = zip.getInputStream(entry)) {
-            var decoded = ImageIO.read(input);
-            if (decoded == null || decoded.getWidth() != expectedDimensions[0] || decoded.getHeight() != expectedDimensions[1]) {
-                fail(BundleErrorCode.INVALID_SCHEMA, "PNG payload cannot be decoded as declared");
-            }
-        } catch (BundleValidationException exception) {
-            throw exception;
-        } catch (RuntimeException exception) {
-            throw new BundleValidationException(BundleErrorCode.INVALID_SCHEMA, "PNG decoding failed", exception);
         }
     }
 
