@@ -15,6 +15,7 @@ import dev.theredja.src2mc.bundle.BundleMaterial;
 import dev.theredja.src2mc.bundle.BundleMap;
 import dev.theredja.src2mc.bundle.SurfaceTable;
 import dev.theredja.src2mc.network.PlacementNetwork;
+import dev.theredja.src2mc.world.LightOcclusion;
 import dev.theredja.src2mc.world.MapPlacement;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -72,6 +73,11 @@ public final class MapSurfaceRenderer {
     private static long worstBuildNanos;
     private static long shadowPassCallsSinceMainPass;
     private static long shadowPassCallsLastFrame;
+    /** Shadow-pass draw-set accounting, accumulated across a frame's shadow invocations and latched
+     * when the next main pass runs. Without it the only visible fact about the shadow map is how
+     * many times we were called, which says nothing about what reached it. */
+    private static long shadowConsidered, shadowRejectedUnbuilt, shadowRejectedDistance, shadowDrawn;
+    private static long shadowConsideredLast, shadowRejectedUnbuiltLast, shadowRejectedDistanceLast, shadowDrawnLast;
     /** Which stage the opaque draw runs in. Switchable at runtime because Iris picks a shaderpack
      * program from the rendering phase it is in, so the stage a mod draws from decides which
      * gbuffers program its geometry lands in — and the wrong one produces geometry that is drawn
@@ -88,6 +94,13 @@ public final class MapSurfaceRenderer {
      * Sodium's terrain, never mod-owned geometry, so without this the whole map is rasterized into
      * the shadow map every frame. */
     private static double shadowDistance = 75.0;
+    /** Whether to zero Iris's captured entity/block-entity/item ids while a mesh is uploaded. On,
+     * because Iris stamps whatever was rendering at that moment into every vertex of the extended
+     * entity format, and the label sticks for the life of the buffer -- a pack with entity shadows
+     * disabled then keeps our geometry out of the shadow map. The format extension itself cannot be
+     * skipped: Iris rewrites the attribute layout for every NEW_ENTITY buffer while a pack is in
+     * use, so a buffer built without the extra elements is read with the wrong stride. */
+    private static boolean neutralEntityId = true;
 
     /** Region builds in flight, oldest first; bounded so the accumulated triangle lists of
      * half-built regions cannot pile up. */
@@ -102,6 +115,12 @@ public final class MapSurfaceRenderer {
         final Map<PageClass, List<LitTriangle>> triangles = new HashMap<>();
         final Map<Long, Integer> lightCache = new HashMap<>();
         int nextSection;
+        // Light provenance: what sky values this build captured, and which client bake they came
+        // from. A mesh holds its light until it is rebuilt, so a build that ran before the bake
+        // reached its sections stays wrong for the session.
+        int skyMin = 15, skyMax = 0;
+        final long bakeEpoch = LightOcclusion.clientEpoch();
+        boolean bakeCovered;
 
         PendingBuild(BundleManifest bundle, BundleMap map, MapPlacement placement, RegionGroup group) {
             this.bundle = bundle; this.map = map; this.placement = placement; this.group = group;
@@ -119,6 +138,10 @@ public final class MapSurfaceRenderer {
     public static void registerCommand(RegisterClientCommandsEvent event) {
         event.getDispatcher().register(literal("src2mc_debug_face").executes(context -> inspectFace(context.getSource())));
         event.getDispatcher().register(literal("src2mc_render_status").executes(context -> renderStatus(context.getSource())));
+        event.getDispatcher().register(literal("src2mc_rebuild_meshes").executes(context -> rebuildMeshes(context.getSource())));
+        event.getDispatcher().register(literal("src2mc_iris_entity_id")
+            .then(literal("neutral").executes(context -> setNeutralEntityId(context.getSource(), true)))
+            .then(literal("captured").executes(context -> setNeutralEntityId(context.getSource(), false))));
         event.getDispatcher().register(literal("src2mc_relight")
             .then(literal("on").executes(context -> setRelight(context.getSource(), true)))
             .then(literal("off").executes(context -> setRelight(context.getSource(), false))));
@@ -191,6 +214,69 @@ public final class MapSurfaceRenderer {
         return 1;
     }
 
+    /**
+     * What light the built meshes are holding and where it came from. A mesh freezes its light at
+     * build time, so a region built before the client's sky bake covered it keeps open daylight
+     * until something rebuilds it -- invisible in vanilla shading, and the whole picture under a
+     * shaderpack, which multiplies that sky value into its own sun term.
+     */
+    private static String lightProvenance() {
+        long uncovered = MESHES.values().stream().filter(mesh -> !mesh.bakeCovered).count();
+        long epoch = LightOcclusion.clientEpoch();
+        long stale = MESHES.values().stream().filter(mesh -> mesh.bakeEpoch != epoch).count();
+        int skyMin = MESHES.values().stream().mapToInt(mesh -> mesh.skyMin).min().orElse(-1);
+        int skyMax = MESHES.values().stream().mapToInt(mesh -> mesh.skyMax).max().orElse(-1);
+        return "light: meshes without a bake=" + uncovered + "/" + MESHES.size()
+            + ", built against an older bake=" + stale
+            + ", sky range=" + skyMin + ".." + skyMax
+            + ", client bake epoch=" + epoch + " from generation " + LightOcclusion.clientGeneration();
+    }
+
+    /** Which vertex layouts the built meshes actually hold, and how many were built with a pack in
+     * use. A stride other than 36 means Iris extended the format behind us. */
+    private static String vertexFormats() {
+        Map<Integer, Long> strides = new java.util.TreeMap<>();
+        long withShaders = 0;
+        for (Mesh mesh : MESHES.values()) {
+            strides.merge(mesh.vertexSize, 1L, Long::sum);
+            if (mesh.builtWithShaders) withShaders++;
+        }
+        int[] ids = IrisCompat.capturedIds();
+        return "vertex strides=" + strides + ", built with a pack in use=" + withShaders + "/" + MESHES.size()
+            + ", iris entity id " + (neutralEntityId ? "zeroed" : "as captured")
+            + (IrisCompat.canSetCapturedIds() ? "" : " (no hook)")
+            + ", captured now=" + ids[0] + "/" + ids[1] + "/" + ids[2];
+    }
+
+    /**
+     * Drops every built mesh so the next frames rebuild them against the light that exists now.
+     * Unlike {@code /src2mc reload} this changes nothing else -- same generation, same bake, same
+     * atlas residency -- which is what makes it a usable experiment.
+     */
+    private static int rebuildMeshes(net.minecraft.commands.CommandSourceStack source) {
+        int meshes = MESHES.size();
+        MESHES.values().forEach(Mesh::close);
+        MESHES.clear();
+        BUILT_REGIONS.clear();
+        PENDING_BUILDS.clear();
+        stillLoading = true;
+        firstPassComplete = false;
+        int props = PropRenderer.rebuildMeshes();
+        source.sendSuccess(() -> Component.literal("src2mc: dropped " + meshes + " surface mesh(es) and "
+            + props + " prop batch(es); both rebuild against the current light"), false);
+        return 1;
+    }
+
+    /** Rebuilds everything, since the ids are written into the vertices at build time. */
+    private static int setNeutralEntityId(net.minecraft.commands.CommandSourceStack source, boolean value) {
+        neutralEntityId = value;
+        rebuildMeshes(source);
+        source.sendSuccess(() -> Component.literal("src2mc iris entity id "
+            + (value ? "zeroed while building" : "left as captured")
+            + (IrisCompat.canSetCapturedIds() ? "" : " (Iris exposes no hook here; setting has no effect)")), false);
+        return 1;
+    }
+
     private static int renderStatus(net.minecraft.commands.CommandSourceStack source) {
         AtlasPageResidency.Stats stats = PAGES.stats();
         source.sendSuccess(() -> Component.literal("src2mc render: smooth-light " + (smoothLighting ? "on" : "off")
@@ -203,6 +289,10 @@ public final class MapSurfaceRenderer {
             + (stillLoading ? ", loading" : "")
             + ", shaderpack=" + (IrisCompat.shaderPackInUse() ? "on" : "off")
             + ", shadow-pass invocations/frame=" + shadowPassCallsLastFrame + " (stages " + SHADOW_STAGES_SEEN + ")"
+            + ", shadow draw set=" + shadowDrawnLast + "/" + shadowConsideredLast
+            + " (unbuilt " + shadowRejectedUnbuiltLast + ", too far " + shadowRejectedDistanceLast + ")"
+            + ", " + lightProvenance()
+            + ", " + vertexFormats()
             + ", opaque stage=" + opaqueStage + ", shadow distance=" + shadowDistance
             + ", relight " + (LightWatcher.enabled() ? "on" : "off")
             + ": watched=" + LightWatcher.watchedSections() + ", checks/tick=" + LightWatcher.checksLastTick()
@@ -287,6 +377,9 @@ public final class MapSurfaceRenderer {
 
     static boolean frustumCulling() { return frustumCulling; }
 
+    /** Shared with {@link PropRenderer}: both renderers upload the same way and have to agree. */
+    static boolean neutralEntityId() { return neutralEntityId; }
+
     /** True when {@code bounds} is close enough to the camera to be worth casting a shadow. */
     static boolean withinShadowDistance(AABB bounds, net.minecraft.world.phys.Vec3 camera) {
         if (shadowDistance <= 0) return true;
@@ -309,6 +402,9 @@ public final class MapSurfaceRenderer {
     private static void renderOpaque(RenderLevelStageEvent event) {
         shadowPassCallsLastFrame = shadowPassCallsSinceMainPass;
         shadowPassCallsSinceMainPass = 0;
+        shadowConsideredLast = shadowConsidered; shadowRejectedUnbuiltLast = shadowRejectedUnbuilt;
+        shadowRejectedDistanceLast = shadowRejectedDistance; shadowDrawnLast = shadowDrawn;
+        shadowConsidered = 0; shadowRejectedUnbuilt = 0; shadowRejectedDistance = 0; shadowDrawn = 0;
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null) { clear(); return; }
         BundleGeneration generation = Src2mc.bundles().active();
@@ -377,16 +473,26 @@ public final class MapSurfaceRenderer {
     private static void draw(RenderLevelStageEvent event, BundleGeneration generation, boolean translucent, boolean shadowPass) {
         var camera = event.getCamera().getPosition();
         var drawItems = MESHES.entrySet().stream()
-            .filter(item -> shadowPass ? BUILT_REGIONS.containsKey(item.getKey().region) : item.getValue().lastVisibleFrame == frame)
+            .filter(item -> {
+                if (!shadowPass) return item.getValue().lastVisibleFrame == frame;
+                shadowConsidered++;
+                if (BUILT_REGIONS.containsKey(item.getKey().region)) return true;
+                shadowRejectedUnbuilt++;
+                return false;
+            })
             .filter(item -> (item.getKey().renderClass == BundleMaterial.RenderClass.TRANSLUCENT) == translucent)
             // No frustum test in the shadow pass: the frustum there is the sun's, and rejecting a
             // mesh only keeps it out of the shadow map, which shows up as sunlight leaking through
             // sealed geometry rather than as a hole the player can see.
-            .filter(item -> shadowPass
-                ? withinShadowDistance(item.getValue().bounds, camera)
-                : !frustumCulling || event.getFrustum().isVisible(item.getValue().bounds))
+            .filter(item -> {
+                if (!shadowPass) return !frustumCulling || event.getFrustum().isVisible(item.getValue().bounds);
+                if (withinShadowDistance(item.getValue().bounds, camera)) return true;
+                shadowRejectedDistance++;
+                return false;
+            })
             .sorted(translucent ? Comparator.<Map.Entry<MeshKey, Mesh>>comparingDouble(item -> -distanceSquared(item.getValue().bounds, camera)) : (left, right) -> 0)
             .toList();
+        if (shadowPass) shadowDrawn += drawItems.size();
         for (var item : drawItems) {
             Mesh mesh = item.getValue();
             ResourceLocation texture = PAGES.request(generation.sequence(), mesh.bundle, mesh.atlas, item.getKey().page, frame)
@@ -458,6 +564,9 @@ public final class MapSurfaceRenderer {
      */
     private static boolean advanceRegionBuild(PendingBuild build, long deadline) {
         BundleMap map = build.map;
+        build.bakeCovered = LightOcclusion.baked(level).covers(
+            SectionPos.blockToSectionCoord(build.placement.translation().getX() + build.group.minX()),
+            SectionPos.blockToSectionCoord(build.placement.translation().getZ() + build.group.minZ()));
         var sections = map.surfaces().sections();
         while (build.nextSection < build.group.sections().size()) {
             if (System.nanoTime() >= deadline) return false;
@@ -478,9 +587,9 @@ public final class MapSurfaceRenderer {
                     map.surfaces().uvRegions().get(face.uvRegionId()), material.texture(), texture, map.atlas().pageSize())) {
                     build.triangles.computeIfAbsent(new PageClass(triangle.page(), material.renderClass()), ignored -> new ArrayList<>())
                         .add(new LitTriangle(triangle,
-                            sampleVertexLight(build.placement, triangle.a(), face.patch(), build.lightCache),
-                            sampleVertexLight(build.placement, triangle.b(), face.patch(), build.lightCache),
-                            sampleVertexLight(build.placement, triangle.c(), face.patch(), build.lightCache)));
+                            sampleVertexLight(build, triangle.a(), face.patch()),
+                            sampleVertexLight(build, triangle.b(), face.patch()),
+                            sampleVertexLight(build, triangle.c(), face.patch())));
                 }
             }
         }
@@ -494,7 +603,7 @@ public final class MapSurfaceRenderer {
         BUILT_REGIONS.put(regionKey, frame);
         build.triangles.forEach((pageClass, values) -> {
             MeshKey key = new MeshKey(regionKey, pageClass.page, pageClass.renderClass);
-            Mesh old = MESHES.put(key, upload(build.bundle, build.map.atlas(), origin, bounds, values,
+            Mesh old = MESHES.put(key, upload(build, build.map.atlas(), origin, bounds, values,
                 group.minX(), group.minY(), group.minZ()));
             if (old != null) old.close();
         });
@@ -527,8 +636,9 @@ public final class MapSurfaceRenderer {
      * build's own cache, so the extra cost is lookups in a hash map, not light
      * computations, and nothing changes per frame.
      */
-    private static int sampleVertexLight(MapPlacement placement, SurfaceTessellator.Vertex vertex, int patch,
-                                         Map<Long, Integer> cache) {
+    private static int sampleVertexLight(PendingBuild build, SurfaceTessellator.Vertex vertex, int patch) {
+        MapPlacement placement = build.placement;
+        Map<Long, Integer> cache = build.lightCache;
         int dirIndex = patch & 7;
         Direction direction = dirIndex < 6 ? Direction.values()[dirIndex] : null;
         float nx = direction == null ? 0 : direction.getStepX();
@@ -537,26 +647,39 @@ public final class MapSurfaceRenderer {
         double worldX = placement.translation().getX() + vertex.x();
         double worldY = placement.translation().getY() + vertex.y();
         double worldZ = placement.translation().getZ() + vertex.z();
-        return smoothLighting
+        int light = smoothLighting
             ? LightSampler.smooth(level, worldX, worldY, worldZ, nx, ny, nz, cache)
             : LightSampler.sample(level, worldX, worldY, worldZ, nx, ny, nz, cache);
+        int sky = light >> 20 & 0xF;
+        build.skyMin = Math.min(build.skyMin, sky);
+        build.skyMax = Math.max(build.skyMax, sky);
+        return light;
     }
 
-    private static Mesh upload(BundleManifest bundle, AtlasIndex atlas, BlockPos origin, AABB bounds,
+    private static Mesh upload(PendingBuild build, AtlasIndex atlas, BlockPos origin, AABB bounds,
                                List<LitTriangle> triangles, int baseX, int baseY, int baseZ) {
         int capacity = (int) Math.min(Integer.MAX_VALUE, Math.max(4096L, (long) triangles.size() * 3 * 36));
         try (var bytes = new ByteBufferBuilder(capacity)) {
-            var builder = new BufferBuilder(bytes, VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.NEW_ENTITY);
-            for (var lit : triangles) {
-                SurfaceTessellator.Triangle triangle = lit.triangle();
-                vertex(builder, triangle.a(), baseX, baseY, baseZ, triangle, lit.lightA());
-                vertex(builder, triangle.b(), baseX, baseY, baseZ, triangle, lit.lightB());
-                vertex(builder, triangle.c(), baseX, baseY, baseZ, triangle, lit.lightC());
-            }
-            try (var data = builder.buildOrThrow()) {
-                var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
-                buffer.bind(); buffer.upload(data); VertexBuffer.unbind();
-                return new Mesh(bundle, atlas, buffer, origin, bounds, frame);
+            // Iris writes the captured ids into the extended format as each vertex is added, so
+            // the ids have to be neutral for the whole build, not just at the upload call.
+            int[] previousIds = neutralEntityId ? IrisCompat.setCapturedIds(0, 0, 0) : null;
+            try {
+                var builder = new BufferBuilder(bytes, VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.NEW_ENTITY);
+                for (var lit : triangles) {
+                    SurfaceTessellator.Triangle triangle = lit.triangle();
+                    vertex(builder, triangle.a(), baseX, baseY, baseZ, triangle, lit.lightA());
+                    vertex(builder, triangle.b(), baseX, baseY, baseZ, triangle, lit.lightB());
+                    vertex(builder, triangle.c(), baseX, baseY, baseZ, triangle, lit.lightC());
+                }
+                try (var data = builder.buildOrThrow()) {
+                    var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
+                    buffer.bind(); buffer.upload(data); VertexBuffer.unbind();
+                    return new Mesh(build.bundle, atlas, buffer, origin, bounds, frame,
+                        build.bakeEpoch, build.bakeCovered, build.skyMin, build.skyMax,
+                        data.drawState().format().getVertexSize(), IrisCompat.shaderPackInUse());
+                }
+            } finally {
+                IrisCompat.restoreCapturedIds(previousIds);
             }
         }
     }
@@ -668,6 +791,8 @@ public final class MapSurfaceRenderer {
         CameraVisibility.reset();
         level = null; generationSequence = -1; placementSnapshot = List.of(); frame = 0; pvsRejectedRegions = 0; stillLoading = true;
         firstPassComplete = false; shadowPassCallsSinceMainPass = 0; shadowPassCallsLastFrame = 0;
+        shadowConsidered = 0; shadowRejectedUnbuilt = 0; shadowRejectedDistance = 0; shadowDrawn = 0;
+        shadowConsideredLast = 0; shadowRejectedUnbuiltLast = 0; shadowRejectedDistanceLast = 0; shadowDrawnLast = 0;
     }
 
     /** Only rejects regions in the placement the camera is currently inside; other placements
@@ -689,9 +814,17 @@ public final class MapSurfaceRenderer {
     private record PageClass(int page, BundleMaterial.RenderClass renderClass) {}
     private static final class Mesh implements AutoCloseable {
         final BundleManifest bundle; final AtlasIndex atlas; final VertexBuffer buffer; final BlockPos origin; final AABB bounds;
+        /** The light this mesh froze in, and where that light came from. */
+        final long bakeEpoch; final boolean bakeCovered; final int skyMin; final int skyMax;
+        /** The stride the buffer actually went to the GPU with, and whether a pack was in use
+         * then: 36 is vanilla NEW_ENTITY, anything larger is Iris's extended entity format. */
+        final int vertexSize; final boolean builtWithShaders;
         long lastVisibleFrame;
-        Mesh(BundleManifest bundle, AtlasIndex atlas, VertexBuffer buffer, BlockPos origin, AABB bounds, long frame) {
+        Mesh(BundleManifest bundle, AtlasIndex atlas, VertexBuffer buffer, BlockPos origin, AABB bounds, long frame,
+             long bakeEpoch, boolean bakeCovered, int skyMin, int skyMax, int vertexSize, boolean builtWithShaders) {
             this.bundle = bundle; this.atlas = atlas; this.buffer = buffer; this.origin = origin; this.bounds = bounds; this.lastVisibleFrame = frame;
+            this.bakeEpoch = bakeEpoch; this.bakeCovered = bakeCovered; this.skyMin = skyMin; this.skyMax = skyMax;
+            this.vertexSize = vertexSize; this.builtWithShaders = builtWithShaders;
         }
         @Override public void close() { buffer.close(); }
     }

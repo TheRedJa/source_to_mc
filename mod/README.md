@@ -9,7 +9,9 @@ fixed generic world content plus `/src2mc status`, `validate`, `reload`, and
 `/src2mc_prop_status`. Bundles load by themselves in the background during game
 startup, so `/src2mc reload` is only needed for a bundle that changed on disk —
 see [`docs/bundle-loading.md`](docs/bundle-loading.md). Surface rendering uses
-mod-owned paged textures rather than Minecraft's block atlas. Collision comes in
+mod-owned paged textures rather than Minecraft's block atlas; what a shaderpack
+does to the buffers it uploads is in
+[`docs/iris-compat.md`](docs/iris-compat.md). Collision comes in
 Phase 6.
 
 The current implementation state, test paths, verified behavior, known defects,

@@ -35,12 +35,22 @@ public final class LightOcclusion {
     // and bundles are published by a command, so no single event can be trusted.
     private static final Map<ResourceLocation, long[]> SERVER_INPUTS = new ConcurrentHashMap<>();
     private static volatile boolean enabled = true;
+    /** Bumped every time the client re-bakes, so a renderer can tell whether the light a mesh
+     * captured came from the bake it is being drawn beside. */
+    private static volatile long clientEpoch;
+    private static volatile long clientGeneration = -1;
     /** A second between checks: nothing here changes faster than a command. */
     private static final int CHECK_INTERVAL_TICKS = 20;
 
     private LightOcclusion() {}
 
     public static boolean enabled() { return enabled; }
+
+    /** How many times the client's bake has been published this session. */
+    public static long clientEpoch() { return clientEpoch; }
+
+    /** The bundle generation the client's current bake was computed from, or -1 before the first. */
+    public static long clientGeneration() { return clientGeneration; }
 
     /** Turning the bake off republishes full daylight, which is what vanilla alone produces here. */
     public static void setEnabled(boolean value) { enabled = value; }
@@ -63,6 +73,8 @@ public final class LightOcclusion {
         SERVER.clear();
         CLIENT.clear();
         SERVER_INPUTS.clear();
+        clientGeneration = -1;
+        clientEpoch++;
     }
 
     /**
@@ -109,6 +121,8 @@ public final class LightOcclusion {
         SkyLightBake.Baked baked = SkyLightBake.bake(index.view(), Src2mc.bundles().active(),
             level.getMinBuildHeight(), level.getMaxBuildHeight());
         if (baked.isEmpty()) CLIENT.remove(dimension); else CLIENT.put(dimension, baked);
+        clientGeneration = Src2mc.bundles().active().sequence();
+        clientEpoch++;
         publish(level, baked);
         return baked.darkCells();
     }

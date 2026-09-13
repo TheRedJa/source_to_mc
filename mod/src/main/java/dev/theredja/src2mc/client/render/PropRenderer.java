@@ -83,6 +83,9 @@ public final class PropRenderer {
     private static final OcclusionCuller<AggregateKey> OCCLUSION = new OcclusionCuller<>();
     private static long shadowPassCallsSinceMainPass;
     private static long shadowPassCallsLastFrame;
+    /** Shadow-pass draw-set accounting, latched by the next main pass. */
+    private static long shadowConsidered, shadowRejectedDistance, shadowDrawn;
+    private static long shadowConsideredLast, shadowRejectedDistanceLast, shadowDrawnLast;
 
     private PropRenderer() {}
 
@@ -133,7 +136,8 @@ public final class PropRenderer {
             .append(detail("  Roots " + active + "/" + ROOTS.size() + "  Batches " + AGGREGATES.size() + "  Built " + BUILT_PROPS.size())));
         lines.add(statusLine("Render (last frame)", last.drawCalls() + " draws  " + formatMillions(last.triangles()) + " triangles  " + formatMs(last.renderMs()) + " ms", ChatFormatting.YELLOW)
             .append(detail("  PVS " + (CameraVisibility.row() != null ? "cluster " + CameraVisibility.cluster() + ", " + last.pvsRejected() + " rejected" : "off")
-                + "  shaderpack=" + (IrisCompat.shaderPackInUse() ? "on" : "off") + " shadow-pass/frame=" + shadowPassCallsLastFrame)));
+                + "  shaderpack=" + (IrisCompat.shaderPackInUse() ? "on" : "off") + " shadow-pass/frame=" + shadowPassCallsLastFrame
+                + "  shadow draw set=" + shadowDrawnLast + "/" + shadowConsideredLast + " (too far " + shadowRejectedDistanceLast + ")")));
         String occlusionState = !occlusion.enabled() ? "OFF" : occlusion.supported() ? "ON" : "UNSUPPORTED";
         ChatFormatting occlusionColor = !occlusion.enabled() ? ChatFormatting.RED : occlusion.supported() ? ChatFormatting.GREEN : ChatFormatting.RED;
         lines.add(statusLine("GPU occlusion", occlusionState, occlusionColor)
@@ -173,6 +177,9 @@ public final class PropRenderer {
     private static void renderOpaque(RenderLevelStageEvent event) {
         shadowPassCallsLastFrame = shadowPassCallsSinceMainPass;
         shadowPassCallsSinceMainPass = 0;
+        shadowConsideredLast = shadowConsidered; shadowRejectedDistanceLast = shadowRejectedDistance;
+        shadowDrawnLast = shadowDrawn;
+        shadowConsidered = 0; shadowRejectedDistance = 0; shadowDrawn = 0;
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null) { clear(); return; }
         BundleGeneration generation = Src2mc.bundles().active();
@@ -422,23 +429,30 @@ public final class PropRenderer {
         int capacity = (int) Math.min(Integer.MAX_VALUE, Math.max(4096L, (long) triangles.size() * 3 * 36));
         Map<Long, Integer> lightCache = new HashMap<>();
         try (var bytes = new ByteBufferBuilder(capacity)) {
-            var builder = new BufferBuilder(bytes, VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.NEW_ENTITY);
-            for (PropTessellator.Triangle triangle : triangles) {
-                vertex(builder, triangle.a(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.a(), lightCache));
-                vertex(builder, triangle.b(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.b(), lightCache));
-                vertex(builder, triangle.c(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.c(), lightCache));
-            }
-            try (var data = builder.buildOrThrow()) {
-                var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
-                buffer.bind(); buffer.upload(data); VertexBuffer.unbind();
-                BlockPos origin = placement.translation().offset(baseX, baseY, baseZ);
-                long estimatedVboBytes = (long) triangles.size() * 3L * 36L;
-                AABB bounds = null;
-                for (PropTessellator.Triangle triangle : triangles) for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
-                    AABB point = new AABB(vertex.x(), vertex.y(), vertex.z(), vertex.x(), vertex.y(), vertex.z());
-                    bounds = bounds == null ? point : bounds.minmax(point);
+            // See IrisCompat.setCapturedIds: with a pack in use Iris stamps whatever entity was
+            // rendering into every vertex of what is static world geometry.
+            int[] previousIds = MapSurfaceRenderer.neutralEntityId() ? IrisCompat.setCapturedIds(0, 0, 0) : null;
+            try {
+                var builder = new BufferBuilder(bytes, VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.NEW_ENTITY);
+                for (PropTessellator.Triangle triangle : triangles) {
+                    vertex(builder, triangle.a(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.a(), lightCache));
+                    vertex(builder, triangle.b(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.b(), lightCache));
+                    vertex(builder, triangle.c(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.c(), lightCache));
                 }
-                return new Mesh(bundle, atlas, buffer, origin, bounds.move(placement.translation()).inflate(0.01), estimatedVboBytes, triangles.size());
+                try (var data = builder.buildOrThrow()) {
+                    var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
+                    buffer.bind(); buffer.upload(data); VertexBuffer.unbind();
+                    BlockPos origin = placement.translation().offset(baseX, baseY, baseZ);
+                    long estimatedVboBytes = (long) triangles.size() * 3L * 36L;
+                    AABB bounds = null;
+                    for (PropTessellator.Triangle triangle : triangles) for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
+                        AABB point = new AABB(vertex.x(), vertex.y(), vertex.z(), vertex.x(), vertex.y(), vertex.z());
+                        bounds = bounds == null ? point : bounds.minmax(point);
+                    }
+                    return new Mesh(bundle, atlas, buffer, origin, bounds.move(placement.translation()).inflate(0.01), estimatedVboBytes, triangles.size());
+                }
+            } finally {
+                IrisCompat.restoreCapturedIds(previousIds);
             }
         }
     }
@@ -503,7 +517,8 @@ public final class PropRenderer {
             }
             PERF.add(PropRenderPerf.M_FRUSTUM_TESTS, 1);
             if (shadowPass) {
-                if (!MapSurfaceRenderer.withinShadowDistance(mesh.bounds, camera)) continue;
+                shadowConsidered++;
+                if (!MapSurfaceRenderer.withinShadowDistance(mesh.bounds, camera)) { shadowRejectedDistance++; continue; }
             } else if (MapSurfaceRenderer.frustumCulling() && !event.getFrustum().isVisible(mesh.bounds)) continue;
             if (!shadowPass) {
                 queryCandidates.add(new OcclusionCuller.Candidate<>(key, mesh.bounds, mesh.triangles));
@@ -511,6 +526,7 @@ public final class PropRenderer {
             }
             visible.add(Map.entry(key, mesh));
         }
+        if (shadowPass) shadowDrawn += visible.size();
         if (!shadowPass) OCCLUSION.issue(queryCandidates, view, event.getModelViewMatrix(), event.getProjectionMatrix());
         if (translucent) visible.sort(Comparator.<Map.Entry<AggregateKey, Mesh>>comparingDouble(item -> -distanceSquared(item.getValue().bounds, camera)));
         else visible.sort(Comparator.<Map.Entry<AggregateKey, Mesh>>comparingInt(item -> item.getKey().renderClass().ordinal())
@@ -582,6 +598,22 @@ public final class PropRenderer {
         PERF.add(PropRenderPerf.M_EVICTED_PROPS, expired.size());
         PERF.add(PropRenderPerf.M_EVICTED_AGGREGATES, dirtied);
     }
+    /**
+     * Drops every built batch and every known root so they are rebuilt from the same generation
+     * against the light that exists now. Paired with the surface renderer's own drop; see
+     * {@code /src2mc_rebuild_meshes}.
+     *
+     * @return how many batches were dropped.
+     */
+    static int rebuildMeshes() {
+        int batches = AGGREGATES.size();
+        AGGREGATES.values().forEach(Mesh::close); AGGREGATES.clear();
+        PROP_CONTRIBUTIONS.clear(); ROOT_DATA.clear();
+        ROOTS.clear(); ROOT_STATUS.clear(); BUILT_PROPS.clear(); LAST_VISIBLE.clear();
+        OCCLUSION.close();
+        return batches;
+    }
+
     private static void clear() {
         AGGREGATES.values().forEach(Mesh::close); AGGREGATES.clear();
         PROP_CONTRIBUTIONS.clear(); ROOT_DATA.clear();
@@ -589,6 +621,8 @@ public final class PropRenderer {
         CameraVisibility.reset();
         level = null; generationSequence = -1; placementSnapshot = List.of(); frame = 0; nearbyProps = 0; nearbyUnbuilt = 0; buildsLastFrame = 0;
         shadowPassCallsSinceMainPass = 0; shadowPassCallsLastFrame = 0;
+        shadowConsidered = 0; shadowRejectedDistance = 0; shadowDrawn = 0;
+        shadowConsideredLast = 0; shadowRejectedDistanceLast = 0; shadowDrawnLast = 0;
     }
 
     private record PropKey(MapPlacement placement, String stableId) {}
