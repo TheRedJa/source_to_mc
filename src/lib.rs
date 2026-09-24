@@ -5,6 +5,7 @@ pub mod config;
 pub mod convert;
 pub mod geom;
 pub mod inspect;
+pub mod inventory;
 pub mod output;
 pub mod palette;
 pub mod source;

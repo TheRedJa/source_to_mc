@@ -52,6 +52,28 @@ impl Facing {
 }
 
 impl Shape {
+    /// The 2x2x2 occupancy represented by this Minecraft shape. This is the
+    /// geometry the renderer and face-provenance pass must agree on, including
+    /// the conservative full-cube fallback for unrecognised source masks.
+    pub const fn occupancy_mask(self) -> u8 {
+        match self {
+            Shape::Full => u8::MAX,
+            Shape::Slab { top: false } => BOTTOM,
+            Shape::Slab { top: true } => TOP,
+            Shape::Stairs { facing, top } => {
+                let base = if top { TOP } else { BOTTOM };
+                let raised_y = !top;
+                let raised = match facing {
+                    Facing::North => octant(false, false, raised_y) | octant(true, false, raised_y),
+                    Facing::South => octant(false, true, raised_y) | octant(true, true, raised_y),
+                    Facing::West => octant(false, false, raised_y) | octant(false, true, raised_y),
+                    Facing::East => octant(true, false, raised_y) | octant(true, true, raised_y),
+                };
+                base | raised
+            }
+        }
+    }
+
     /// The block state suffix for this shape, or none for a full cube.
     ///
     /// Sponge v3 palette entries are full block-state strings, so this is
@@ -402,6 +424,16 @@ mod tests {
             .variant(),
             Variant::Stairs
         );
+    }
+
+    #[test]
+    fn fitted_shape_occupancy_matches_the_mask_it_represents() {
+        for mask in 0..=u8::MAX {
+            let shape = shape_for(mask);
+            if shape != Shape::Full {
+                assert_eq!(shape.occupancy_mask(), mask, "mask {mask:08b}");
+            }
+        }
     }
 
     #[test]

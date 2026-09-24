@@ -23,15 +23,19 @@ const LEAF_STRIDE_V1: usize = 32;
 /// firstleafbrush at byte 24.
 const LEAF_FIRST_BRUSH_OFFSET: usize = 24;
 
-/// The leaf-brush range of a single leaf, in original BSP order.
+/// The fields needed from one leaf, in original BSP order. Node children use
+/// this order; `vbsp` sorts its public leaf vector by cluster.
 #[derive(Debug, Clone, Copy)]
-pub struct LeafBrushRange {
+pub struct RawLeaf {
+    pub cluster: i16,
+    pub mins: [i16; 3],
+    pub maxs: [i16; 3],
     pub first: u16,
     pub count: u16,
 }
 
 /// Read every leaf's brush range from `data`, preserving BSP leaf indices.
-pub fn leaf_brush_ranges(data: &[u8]) -> Result<Vec<LeafBrushRange>> {
+pub fn leaves(data: &[u8]) -> Result<Vec<RawLeaf>> {
     let entry = lumps::lump_entry(data, LUMP_LEAFS)?;
 
     if entry.four_cc != 0 {
@@ -55,12 +59,28 @@ pub fn leaf_brush_ranges(data: &[u8]) -> Result<Vec<LeafBrushRange>> {
     let mut ranges = Vec::with_capacity(length / stride);
     for leaf in lump.chunks_exact(stride) {
         let at = LEAF_FIRST_BRUSH_OFFSET;
-        ranges.push(LeafBrushRange {
+        ranges.push(RawLeaf {
+            cluster: i16::from_le_bytes([leaf[4], leaf[5]]),
+            mins: [
+                i16::from_le_bytes([leaf[8], leaf[9]]),
+                i16::from_le_bytes([leaf[10], leaf[11]]),
+                i16::from_le_bytes([leaf[12], leaf[13]]),
+            ],
+            maxs: [
+                i16::from_le_bytes([leaf[14], leaf[15]]),
+                i16::from_le_bytes([leaf[16], leaf[17]]),
+                i16::from_le_bytes([leaf[18], leaf[19]]),
+            ],
             first: u16::from_le_bytes([leaf[at], leaf[at + 1]]),
             count: u16::from_le_bytes([leaf[at + 2], leaf[at + 3]]),
         });
     }
     Ok(ranges)
+}
+
+/// Backwards-compatible narrow view for brush ownership code.
+pub fn leaf_brush_ranges(data: &[u8]) -> Result<Vec<RawLeaf>> {
+    leaves(data)
 }
 
 #[cfg(test)]

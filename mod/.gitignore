@@ -3,8 +3,10 @@
 build/
 run/
 runs/
+logs/
 *.iml
 .idea/
+.vscode/
 
 # Local Phase 0 test evidence; never commit screenshots, logs, or benchmarks.
 local-reports/*

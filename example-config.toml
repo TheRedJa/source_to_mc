@@ -147,9 +147,9 @@ min_size = 12.0
 # across, and one of them can be tens of thousands of blocks of a single dark
 # material. Off by default, because that scenery really is there.
 max_size = 0.0
-# Model paths to leave out. Foliage is alpha-tested cards that voxelize into
-# solid slabs, and an outdoor map has thousands of them.
-skip = ["*props_foliage*", "*/foliage/*"]
+# Model paths to leave out. Real mesh export supports alpha-tested foliage, so
+# trees, grass and plants are included unless you add an explicit exclusion.
+skip = []
 # Voxels of backing driven along each triangle's inward normal. Props are
 # usually closed shells already, so a fence stays one block thick.
 solidify = 0
@@ -184,6 +184,20 @@ settle = true
 # grid's own rounding, so a block covers it; further than that is a prop over a
 # hole the conversion did not build, and moving it there would invent a position.
 settle_max = 1.0
+# Nudge a prop off converted map geometry it did not intersect in the source
+# map. Voxelizing a wall can round its face by up to a block, and a prop
+# flush against the real surface can read as embedded in the voxel one; the
+# correction measures the true brush plane and moves the prop only as far as
+# that rounding, along the collision normal.
+snap = true
+# How far the sub-block correction above may move a prop, in blocks. Hard-capped
+# at one block regardless of this setting, since the rounding it undoes cannot
+# exceed a block by construction.
+snap_max = 1.0
+# Record up to this many individual per-prop snap offsets in diagnostics.json,
+# beyond the existing summary counts. Off by default so a map with thousands of
+# props does not carry thousands of extra diagnostic entries.
+snap_diagnostics_limit = 0
 # Draw props as blocks with their rotation baked into the mesh, rather than as
 # display entities. An entity is redrawn through the entity renderer every
 # frame and is never baked into a chunk's vertex buffer, so a few hundred props
@@ -304,6 +318,19 @@ fill_threshold = 0.5
 # Guarantee at least one voxel layer for brushes thinner than a block, so
 # E:Z's 4- and 8-unit trim does not vanish at 16 units/block.
 preserve_thin = true
+
+[output.brush_meshes]
+# Draw brushes at or under max_thickness_units thick as their real geometry, the way
+# a prop is drawn, instead of voxelizing them. preserve_thin above keeps a thin
+# brush alive by filling every cell it touches, which turns a 4-unit gusset
+# plate into a full 32-unit block wall and seals ceiling trusses shut. Mesh
+# geometry is visual only and has no collision.
+enabled = true
+max_thickness_units = 8.0
+# Record the cells a drawn brush covers so the mod can light them as if they
+# were solid. No block is placed; the mod's light engine is taught about the
+# geometry instead. Off means daylight passes straight through thin ceilings.
+occlude_light = true
 
 [performance]
 # Worker threads; 0 uses one per core.

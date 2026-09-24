@@ -74,6 +74,20 @@ Exit criteria:
 
 ## Phase 1 — Versioned bundle contract and converter export
 
+Progress: steps 1–9 and all Phase 1 exit criteria are implemented.
+The `.src2mc` container, canonical JSON/float rules, content hashing, manifest
+fingerprint, deterministic Rust writer, canonical metadata/diagnostics,
+deduplicated UV regions and sparse 16x16x16 canonical face buckets are tested.
+The runtime model mesh and prop-placement contracts are also implemented.
+The exact installed WorldEdit 7.3.8 Sponge-v3 block-entity envelope was checked
+locally. Source model normals now survive both legacy subdivision and direct
+runtime-mesh conversion. The single/multi-map `mod export` command, fixed
+32-units/block enforcement, one-layer-below origin anchor, generic schematic,
+nearest-free roots and direct Source-model export are implemented. Synthetic
+single/multi-map fixtures lock the fingerprint and shared-model behavior. A
+local real HL2 map export is also byte-stable across processes; proprietary
+map-derived bytes are not checked in.
+
 1. Define the mod-export package extension and v1 manifest.
 2. Define canonical entry payloads for every hashed type, including float
    normalization and non-finite-value rejection. Define stable content IDs,
@@ -96,8 +110,9 @@ Exit criteria:
 8. Place each prop root in the deterministically nearest free cell within or
    immediately around its transformed bounds. Never overwrite geometry or move
    the visible model; fail export with the stable prop ID if no safe cell exists.
-9. Add deterministic Rust fixtures containing synthetic geometry plus a small
-   real-map-derived fixture when permitted.
+9. Add deterministic Rust fixtures containing synthetic geometry. Verify a
+   real-map-derived export locally when assets are available, but do not check
+   proprietary derived bytes into the repository without permission.
 
 Exit criteria:
 
@@ -105,7 +120,8 @@ Exit criteria:
   manifest fingerprint: sorted entry paths, uncompressed sizes and SHA-256
   hashes. ZIP timestamps, permissions, host metadata and compressed byte stream
   are not identity and are ignored by validation.
-- Shared textures/models occur once in a multi-map bundle.
+- Shared model mesh payloads occur once in a multi-map bundle. Model references
+  may share a mesh content ID when their map-local material-slot bindings differ.
 - Malformed, unsupported, and missing files have documented error codes.
 - Every exported surface face traces back to an explicit converter record; no
   material or UV is reconstructed from a single per-voxel material guess.
@@ -113,6 +129,15 @@ Exit criteria:
   change the prop's render transform.
 
 ## Phase 2 — Bundle discovery, validation, and diagnostics
+
+Progress: Phase 2 is implemented. Discovery builds an unpublished immutable
+map index while streaming validation covers ZIP safety and expansion, canonical
+campaign/map/diagnostic JSON, content hashes and IDs, surface/placement/mesh
+binary schemas, references, counts, transforms, PNG dimensions, and allocation
+guards. Publication is one atomic generation swap and failed reloads retain the
+last known-good generation. Fixed placeholder block entities preserve unknown
+anchor/root payloads losslessly for later-phase healing, and tall maps emit the
+user-managed KubeJS height-datapack warning.
 
 1. Register the minimal fixed generic block and block-entity types needed for
    surface, anchor, prop-root, carrier/collision and placeholder persistence.
@@ -138,6 +163,13 @@ Exit criteria:
 - Ordinary reload does not change the registry size.
 
 ## Phase 3 — Generic blocks, map anchors, and surface lookup
+
+Progress: implementation is complete and awaits the Phase 3 in-game exit test.
+Validated generations retain immutable sparse face buckets. Dimension-scoped
+saved data records translation-only placements from anchor NBT, rejects
+overlaps, and synchronizes complete small index snapshots to clients. Chunk
+load and `/src2mc reconcile` heal or preserve anchor/prop placeholders and
+diagnose anchorless surfaces without inventing coordinate mappings.
 
 1. Implement anchor persistence at the original schematic origin.
 2. Support translation of the complete schematic only. Diagnose anchorless
@@ -167,32 +199,65 @@ Exit criteria:
 
 ## Phase 4 — Mod-owned texture backend and surface rendering
 
+Progress: the converter now resolves real world-material VTFs during mod
+export, calculates effective dimensions at 16 texels per projected block,
+records original/output dimensions and writes content-deduplicated logical PNG
+payloads. A deterministic lossless allocator partitions only genuinely
+oversized logical images into 4096-page regions with mip-aligned 16-pixel
+gutters; base page construction samples across partition boundaries. Runtime
+RAM and estimated-VRAM budgets default independently to configurable 2 GiB.
+Final atlas metadata/page serialization and strict Java-side validation are now
+implemented. Runtime maps retain the validated material/render-class/texture
+links needed by face records. Demand-driven page residency now decodes off the
+render thread, rechecks hashes against the immutable generation, uploads every
+pre-generated mip explicitly, and enforces configurable RAM/VRAM budgets.
+Surface tessellation clips faces exactly at texture-repeat and lossless
+atlas-region boundaries. The first real solid/cutout renderer now builds
+bounded section batches incrementally, prefetches nearby pages independently
+of camera direction, submits only frustum-visible mod-owned VBOs, and retires
+distant meshes after a grace period. Atlas pages are prefetched for every
+nearby section whether or not it is in the camera frustum, get a conspicuous
+magenta checker while loading, and invalidate only sections that reference a
+newly resident page. The basic translucent fallback uses NeoForge's
+`AFTER_PARTICLES` stage with coarse far-to-near section/page ordering; it has
+no Source shader or per-triangle transparency sorting. `/src2mc_render_status`
+reports cache residency, requests, hits, misses, denials, evictions and decode
+failures. Its real-map visual gate remains pending.
+
 1. Implement texture analysis that calculates the required effective source
    resolution for 16x16 output texels per projected world block, while recording
    the original source dimensions and every resampling decision.
-2. Generate mod-owned atlas pages no larger than 4096x4096. Each texture
-   allocation is wholly contained by one page and never spans a page boundary;
-   an allocation too large for a page follows a documented reduce/split/reject
-   rule. Add extruded gutters sufficient for every mip level, or prove an
-   equivalent per-allocation mip-clamp policy, plus page-to-chunk dependency
-   data.
-3. Implement the first paged-atlas surface model renderer and bind it through
-   the NeoForge/Sodium-compatible chunk-model path.
-4. Render solid and alpha-cutout materials; add the documented basic
+2. Generate mod-owned atlas pages no larger than 4096x4096. Preserve 16 output
+   texels per projected world block. Partition a logical image larger than the
+   usable page area into page-contained regions and remap geometry; never
+   squeeze or reduce it merely to fit. Use mip-aligned 16-pixel extruded
+   gutters and converter-generated mip levels 0 through 4, plus page-to-chunk
+   dependency data. Decode and resample each shared source texture once
+   campaign-wide; identical canonical output texture bytes occur once in the
+   bundle.
+3. Implement the first paged-atlas surface renderer as mod-owned immutable GPU
+   meshes partitioned by Minecraft section and texture page. Submit visible
+   buffers from NeoForge's world-render stages using its camera frustum; do not
+   mix into Sodium's internal terrain pipeline.
+4. Make generic surface and derived carrier blocks visually empty so the
+   src2mc mesh is the only rendered surface; retain their required persistence,
+   lookup, and collision behavior.
+5. Render solid and alpha-cutout materials; add the documented basic
    translucent fallback.
-5. Implement UV transforms from planar region metadata and local map
+6. Implement UV transforms from planar region metadata and local map
    coordinates.
-6. Load metadata eagerly but decode/upload pages asynchronously as referencing
+7. Load metadata eagerly but decode/upload pages asynchronously as referencing
    chunks approach render distance. Track loaded-chunk references, apply a grace
    period before pages become evictable, and use LRU eviction under RAM/VRAM
    pressure.
-7. Render a diagnostic placeholder while a page is loading and invalidate only
+8. Render a diagnostic placeholder while a page is loading and invalidate only
    its dependent chunk meshes when ready. Camera direction alone must not evict
    pages.
-8. Enforce the agreed residency budget and log source/output dimensions, page
-   allocations, cache hits/misses/evictions, encoded bytes, decoded RAM,
+9. Enforce independently configurable decoded-RAM and estimated-VRAM budgets,
+   initially 2 GiB each, and log source/output dimensions, page allocations,
+   cache hits/misses/evictions, encoded bytes, decoded RAM,
    mipmapped VRAM and timing.
-9. Run an in-game screenshot test. If paged atlases visibly fail, stop and ask
+10. Run an in-game screenshot test. If paged atlases visibly fail, stop and ask
    the user to confirm testing a texture-array backend before changing course.
 
 Exit criteria:
@@ -200,6 +265,7 @@ Exit criteria:
 - Texture orientation, phase, and repetition match the UV-region fixtures.
 - More texture content than one 4096x4096 page renders without using or
   duplicating the vanilla block atlas.
+- Shared canonical texture payloads occur once in a multi-map bundle.
 - Approaching a textured chunk prefetches its pages; leaving all chunks that use
   them makes the pages evictable only after the grace period.
 - Loading or evicting one page rebuilds only dependent chunks and stays within
@@ -214,12 +280,20 @@ Exit criteria:
    schema: model ID, exact render transform, material data, stable ID and source
    metadata. The root cell is authoritative storage, not the model origin.
 2. Implement the custom mesh loader and chunk-baked prop renderer, including
-   arbitrary rotation, scale, normals, UVs, and multiple materials.
+   arbitrary rotation, scale, normals, UVs, and multiple materials. Stream large
+   maps by nearest-first priority with bounded decode look-ahead and a per-frame
+   upload-time budget; nearby off-camera props remain resident so turning around
+   cannot cause avoidable unload/reload pop-in.
 3. Partition large prop rendering into derived carrier coverage where Minecraft
-   section/chunk rendering requires it, while retaining one logical root.
+   section/chunk rendering requires it, while retaining one logical root. Merge
+   resident prop geometry by section, atlas page, and render class so thousands
+   of props do not become thousands of steady-state draw submissions. Profile
+   visible draws/triangles and CPU submission time before and after this change.
 4. Implement root placement, break cleanup, and middle-click item metadata.
 5. Implement placeholder props and detailed errors for missing model/material
    references.
+   Source `models/effects/vol_light*.mdl` placements are intentionally omitted:
+   they are shader-driven volumetric effects, not ordinary prop geometry.
 6. Test ordinary WorldEdit paste, pick-block/re-place, reload, and
    reconciliation. WorldEdit copy/cut and transformed paste are not supported.
 

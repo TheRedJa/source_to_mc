@@ -21,6 +21,14 @@ pub struct TextureReport {
     pub entries: Vec<Entry>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct TextureMemoryEstimate {
+    pub distinct_textures: usize,
+    pub encoded_bytes: u64,
+    pub decoded_rgba_bytes: u64,
+    pub mipmapped_rgba_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Entry {
     pub material: String,
@@ -34,6 +42,13 @@ pub struct Entry {
     pub from_prop: bool,
     /// `$basetexture`, when the `.vmt` was found.
     pub texture: Option<String>,
+    /// Dimensions declared by the source VTF header.
+    pub source_size: Option<[u32; 2]>,
+    pub encoded_bytes: Option<u64>,
+    /// RGBA8 bytes after full decode, before mipmaps or residency eviction.
+    pub decoded_rgba_bytes: Option<u64>,
+    /// Approximate RGBA8 GPU bytes including a complete mip chain.
+    pub mipmapped_rgba_bytes: Option<u64>,
     /// Whether the `.vtf` decoded to an image.
     pub resolved: bool,
     pub alpha_test: bool,
@@ -61,6 +76,13 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
             return;
         }
         let assets = materials.assets(name, raw);
+        let source_size = assets
+            .as_ref()
+            .and_then(|assets| textures.header(&assets.base_texture))
+            .map(|header| header.size);
+        let encoded_bytes = assets
+            .as_ref()
+            .and_then(|assets| textures.encoded_bytes(&assets.base_texture));
         let resolved = assets
             .as_ref()
             .is_some_and(|a| textures.get(&a.base_texture, a.alpha_test).is_some());
@@ -70,6 +92,10 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
             tiles: split.grid,
             from_prop,
             texture: assets.as_ref().map(|a| a.base_texture.clone()),
+            source_size,
+            encoded_bytes,
+            decoded_rgba_bytes: source_size.map(rgba8_bytes),
+            mipmapped_rgba_bytes: source_size.map(mipmapped_rgba8_bytes),
             resolved,
             alpha_test: assets.as_ref().is_some_and(|a| a.alpha_test),
             translucent: assets.as_ref().is_some_and(|a| a.translucent),
@@ -143,7 +169,45 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
     }
 }
 
+fn rgba8_bytes(size: [u32; 2]) -> u64 {
+    u64::from(size[0]) * u64::from(size[1]) * 4
+}
+
+fn mipmapped_rgba8_bytes(mut size: [u32; 2]) -> u64 {
+    let mut bytes = 0;
+    loop {
+        bytes += rgba8_bytes(size);
+        if size == [1, 1] {
+            return bytes;
+        }
+        size = [(size[0] / 2).max(1), (size[1] / 2).max(1)];
+    }
+}
+
 impl TextureReport {
+    pub fn memory_estimate(&self) -> TextureMemoryEstimate {
+        let mut unique = std::collections::BTreeMap::new();
+        for entry in &self.entries {
+            let (Some(texture), Some(encoded), Some(decoded), Some(mipmapped)) = (
+                entry.texture.as_ref(),
+                entry.encoded_bytes,
+                entry.decoded_rgba_bytes,
+                entry.mipmapped_rgba_bytes,
+            ) else {
+                continue;
+            };
+            unique
+                .entry(texture)
+                .or_insert((encoded, decoded, mipmapped));
+        }
+        TextureMemoryEstimate {
+            distinct_textures: unique.len(),
+            encoded_bytes: unique.values().map(|value| value.0).sum(),
+            decoded_rgba_bytes: unique.values().map(|value| value.1).sum(),
+            mipmapped_rgba_bytes: unique.values().map(|value| value.2).sum(),
+        }
+    }
+
     pub fn resolved(&self) -> usize {
         self.entries.iter().filter(|e| e.resolved).count()
     }
@@ -181,8 +245,8 @@ impl TextureReport {
 
         let _ = writeln!(
             s,
-            "{:<width$}  {:>6}  {:<38}  {:>7}  ",
-            "material", "uses", "texture", "blocks"
+            "{:<width$}  {:>6}  {:<38}  {:>7}  {:>9}",
+            "material", "uses", "texture", "blocks", "source"
         );
         for entry in &self.entries {
             let flags = match (entry.alpha_test, entry.translucent) {
@@ -192,11 +256,15 @@ impl TextureReport {
             };
             let _ = writeln!(
                 s,
-                "{:<width$}  {:>6}  {:<38}  {:>7}  {}{}{}",
+                "{:<width$}  {:>6}  {:<38}  {:>7}  {:>9}  {}{}{}",
                 entry.material,
                 entry.uses,
                 entry.texture.as_deref().unwrap_or("-"),
                 format!("{}x{}", entry.tiles[0], entry.tiles[1]),
+                entry
+                    .source_size
+                    .map(|size| format!("{}x{}", size[0], size[1]))
+                    .unwrap_or_else(|| "-".into()),
                 if entry.resolved { "ok " } else { "MISSING " },
                 flags,
                 if entry.from_prop { " prop" } else { "" },
@@ -226,8 +294,22 @@ impl TextureReport {
             used_resolved,
             used,
         );
+        let memory = self.memory_estimate();
+        let _ = writeln!(
+            s,
+            "{} distinct source textures: {} encoded, {} decoded RGBA8, approximately {} with mipmaps",
+            memory.distinct_textures,
+            bytes(memory.encoded_bytes),
+            bytes(memory.decoded_rgba_bytes),
+            bytes(memory.mipmapped_rgba_bytes),
+        );
         s
     }
+}
+
+fn bytes(value: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    format!("{:.1} MiB", value as f64 / MIB)
 }
 
 #[cfg(test)]
@@ -240,6 +322,45 @@ mod tests {
     fn sample_map(path: &str) -> Option<Map> {
         let path = Path::new(path);
         path.exists().then(|| Map::load(path).unwrap())
+    }
+
+    #[test]
+    fn rgba_estimates_include_every_mip_level() {
+        assert_eq!(rgba8_bytes([1, 1]), 4);
+        assert_eq!(mipmapped_rgba8_bytes([4, 4]), (16 + 4 + 1) * 4);
+        assert_eq!(mipmapped_rgba8_bytes([4, 2]), (8 + 2 + 1) * 4);
+    }
+
+    #[test]
+    fn shared_texture_memory_is_counted_once() {
+        let entry = |material: &str| Entry {
+            material: material.into(),
+            uses: 1,
+            tiles: [1, 1],
+            from_prop: false,
+            texture: Some("shared/sheet".into()),
+            source_size: Some([4, 4]),
+            encoded_bytes: Some(16),
+            decoded_rgba_bytes: Some(64),
+            mipmapped_rgba_bytes: Some(84),
+            resolved: true,
+            alpha_test: false,
+            translucent: false,
+        };
+        let report = TextureReport {
+            map: "fixture".into(),
+            search_path: Vec::new(),
+            entries: vec![entry("a"), entry("b")],
+        };
+        assert_eq!(
+            report.memory_estimate(),
+            TextureMemoryEstimate {
+                distinct_textures: 1,
+                encoded_bytes: 16,
+                decoded_rgba_bytes: 64,
+                mipmapped_rgba_bytes: 84,
+            }
+        );
     }
 
     fn hl2() -> Option<Map> {

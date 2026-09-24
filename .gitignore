@@ -1,3 +1,7 @@
 /target
 # Generated schematics; regenerate with `src2mc convert`.
 /out
+# Local agent guidance includes private machine paths and is intentionally
+# machine-local.
+/AGENTS.md
+/AGENT.md

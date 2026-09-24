@@ -444,6 +444,31 @@ pub struct Props {
     /// the conversion did not build — and moving it there would invent a
     /// position rather than recover one.
     pub settle_max: f64,
+    /// Nudge a prop off converted map geometry it did not intersect in the
+    /// source map.
+    ///
+    /// Voxelizing a brush wall can round its face by up to a block, so a prop
+    /// placed flush against the real surface sometimes reads as embedded in
+    /// the voxel one. The correction measures the true brush plane and moves
+    /// the prop only as far as that rounding, along the collision normal —
+    /// never a whole-block search across a diagonal, which used to throw a
+    /// pipe run or a wall sign yards from where the mapper put it.
+    pub snap: bool,
+    /// How far the sub-block correction above may move a prop, in blocks.
+    ///
+    /// Hard-capped at one block regardless of this setting: the error being
+    /// undone is voxelization rounding, which cannot exceed a block by
+    /// construction, so anything asked for beyond that would be inventing a
+    /// position rather than recovering one. This exists to let the cap be
+    /// tightened, not loosened.
+    pub snap_max: f64,
+    /// Record up to this many individual per-prop snap offsets in
+    /// `diagnostics.json`, beyond the existing summary counts.
+    ///
+    /// Off by default: a map with several thousand props would otherwise
+    /// carry several thousand extra diagnostic entries just to measure a
+    /// change nobody asked to see. Set it when comparing two exports.
+    pub snap_diagnostics_limit: usize,
     /// Props whose longest dimension is at least this many Source units are
     /// solid. Smaller clutter is left walk-through; 0 makes everything solid,
     /// and a huge value nothing.
@@ -531,9 +556,9 @@ impl Default for Props {
             enabled: true,
             min_size: 12.0,
             max_size: 0.0,
-            // Foliage is alpha-tested cards that voxelize into solid slabs,
-            // and there are thousands of them in an outdoor map.
-            skip: vec!["*props_foliage*".into(), "*/foliage/*".into()],
+            // Real mesh export has a cutout path, so foliage is included by
+            // default. A user can still exclude a family explicitly.
+            skip: Vec::new(),
             solidify: 0,
             models: true,
             entity_props: true,
@@ -541,6 +566,9 @@ impl Default for Props {
             texture_repeat_max: 4,
             settle: true,
             settle_max: 1.0,
+            snap: true,
+            snap_max: 1.0,
+            snap_diagnostics_limit: 0,
             collision_min_size: 48.0,
             collision: CollisionMode::Shaped,
             collision_max_shapes: 16_384,
@@ -610,6 +638,7 @@ pub struct Output {
     /// Write a WorldEdit paste macro next to the tiles.
     pub paste_script: bool,
     pub voxelize: Voxelize,
+    pub brush_meshes: BrushMeshes,
 }
 
 impl Default for Output {
@@ -619,6 +648,45 @@ impl Default for Output {
             emit_dimension: false,
             paste_script: true,
             voxelize: Voxelize::default(),
+            brush_meshes: BrushMeshes::default(),
+        }
+    }
+}
+
+/// Drawing the map's thinnest brushes as meshes instead of voxelizing them.
+///
+/// `preserve_thin` keeps a brush thinner than a block alive by filling every
+/// cell it touches, which is right for a 16-unit wall and wrong for a 4-unit
+/// gusset plate: the plate comes out eight times too thick, and a ceiling truss
+/// made of dozens of them voxelizes into a solid ceiling the source map does not
+/// have. At or below `max_thickness_units` a brush is drawn as its real
+/// geometry instead, the same way a prop is, so it keeps its true thickness.
+///
+/// The trade is collision: mesh geometry is visual only, exactly as props are.
+/// The default cut-off is a quarter of a block at 32 units per block. It takes
+/// in the 8-unit plates Source trusses and ceilings are built from, which
+/// voxelize four times too thick, and leaves the 16-unit decking you stand on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BrushMeshes {
+    pub enabled: bool,
+    /// Thickness in Source units, measured against the brush's own faces so an
+    /// angled plate is judged by its real thickness rather than its bounding box.
+    pub max_thickness_units: f64,
+    /// Record the cells a drawn brush covers so the mod can light them as if
+    /// they were solid. Nothing is placed in them: Minecraft only ever blocks
+    /// light with a block, so the mod teaches its light engine about the
+    /// geometry instead. Without this a ceiling of thin plates lets the
+    /// daylight straight through.
+    pub occlude_light: bool,
+}
+
+impl Default for BrushMeshes {
+    fn default() -> Self {
+        BrushMeshes {
+            enabled: true,
+            max_thickness_units: 8.0,
+            occlude_light: true,
         }
     }
 }

@@ -38,6 +38,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Export content for the src2mc NeoForge mod.
+    Mod {
+        #[command(subcommand)]
+        command: ModCommand,
+    },
     /// List the maps inside a VPK archive, ready to pass to any other command.
     ///
     /// Some games ship no loose maps: INFRA keeps all of its inside
@@ -49,6 +54,15 @@ enum Command {
     },
     /// Summarize a map: bounds, counts, and what converting it would cost.
     Inspect {
+        map: PathBuf,
+        #[command(flatten)]
+        common: Common,
+        /// Emit the report as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Measure the Phase 0.5 mod inputs at the fixed 32-units/block scale.
+    ModInventory {
         map: PathBuf,
         #[command(flatten)]
         common: Common,
@@ -124,6 +138,21 @@ enum Command {
         /// Only entities with this classname; repeatable.
         #[arg(long = "classname")]
         classnames: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModCommand {
+    /// Write one campaign bundle and one complete schematic per map.
+    Export {
+        #[arg(required = true)]
+        maps: Vec<PathBuf>,
+        #[command(flatten)]
+        common: Common,
+        #[arg(long)]
+        campaign: String,
+        #[arg(short, long, default_value = "out")]
+        out: PathBuf,
     },
 }
 
@@ -332,6 +361,43 @@ fn load(path: &Path) -> Result<Map> {
     Map::load(path).with_context(|| format!("loading map {}", path.display()))
 }
 
+fn mod_export(maps: &[PathBuf], common: &Common, campaign: &str, out: &Path) -> Result<()> {
+    if let Some(units) = common.units_per_block {
+        anyhow::ensure!(
+            units == src2mc::output::mod_export::UNITS_PER_BLOCK,
+            "mod export has a fixed scale of 32 Source units per block"
+        );
+    }
+    let mut config = common.resolve()?;
+    config.scale.units_per_block = src2mc::output::mod_export::UNITS_PER_BLOCK;
+    let mut exports = Vec::with_capacity(maps.len());
+    for path in maps {
+        let map = load(path)?;
+        eprintln!(
+            "converting {} for mod export at 32 units/block...",
+            map.name
+        );
+        // World geometry and real model props are separate in the new format;
+        // do not let the legacy converter voxelize props into the surface grid.
+        let mut surface_config = config.clone();
+        surface_config.props.enabled = false;
+        let conversion = src2mc::convert::convert(&map, &surface_config)?;
+        exports.push(src2mc::output::mod_export::from_conversion(
+            &map,
+            &config,
+            &conversion,
+        )?);
+    }
+    let written = src2mc::output::mod_export::write_campaign(out, campaign, exports)?;
+    eprintln!(
+        "wrote {} and {} schematic(s); fingerprint {}",
+        written.bundle.display(),
+        written.schematics.len(),
+        written.manifest.fingerprint
+    );
+    Ok(())
+}
+
 /// What one converted map contributed, for the batch index.
 struct Converted {
     name: String,
@@ -375,8 +441,8 @@ fn convert_into(map: &Map, config: &Config, out: &Path, write_pack: bool) -> Res
     }
     if stats.props_modelled > 0 {
         eprintln!(
-            "  {} of them drawn as their own mesh, from {} models",
-            stats.props_modelled, stats.prop_models,
+            "  {} of them drawn as their own mesh, from {} models ({} triangles once deduplicated)",
+            stats.props_modelled, stats.prop_models, stats.prop_triangles,
         );
         eprintln!("  {} settled onto the floor", stats.props_settled);
         if stats.prop_collision_blocks > 0 {
@@ -409,6 +475,10 @@ fn convert_into(map: &Map, config: &Config, out: &Path, write_pack: bool) -> Res
     eprintln!(
         "  {} blocks, from {} of solid world before hollowing",
         stats.blocks, stats.blocks_before_hollow,
+    );
+    eprintln!(
+        "  {} canonical visible-face material/UV records",
+        stats.visible_faces,
     );
     if stats.shapes_fitted > 0 {
         eprintln!(
@@ -700,6 +770,14 @@ fn batch(
 
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Command::Mod { command } => match command {
+            ModCommand::Export {
+                maps,
+                common,
+                campaign,
+                out,
+            } => mod_export(&maps, &common, &campaign, &out)?,
+        },
         Command::Maps { vpk } => {
             let maps = src2mc::bsp::maps_in_vpk(&vpk)?;
             if maps.is_empty() {
@@ -713,6 +791,16 @@ fn main() -> Result<()> {
             let config = common.resolve()?;
             let map = load(&map)?;
             let report = inspect::report(&map, &config);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.render());
+            }
+        }
+        Command::ModInventory { map, common, json } => {
+            let config = common.resolve()?;
+            let map = load(&map)?;
+            let report = src2mc::inventory::report(&map, &config)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {

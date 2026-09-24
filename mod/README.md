@@ -1,8 +1,21 @@
 # src2mc NeoForge mod
 
-Phase 0 is a deliberately empty NeoForge 1.21.1 / Java 21 project. It contains
-no Source-map loading, rendering, converter integration, blocks, props, or
-collision behavior.
+The format, bundle loading, placement lookup, and mod-owned surface renderer
+through Phase 4 are implemented and have passed real-map visual testing. Phase 5
+static prop rendering is functional and under large-map performance work; root
+lifecycle and missing-material handling remain incomplete. The mod registers
+fixed generic world content plus `/src2mc status`, `validate`, `reload`, and
+`reconcile`; client diagnostics include `/src2mc_render_status` and
+`/src2mc_prop_status`. Bundles load by themselves in the background during game
+startup, so `/src2mc reload` is only needed for a bundle that changed on disk —
+see [`docs/bundle-loading.md`](docs/bundle-loading.md). Surface rendering uses
+mod-owned paged textures rather than Minecraft's block atlas; what a shaderpack
+does to the buffers it uploads is in
+[`docs/iris-compat.md`](docs/iris-compat.md). Collision comes in
+Phase 6.
+
+The current implementation state, test paths, verified behavior, known defects,
+and next work are recorded in [`../SESSION_HANDOFF.md`](../SESSION_HANDOFF.md).
 
 This is a clean restart after an unplanned prototype was discarded. The current
 requirements, architecture decisions and phased implementation sequence are:
@@ -11,9 +24,15 @@ requirements, architecture decisions and phased implementation sequence are:
 - [`../docs/decisions.md`](../docs/decisions.md)
 - [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md)
 
-The new interchange format does not exist yet; defining it is Phase 1. The old
-surface-pool bundle format is explicitly retired in
-[`../docs/format.md`](../docs/format.md).
+The version-1 writer, converter `mod export` command, and Phase 2 mod-side
+reader are implemented. The old surface-pool bundle format is
+explicitly retired in [`../docs/format.md`](../docs/format.md).
+
+Export one or several maps from the repository root with:
+
+```sh
+cargo run -- mod export --campaign hl2 --out out path/to/map1.bsp path/to/map2.bsp
+```
 
 ## Requirements
 
@@ -30,6 +49,12 @@ From this directory:
 ```
 
 The development JAR is written to `build/libs/`.
+
+Run the JVM unit tests with:
+
+```sh
+./gradlew test
+```
 
 ## Run the development client
 

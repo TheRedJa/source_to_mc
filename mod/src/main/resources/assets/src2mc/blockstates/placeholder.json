@@ -1,0 +1,5 @@
+{
+  "variants": {
+    "": { "model": "src2mc:block/placeholder" }
+  }
+}
